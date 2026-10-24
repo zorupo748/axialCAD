@@ -233,7 +233,7 @@ fn export(s: &Session, out: &str) -> Result<(), String> {
 fn export_framed(s: &Session, out: &str, window: Option<Bounds2>) -> Result<(), String> {
     let d = s.doc().map_err(|e| e.to_string())?;
     if cadcraft_engine::cmd::file::drops_unknown(out) {
-        let lost = cadcraft_engine::cmd::file::not_saved(d);
+        let lost = cadcraft_engine::cmd::file::not_saved_dwg(d);
         if let Some(m) = cadcraft_engine::cmd::file::not_saved_message(&lost) {
             return Err(m);
         }

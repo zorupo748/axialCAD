@@ -529,7 +529,7 @@ mod native {
         if !unwritable.is_empty() {
             let list: Vec<String> = unwritable.iter().map(|(t, n)| format!("{n} {t}")).collect();
             return Err(format!(
-                "DWG: cannot save without losing data (the DWG writer cannot represent these object types yet; save as DXF to preserve them): {}",
+                "Cannot save to DWG without losing data (its writer cannot represent these object types yet; save as DXF to preserve them): {}",
                 list.join(", ")
             ));
         }
@@ -910,7 +910,7 @@ mod tests {
     fn dxf_to_dwg_rejects_unwritable_entities_with_explicit_error() {
         let dxf = "  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1032\n  0\nENDSEC\n  0\nSECTION\n  2\nENTITIES\n  0\nAEC_WALL\n  5\n100\n  8\n0\n  0\nCUSTOM_EQUIPMENT\n  5\n101\n  8\n0\n  0\nENDSEC\n  0\nEOF\n";
         let err = dxf_to_dwg(dxf.as_bytes()).unwrap_err();
-        assert!(err.contains("cannot save without losing data"), "{err}");
+        assert!(err.contains("Cannot save to DWG without losing data"), "{err}");
         assert!(err.contains("AEC_WALL"), "{err}");
         assert!(err.contains("CUSTOM_EQUIPMENT"), "{err}");
     }

@@ -398,8 +398,7 @@ fn save_as(s: &mut Session, cmd: &str, path: &str, opts: &SaveAs) -> Result<usiz
         return Err(bad(cmd, "A block reference is being edited in place: finish with REFCLOSE (Save or Discard) before saving."));
     }
     if drops_unknown(path) {
-        let version = opts.version.unwrap_or_else(|| drawing_version(s, path));
-        let lost = not_saved_as(s.doc()?, version);
+        let lost = not_saved_dwg(s.doc()?);
         if let Some(msg) = not_saved_message(&lost) {
             return Err(bad(cmd, msg));
         }
@@ -507,9 +506,8 @@ fn run_switch(s: &mut Session, p: &Value) -> Result<Value> {
 fn run_bytes(s: &mut Session, p: &Value) -> Result<Value> {
     let fmt = str_param(p, "format").unwrap_or("dxf");
     let opts = save_options("document.bytes", p)?;
-    let version = opts.version.unwrap_or_else(|| drawing_version(s, &format!("drawing.{fmt}")));
-    let lost = not_saved_as(s.doc()?, version);
     if drops_unknown(&format!("drawing.{fmt}")) {
+        let lost = not_saved_dwg(s.doc()?);
         if let Some(msg) = not_saved_message(&lost) {
             return Err(bad("document.bytes", msg));
         }
@@ -519,7 +517,7 @@ fn run_bytes(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(r)
 }
 
-/// Entities a DXF or DWG file doesn't keep: those of object types CADCraft doesn't model
+/// Entities a DXF file doesn't keep: those of object types CADCraft doesn't model
 /// (3DSOLID, MULTILEADER… read from other programs' files and kept in the drawing, but
 /// not written), counted by DXF type across model space, layouts and block definitions. Saved
 /// at the drawing's own version; see [`not_saved_as`].
@@ -532,8 +530,8 @@ pub fn not_saved(d: &Drawing) -> std::collections::BTreeMap<String, usize> {
 /// store section, which is written back with the drawing (`Foreign::data_store`).
 const MODELER_TYPES: [&str; 3] = ["3DSOLID", "REGION", "BODY"];
 
-/// [`not_saved`] for a file saved as `version`. From 2013 on, a 3D solid, region or body the data
-/// store has a record for keeps its geometry and is not counted.
+/// [`not_saved`] for a DXF file saved as `version`. From 2013 on, a 3D solid, region or body the
+/// data store has a record for keeps its geometry in DXF and is not counted.
 pub fn not_saved_as(d: &Drawing, version: Version) -> std::collections::BTreeMap<String, usize> {
     let mut out: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let stored = if version >= Version::R2013 { d.foreign.data_store_entities() } else { Default::default() };
@@ -543,6 +541,22 @@ pub fn not_saved_as(d: &Drawing, version: Version) -> std::collections::BTreeMap
             if MODELER_TYPES.iter().any(|t| u.dxf_type.eq_ignore_ascii_case(t)) && stored.contains(&e.handle) {
                 continue;
             }
+            let n = out.entry(u.dxf_type.clone()).or_insert(0);
+            *n = n.saturating_add(1);
+        }
+    }
+    out
+}
+
+/// Entities a DWG or DWT file cannot keep: all entity types CADCraft does not model
+/// ([`cadcraft_doc::EntityKind::Unknown`]), counted by DXF type across model space, layouts
+/// and block definitions. Unlike DXF, the DWG bridge cannot reconstruct ACIS geometry from
+/// the data store section, so 3DSOLID, REGION and BODY are always counted as unexportable.
+pub fn not_saved_dwg(d: &Drawing) -> std::collections::BTreeMap<String, usize> {
+    let mut out: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let stores = std::iter::once(&d.model).chain(d.layouts.iter().map(|l| &l.entities)).chain(d.blocks.values().map(|b| &b.entities));
+    for e in stores.flat_map(|s| s.iter()) {
+        if let cadcraft_doc::EntityKind::Unknown(u) = &e.kind {
             let n = out.entry(u.dxf_type.clone()).or_insert(0);
             *n = n.saturating_add(1);
         }
@@ -572,18 +586,8 @@ fn is_drawing_file(path: &str) -> bool {
     matches!(ext.as_str(), "dxf" | "dwg" | "dwt" | "")
 }
 
-/// Save, ensuring drawing data is not lost (aborts with an error if DWG cannot represent entities).
+/// Save, ensuring drawing data is not lost (aborts with an error if DWG cannot represent entities, checked in [`save_as`]).
 fn save_reporting(s: &mut Session, p: &Value, run: fn(&mut Session, &Value) -> Result<Value>) -> Result<Value> {
-    // What the file will hold depends on the version it is saved as (the data store from 2013).
-    let path = str_param(p, "path").map(str::to_string).or_else(|| s.state().ok().and_then(|st| st.path.clone())).unwrap_or_default();
-    let version = save_options("save", p).ok().and_then(|o| o.version).unwrap_or_else(|| drawing_version(s, &path));
-    let lost = s.doc().map(|d| not_saved_as(d, version)).unwrap_or_default();
-    if drops_unknown(&path) {
-        if let Some(msg) = not_saved_message(&lost) {
-            let cmd = if str_param(p, "path").is_some() { "saveas" } else { "qsave" };
-            return Err(bad(cmd, msg));
-        }
-    }
     run(s, p)
 }
 

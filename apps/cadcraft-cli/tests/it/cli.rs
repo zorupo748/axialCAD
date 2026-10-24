@@ -74,7 +74,7 @@ fn cli_export_dwg_rejects_unexportable_entities_and_preserves_file() {
 
     assert!(!output.status.success(), "CLI convert must fail on unexportable data");
     let err = String::from_utf8_lossy(&output.stderr);
-    assert!(err.contains("Cannot save to DWG without losing data") || err.contains("cannot save without losing data"), "{err}");
+    assert!(err.contains("Cannot save to DWG without losing data"), "{err}");
     assert!(err.contains("3DSOLID"), "{err}");
 
     // Target file must be preserved intact!
