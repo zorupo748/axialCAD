@@ -218,6 +218,10 @@ pub struct CadApp {
     pub status: Option<(String, f64)>,
     /// Drawings being read on worker threads ([`opening`]).
     pub opening: opening::Opening,
+    /// LISP routines queued to run once drawing files finish opening.
+    pub pending_lisp: Vec<(String, String)>,
+    /// Whether any drawing finished opening successfully while LISP routines were pending.
+    pub opened_while_pending: bool,
     pub integrated_titlebar: bool,
     control_rx: Option<Receiver<ControlRequest>>,
     pending_shots: Vec<(u64, Option<String>, std::sync::mpsc::Sender<Value>, f64)>,
@@ -274,6 +278,8 @@ impl CadApp {
             cmd: cmdline::CmdLine::default(),
             status: None,
             opening: opening::Opening::default(),
+            pending_lisp: Vec::new(),
+            opened_while_pending: false,
             integrated_titlebar: false,
             control_rx: None,
             pending_shots: Vec::new(),
@@ -455,6 +461,19 @@ impl CadApp {
         }
     }
 
+    /// Open one or more files. When drawings and LISP files are opened together, drawings
+    /// start opening first so LISP routines do not create a blank drawing and run safely once
+    /// a drawing is open.
+    pub fn open_paths(&mut self, paths: &[impl AsRef<str>]) {
+        let (lisp, drawings): (Vec<_>, Vec<_>) = paths.iter().partition(|p| is_lisp_file(p.as_ref()));
+        for d in drawings {
+            self.open_path(d.as_ref());
+        }
+        for l in lisp {
+            self.open_path(l.as_ref());
+        }
+    }
+
     /// Add the files whose background read has finished; report the ones that failed as a failed
     /// OPEN is reported. Called every frame.
     pub fn finish_opening(&mut self) {
@@ -463,16 +482,56 @@ impl CadApp {
                 Ok(f) => self.session.finish_open(f).map_err(|e| e.to_string()),
                 Err(e) => Err(e),
             };
+            if r.is_ok() && !self.pending_lisp.is_empty() {
+                self.opened_while_pending = true;
+            }
             if let Err(e) = &r {
                 self.session.echo(e.clone());
             }
             self.opened(r);
+        }
+        self.drain_pending_lisp();
+    }
+
+    /// Execute or report LISP files that were queued while drawings were opening in the background.
+    fn drain_pending_lisp(&mut self) {
+        if self.pending_lisp.is_empty() {
+            self.opened_while_pending = false;
+            return;
+        }
+        if self.opening.busy() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_lisp);
+        if self.opened_while_pending && !self.session.docs.is_empty() {
+            self.opened_while_pending = false;
+            for (name, text) in pending {
+                if let Err(e) = self.session.lisp_load(&name, &text, false) {
+                    self.session.echo(e.to_string());
+                }
+            }
+        } else {
+            self.opened_while_pending = false;
+            for (name, _) in pending {
+                let msg = format!("APPLOAD: {name} could not be loaded because no drawing was opened");
+                self.session.echo(msg.clone());
+                self.set_status(msg);
+            }
         }
     }
 
     /// Load a LISP file: its routine runs and may wait for the user (APPLOAD typed or from the
     /// menu runs this way too).
     fn load_lisp(&mut self, name: &str, text: &str) {
+        if self.opening.busy() {
+            self.pending_lisp.push((name.to_string(), text.to_string()));
+            return;
+        }
+        if self.session.docs.is_empty() {
+            let metric = self.session.settings.measureinit;
+            self.session.new_drawing(metric);
+            self.ui.start_tab = false;
+        }
         if let Err(e) = self.session.lisp_load(name, text, false) {
             self.session.echo(e.to_string());
         }
@@ -605,10 +664,17 @@ impl CadApp {
         self.autosave_tick(ctx);
         menus::shortcuts(self, ctx);
         #[cfg(not(target_arch = "wasm32"))]
-        for f in ctx.input(|i| i.raw.dropped_files.clone()) {
-            let p = f.path().to_string_lossy().to_string();
-            if !p.is_empty() {
-                self.open_path(&p);
+        {
+            let dropped: Vec<String> = ctx
+                .input(|i| i.raw.dropped_files.clone())
+                .into_iter()
+                .filter_map(|f| {
+                    let p = f.path().to_string_lossy().to_string();
+                    if p.is_empty() { None } else { Some(p) }
+                })
+                .collect();
+            if !dropped.is_empty() {
+                self.open_paths(&dropped);
             }
         }
     }
@@ -771,7 +837,7 @@ pub fn now_ms() -> f64 {
 }
 
 /// A LISP source file, by its name.
-fn is_lisp_file(name: &str) -> bool {
+pub fn is_lisp_file(name: &str) -> bool {
     std::path::Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("lsp"))
 }
 

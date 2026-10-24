@@ -134,3 +134,210 @@ fn start_page_lists_recent_files_and_opens_one_on_click() {
     assert_eq!(app.session.state().ok().and_then(|s| s.path.clone()), Some(plan.clone()));
     assert_eq!(app.ui.recent_files, [plan, section]);
 }
+
+#[test]
+fn start_page_shown_on_empty_session_and_new_switches_to_drawing() {
+    let app = CadApp::new(Session::empty(), Services::default());
+    assert!(app.session.docs.is_empty());
+    let mut h = Harness::builder().with_size(vec2(1200.0, 760.0)).build_ui_state(
+        |ui, app: &mut CadApp| {
+            app.logic(&ui.ctx().clone());
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(3);
+    let mut found = Vec::new();
+    for s in &h.output().shapes {
+        texts(&s.shape, &mut found);
+    }
+    assert!(found.iter().any(|(t, _)| t == "New"), "Start page offers New");
+    assert!(found.iter().any(|(t, _)| t == "New (metric)"), "Start page offers New (metric)");
+
+    // Clicking New creates a drawing and leaves the Start page
+    let new_btn = found.iter().find(|(t, _)| t == "New").unwrap();
+    let at = new_btn.1.center();
+    h.hover_at(at);
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+
+    let app = h.state();
+    assert_eq!(app.session.docs.len(), 1);
+    assert!(!app.ui.start_tab, "start tab is not active once a drawing is created");
+}
+
+#[test]
+fn failed_open_on_empty_session_keeps_start_page_and_reports_error() {
+    let mut app = CadApp::new(Session::empty(), Services::default());
+    let missing = std::env::temp_dir().join(format!("cadcraft-missing-{}.dwg", std::process::id()));
+    app.open_path(&missing.to_string_lossy());
+    settle(&mut app);
+    assert!(app.session.docs.is_empty(), "failed open does not create an empty drawing");
+    assert!(app.status.is_some(), "status bar contains the error");
+}
+
+#[test]
+fn opening_lisp_on_empty_session_creates_drawing_and_loads_routine() {
+    let dir = std::env::temp_dir().join(format!("cadcraft-lisp-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("test.lsp");
+    std::fs::write(&path, b"(defun c:hello () (princ \"world\") (princ))").unwrap();
+    let mut app = CadApp::new(Session::empty(), Services::default());
+    app.open_path(&path.to_string_lossy());
+    assert_eq!(app.session.docs.len(), 1, "loads into a newly created drawing");
+    assert!(!app.ui.start_tab);
+    app.cmdline("hello");
+    assert_eq!(app.session.log.last().map(String::as_str), Some("world"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mixed_open_paths_script_first_loads_into_drawing_without_drawing1() {
+    let (plan, _) = drawings("mix1");
+    let lisp_dir = std::env::temp_dir().join(format!("cadcraft-lisp-mix1-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&lisp_dir);
+    let script = lisp_dir.join("cmd.lsp");
+    std::fs::write(&script, b"(defun c:mixedone () (princ \"mix1-ok\") (princ))").unwrap();
+
+    let mut app = CadApp::new(Session::empty(), Services::default());
+    let files = vec![script.to_string_lossy().to_string(), plan.clone()];
+    app.open_paths(&files);
+
+    // Immediately after open_paths: plan is opening in background, lisp is pending, no Drawing1
+    assert!(app.session.docs.is_empty(), "no Drawing1 created while drawing reads");
+    assert!(app.opening.busy());
+    assert_eq!(app.pending_lisp.len(), 1);
+
+    settle(&mut app);
+
+    // After settle: exactly 1 drawing (plan), lisp is loaded and executed, not on start tab
+    assert_eq!(app.session.docs.len(), 1);
+    assert_eq!(app.session.state().ok().and_then(|s| s.path.clone()), Some(plan));
+    assert!(!app.ui.start_tab);
+    app.cmdline("mixedone");
+    assert_eq!(app.session.log.last().map(String::as_str), Some("mix1-ok"));
+
+    let _ = std::fs::remove_dir_all(&lisp_dir);
+}
+
+#[test]
+fn mixed_open_paths_drawing_first_loads_into_drawing_without_drawing1() {
+    let (plan, _) = drawings("mix2");
+    let lisp_dir = std::env::temp_dir().join(format!("cadcraft-lisp-mix2-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&lisp_dir);
+    let script = lisp_dir.join("cmd2.lsp");
+    std::fs::write(&script, b"(defun c:mixedtwo () (princ \"mix2-ok\") (princ))").unwrap();
+
+    let mut app = CadApp::new(Session::empty(), Services::default());
+    let files = vec![plan.clone(), script.to_string_lossy().to_string()];
+    app.open_paths(&files);
+
+    assert!(app.session.docs.is_empty(), "no Drawing1 created while drawing reads");
+    assert!(app.opening.busy());
+    assert_eq!(app.pending_lisp.len(), 1);
+
+    settle(&mut app);
+
+    assert_eq!(app.session.docs.len(), 1);
+    assert_eq!(app.session.state().ok().and_then(|s| s.path.clone()), Some(plan));
+    assert!(!app.ui.start_tab);
+    app.cmdline("mixedtwo");
+    assert_eq!(app.session.log.last().map(String::as_str), Some("mix2-ok"));
+
+    let _ = std::fs::remove_dir_all(&lisp_dir);
+}
+
+#[test]
+fn drawing_fails_with_pending_lisp_keeps_start_and_reports_explicit_message() {
+    let missing = std::env::temp_dir().join(format!("cadcraft-missing-{}.dwg", std::process::id()));
+    let lisp_dir = std::env::temp_dir().join(format!("cadcraft-lisp-fail-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&lisp_dir);
+    let script = lisp_dir.join("never_run.lsp");
+    std::fs::write(&script, b"(defun c:fail () (princ \"never\") (princ))").unwrap();
+
+    let mut app = CadApp::new(Session::empty(), Services::default());
+    let files = vec![script.to_string_lossy().to_string(), missing.to_string_lossy().to_string()];
+    app.open_paths(&files);
+
+    assert!(app.session.docs.is_empty());
+    assert!(app.opening.busy());
+    assert_eq!(app.pending_lisp.len(), 1);
+
+    settle(&mut app);
+
+    // After failure: session still has 0 docs, no Drawing1
+    assert!(app.session.docs.is_empty(), "no empty drawing created on failure");
+    assert!(app.pending_lisp.is_empty(), "pending lisp was drained and reported");
+    assert!(app.session.log.iter().any(|l| l.contains("could not be loaded because no drawing was opened")), "{:?}", app.session.log);
+    assert!(app.status.as_ref().is_some_and(|(s, _)| s.contains("could not be loaded because no drawing was opened")));
+
+    let _ = std::fs::remove_dir_all(&lisp_dir);
+}
+
+#[test]
+fn opening_second_drawing_with_lisp_does_not_run_on_previous_drawing_before_opening_finishes() {
+    let (first_dwg, second_dwg) = drawings("mix_exist_ok");
+    let lisp_dir = std::env::temp_dir().join(format!("cadcraft-lisp-exist-ok-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&lisp_dir);
+    let script = lisp_dir.join("addline.lsp");
+    std::fs::write(&script, b"(command \"_.LINE\" '(0 0) '(10 10) \"\") (defun c:secondok () (princ \"ran-second\") (princ))").unwrap();
+
+    let mut app = CadApp::new(Session::empty(), Services::default());
+    app.open_path(&first_dwg);
+    settle(&mut app);
+    assert_eq!(app.session.docs.len(), 1);
+    assert_eq!(app.session.docs[0].doc.entity_count(), 0);
+
+    // Open second drawing and lisp together
+    app.open_paths(&[second_dwg.clone(), script.to_string_lossy().to_string()]);
+    assert!(app.opening.busy());
+    assert_eq!(app.pending_lisp.len(), 1);
+
+    // Even if finish_opening is called before reader finishes, routine must not execute on first drawing
+    app.finish_opening();
+    assert_eq!(app.session.docs[0].doc.entity_count(), 0, "first drawing untouched while second is reading");
+
+    settle(&mut app);
+
+    assert_eq!(app.session.docs.len(), 2);
+    assert_eq!(app.session.state().ok().and_then(|s| s.path.clone()), Some(second_dwg));
+    assert_eq!(app.session.docs[0].doc.entity_count(), 0, "first drawing remains untouched after second finishes");
+    assert_eq!(app.session.docs[1].doc.entity_count(), 1, "line was drawn in the newly opened second drawing");
+
+    app.cmdline("secondok");
+    assert_eq!(app.session.log.last().map(String::as_str), Some("ran-second"));
+
+    let _ = std::fs::remove_dir_all(&lisp_dir);
+}
+
+#[test]
+fn failed_second_drawing_with_pending_lisp_does_not_execute_on_previous_drawing() {
+    let (first_dwg, _) = drawings("mix_exist_fail");
+    let lisp_dir = std::env::temp_dir().join(format!("cadcraft-lisp-exist-fail-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&lisp_dir);
+    let script = lisp_dir.join("failtest.lsp");
+    std::fs::write(&script, b"(command \"_.LINE\" '(0 0) '(10 10) \"\") (defun c:neverrun () (princ \"bad\") (princ))").unwrap();
+
+    let mut app = CadApp::new(Session::empty(), Services::default());
+    app.open_path(&first_dwg);
+    settle(&mut app);
+    assert_eq!(app.session.docs.len(), 1);
+    assert_eq!(app.session.docs[0].doc.entity_count(), 0);
+
+    let missing = std::env::temp_dir().join(format!("cadcraft-missing-{}.dwg", std::process::id()));
+    app.open_paths(&[missing.to_string_lossy().to_string(), script.to_string_lossy().to_string()]);
+    assert!(app.opening.busy());
+    assert_eq!(app.pending_lisp.len(), 1);
+
+    settle(&mut app);
+
+    assert_eq!(app.session.docs.len(), 1, "only original drawing remains");
+    assert_eq!(app.session.docs[0].doc.entity_count(), 0, "routine was not executed on the previous drawing");
+    assert!(app.pending_lisp.is_empty(), "pending lisp was drained");
+    assert!(app.session.log.iter().any(|l| l.contains("could not be loaded because no drawing was opened")), "{:?}", app.session.log);
+    assert!(app.status.as_ref().is_some_and(|(s, _)| s.contains("could not be loaded because no drawing was opened")));
+
+    let _ = std::fs::remove_dir_all(&lisp_dir);
+}

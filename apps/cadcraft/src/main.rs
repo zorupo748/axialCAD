@@ -357,17 +357,7 @@ fn main() -> eframe::Result {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);
             }
-            if sample {
-                let _ = app.run("ui.sample", serde_json::json!({}));
-            }
-            for f in &files {
-                app.open_path(f);
-            }
-            if app.session.docs.is_empty() {
-                // In the units the profile asks for (MEASUREINIT, restored above).
-                let metric = app.session.settings.measureinit;
-                app.session.new_drawing(metric);
-            }
+            apply_startup(&mut app, sample, control_port, &files);
             let ctx = cc.egui_ctx.clone();
             let desktop_theme = desktop_theme::DesktopTheme::start(move || ctx.request_repaint());
             let ctx = cc.egui_ctx.clone();
@@ -386,9 +376,55 @@ fn main() -> eframe::Result {
     )
 }
 
+/// Apply startup file opening and initial drawing creation according to CLI options.
+pub(crate) fn apply_startup(
+    app: &mut CadApp,
+    sample: bool,
+    control_port: Option<u16>,
+    files: &[String],
+) {
+    if sample {
+        let _ = app.run("ui.sample", serde_json::json!({}));
+    }
+    app.open_paths(files);
+    if should_create_initial_drawing(
+        sample,
+        control_port.is_some(),
+        files,
+        !app.session.docs.is_empty(),
+        app.opening.busy(),
+    ) {
+        // In the units the profile asks for (MEASUREINIT, restored above).
+        let metric = app.session.settings.measureinit;
+        app.session.new_drawing(metric);
+    }
+}
+
+/// Whether startup should create a new blank drawing (Drawing1) instead of showing the Start page.
+pub(crate) fn should_create_initial_drawing(
+    sample: bool,
+    has_control: bool,
+    files: &[String],
+    has_docs: bool,
+    is_opening: bool,
+) -> bool {
+    if sample || has_docs || is_opening {
+        return false;
+    }
+    if files.iter().any(|f| !cadcraft_ui_egui::is_lisp_file(f)) {
+        return false;
+    }
+    if has_control {
+        return true;
+    }
+    files.iter().any(|f| cadcraft_ui_egui::is_lisp_file(f))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{config_dir_from, control_flag, control_port_from, filters_for_save, follow_desktop};
+    use super::{apply_startup, config_dir_from, control_flag, control_port_from, filters_for_save, follow_desktop, should_create_initial_drawing};
+    use cadcraft_engine::Session;
+    use cadcraft_ui_egui::{CadApp, Services};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -478,5 +514,76 @@ mod tests {
         let mut raw = egui::RawInput::default();
         follow_desktop(&mut raw, None);
         assert_eq!(raw.system_theme, None);
+    }
+
+    #[test]
+    fn startup_without_arguments_shows_start_page_and_does_not_create_drawing() {
+        assert!(!should_create_initial_drawing(false, false, &[], false, false));
+    }
+
+    #[test]
+    fn passing_drawing_files_does_not_create_empty_drawing_while_reading() {
+        assert!(!should_create_initial_drawing(false, false, &["plan.dwg".into()], false, true));
+        assert!(!should_create_initial_drawing(false, false, &["plan.dxf".into()], false, true));
+        assert!(!should_create_initial_drawing(false, false, &["template.dwt".into()], false, true));
+        assert!(!should_create_initial_drawing(false, false, &["plan.dwg".into()], false, false));
+    }
+
+    #[test]
+    fn sample_flag_does_not_create_duplicate_empty_drawing() {
+        assert!(!should_create_initial_drawing(true, false, &[], true, false));
+        assert!(!should_create_initial_drawing(true, false, &[], false, false));
+    }
+
+    #[test]
+    fn control_automation_maintains_initial_drawing_when_no_files_given() {
+        assert!(should_create_initial_drawing(false, true, &[], false, false));
+        assert!(!should_create_initial_drawing(false, true, &["plan.dwg".into()], false, true));
+    }
+
+    #[test]
+    fn failed_file_open_does_not_leave_spurious_drawing_from_startup() {
+        assert!(!should_create_initial_drawing(false, false, &["missing.dwg".into()], false, true));
+        assert!(!should_create_initial_drawing(false, false, &["missing.dwg".into()], false, false));
+    }
+
+    #[test]
+    fn lisp_files_create_initial_drawing_if_no_drawings_specified() {
+        assert!(should_create_initial_drawing(false, false, &["script.lsp".into()], false, false));
+        assert!(!should_create_initial_drawing(false, false, &["plan.dwg".into(), "script.lsp".into()], false, true));
+    }
+
+    #[test]
+    fn apply_startup_mixed_lisp_and_drawing_does_not_create_spurious_drawing() {
+        let dir = std::env::temp_dir().join(format!("cadcraft-main-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("run.lsp");
+        std::fs::write(&script, b"(princ)").unwrap();
+
+        let mut app = CadApp::new(Session::empty(), Services::default());
+        let files = vec![script.to_string_lossy().to_string(), "plan.dwg".to_string()];
+        apply_startup(&mut app, false, None, &files);
+        assert!(app.session.docs.is_empty(), "drawing is still reading in background, no spurious Drawing1");
+        assert!(app.opening.busy(), "drawing background read is in progress");
+        assert_eq!(app.pending_lisp.len(), 1, "lisp is queued pending the drawing");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_startup_drawing_and_lisp_order_does_not_matter() {
+        let dir = std::env::temp_dir().join(format!("cadcraft-main-test2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("run2.lsp");
+        std::fs::write(&script, b"(princ)").unwrap();
+
+        let mut app = CadApp::new(Session::empty(), Services::default());
+        let files = vec!["plan.dwg".to_string(), script.to_string_lossy().to_string()];
+        apply_startup(&mut app, false, None, &files);
+        assert!(app.session.docs.is_empty());
+        assert!(app.opening.busy());
+        assert_eq!(app.pending_lisp.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
