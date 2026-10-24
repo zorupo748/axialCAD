@@ -232,9 +232,15 @@ fn export(s: &Session, out: &str) -> Result<(), String> {
 
 fn export_framed(s: &Session, out: &str, window: Option<Bounds2>) -> Result<(), String> {
     let d = s.doc().map_err(|e| e.to_string())?;
+    let v = cadcraft_engine::cmd::file::effective_save_version(d, out);
     if cadcraft_engine::cmd::file::drops_unknown(out) {
-        let lost = cadcraft_engine::cmd::file::not_saved_dwg(d);
+        let lost = cadcraft_engine::cmd::file::not_saved_as(d, v);
         if let Some(m) = cadcraft_engine::cmd::file::not_saved_message(&lost) {
+            return Err(m);
+        }
+    } else if cadcraft_engine::cmd::file::is_dxf(out) {
+        let lost = cadcraft_engine::cmd::file::acis_data_store_lost_as(d, v);
+        if let Some(m) = cadcraft_engine::cmd::file::dxf_acis_lost_message(v, &lost) {
             return Err(m);
         }
     }

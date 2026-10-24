@@ -116,13 +116,21 @@ fn run_export(s: &mut Session, p: &Value) -> Result<Value> {
     if !EXPORT_FORMATS.contains(&format.as_str()) {
         return Err(bad("export", "`format` must be dxf, dwg, svg, png or pdf (or give a `path` with one of those extensions)"));
     }
+    let doc = s.doc()?;
     if format == "dwg" {
-        let lost = super::file::not_saved_dwg(s.doc()?);
+        let version = super::file::effective_save_version(doc, "export.dwg");
+        let lost = super::file::not_saved_as(doc, version);
         if let Some(msg) = super::file::not_saved_message(&lost) {
             return Err(bad("export", msg));
         }
+    } else if format == "dxf" {
+        let version = super::file::effective_save_version(doc, "export.dxf");
+        let lost = super::file::acis_data_store_lost_as(doc, version);
+        if let Some(msg) = super::file::dxf_acis_lost_message(version, &lost) {
+            return Err(bad("export", msg));
+        }
     }
-    let bytes = (hooks.write)(s.doc()?, &format!("export.{format}")).map_err(|e| bad("export", e))?;
+    let bytes = (hooks.write)(doc, &format!("export.{format}")).map_err(|e| bad("export", e))?;
     match path {
         Some(path) => {
             write_file("export", path, &bytes)?;

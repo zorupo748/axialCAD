@@ -134,7 +134,7 @@ fn save_options(cmd: &str, p: &Value) -> Result<SaveAs> {
 }
 
 /// Whether `path` names a DXF file (or has no extension, which saves as DXF).
-fn is_dxf(path: &str) -> bool {
+pub fn is_dxf(path: &str) -> bool {
     let ext = std::path::Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     matches!(ext.as_str(), "dxf" | "")
 }
@@ -397,9 +397,16 @@ fn save_as(s: &mut Session, cmd: &str, path: &str, opts: &SaveAs) -> Result<usiz
     if s.doc()?.refedit.is_some() {
         return Err(bad(cmd, "A block reference is being edited in place: finish with REFCLOSE (Save or Discard) before saving."));
     }
+    let d: &cadcraft_doc::Drawing = if is_drawing_file(path) { s.state()?.drawing() } else { s.doc()? };
+    let version = opts.version.unwrap_or_else(|| drawing_version(s, path));
     if drops_unknown(path) {
-        let lost = not_saved_dwg(s.doc()?);
+        let lost = not_saved_as(d, version);
         if let Some(msg) = not_saved_message(&lost) {
+            return Err(bad(cmd, msg));
+        }
+    } else if is_dxf(path) {
+        let lost = acis_data_store_lost_as(d, version);
+        if let Some(msg) = dxf_acis_lost_message(version, &lost) {
             return Err(bad(cmd, msg));
         }
     }
@@ -485,12 +492,18 @@ fn run_saveas(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(r)
 }
 
+/// The version `d` is saved in at `path` when none is asked for: its `$ACADVER` (2018 by
+/// default), and for DWG at least 2004 (the io layer's rule: R2000 DWG has no true colours).
+pub fn effective_save_version(d: &Drawing, path: &str) -> Version {
+    let v = d.header.get("ACADVER").and_then(cadcraft_doc::HVal::as_str).and_then(Version::for_acadver).unwrap_or_default();
+    if is_dxf(path) { v } else { v.max(Version::R2004) }
+}
+
 /// The version a drawing is saved in at `path` when none is asked for: its `$ACADVER` (2018 by
 /// default), and for DWG at least 2004 (the io layer's rule: R2000 DWG has no true colours).
-fn drawing_version(s: &Session, path: &str) -> Version {
-    let v =
-        s.doc().ok().and_then(|d| d.header.get("ACADVER").and_then(cadcraft_doc::HVal::as_str).and_then(Version::for_acadver)).unwrap_or_default();
-    if is_dxf(path) { v } else { v.max(Version::R2004) }
+pub fn drawing_version(s: &Session, path: &str) -> Version {
+    let d = if is_drawing_file(path) { s.state().map(|st| st.drawing().as_ref()).ok() } else { s.doc().ok() };
+    d.map(|d| effective_save_version(d, path)).unwrap_or_default()
 }
 
 fn run_switch(s: &mut Session, p: &Value) -> Result<Value> {
@@ -506,18 +519,26 @@ fn run_switch(s: &mut Session, p: &Value) -> Result<Value> {
 fn run_bytes(s: &mut Session, p: &Value) -> Result<Value> {
     let fmt = str_param(p, "format").unwrap_or("dxf");
     let opts = save_options("document.bytes", p)?;
-    if drops_unknown(&format!("drawing.{fmt}")) {
-        let lost = not_saved_dwg(s.doc()?);
+    let path = format!("drawing.{fmt}");
+    let d: &cadcraft_doc::Drawing = if is_drawing_file(&path) { s.state()?.drawing() } else { s.doc()? };
+    let version = opts.version.unwrap_or_else(|| drawing_version(s, &path));
+    if drops_unknown(&path) {
+        let lost = not_saved_as(d, version);
         if let Some(msg) = not_saved_message(&lost) {
             return Err(bad("document.bytes", msg));
         }
+    } else if is_dxf(&path) {
+        let lost = acis_data_store_lost_as(d, version);
+        if let Some(msg) = dxf_acis_lost_message(version, &lost) {
+            return Err(bad("document.bytes", msg));
+        }
     }
-    let bytes = write_bytes(s, "document.bytes", &format!("drawing.{fmt}"), &opts)?;
+    let bytes = write_bytes(s, "document.bytes", &path, &opts)?;
     let r = json!({ "data": base64_encode(&bytes), "bytes": bytes.len() });
     Ok(r)
 }
 
-/// Entities a DXF file doesn't keep: those of object types CADCraft doesn't model
+/// Entities a drawing file doesn't keep: those of object types CADCraft doesn't model
 /// (3DSOLID, MULTILEADER… read from other programs' files and kept in the drawing, but
 /// not written), counted by DXF type across model space, layouts and block definitions. Saved
 /// at the drawing's own version; see [`not_saved_as`].
@@ -530,8 +551,8 @@ pub fn not_saved(d: &Drawing) -> std::collections::BTreeMap<String, usize> {
 /// store section, which is written back with the drawing (`Foreign::data_store`).
 const MODELER_TYPES: [&str; 3] = ["3DSOLID", "REGION", "BODY"];
 
-/// [`not_saved`] for a DXF file saved as `version`. From 2013 on, a 3D solid, region or body the
-/// data store has a record for keeps its geometry in DXF and is not counted.
+/// [`not_saved`] for a drawing file saved as `version`. From 2013 on, a 3D solid, region or body the
+/// data store has a record for keeps its geometry and is not counted.
 pub fn not_saved_as(d: &Drawing, version: Version) -> std::collections::BTreeMap<String, usize> {
     let mut out: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let stored = if version >= Version::R2013 { d.foreign.data_store_entities() } else { Default::default() };
@@ -548,17 +569,24 @@ pub fn not_saved_as(d: &Drawing, version: Version) -> std::collections::BTreeMap
     out
 }
 
-/// Entities a DWG or DWT file cannot keep: all entity types CADCraft does not model
-/// ([`cadcraft_doc::EntityKind::Unknown`]), counted by DXF type across model space, layouts
-/// and block definitions. Unlike DXF, the DWG bridge cannot reconstruct ACIS geometry from
-/// the data store section, so 3DSOLID, REGION and BODY are always counted as unexportable.
-pub fn not_saved_dwg(d: &Drawing) -> std::collections::BTreeMap<String, usize> {
+/// Modeler entities (3DSOLID, REGION, BODY) whose geometry is stored in `ACDSDATA` and would be
+/// lost if saved to a file version older than 2013 (which cannot write the data store).
+pub fn acis_data_store_lost_as(d: &Drawing, version: Version) -> std::collections::BTreeMap<String, usize> {
     let mut out: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    if version >= Version::R2013 {
+        return out;
+    }
+    let stored = d.foreign.data_store_entities();
+    if stored.is_empty() {
+        return out;
+    }
     let stores = std::iter::once(&d.model).chain(d.layouts.iter().map(|l| &l.entities)).chain(d.blocks.values().map(|b| &b.entities));
     for e in stores.flat_map(|s| s.iter()) {
         if let cadcraft_doc::EntityKind::Unknown(u) = &e.kind {
-            let n = out.entry(u.dxf_type.clone()).or_insert(0);
-            *n = n.saturating_add(1);
+            if MODELER_TYPES.iter().any(|t| u.dxf_type.eq_ignore_ascii_case(t)) && stored.contains(&e.handle) {
+                let n = out.entry(u.dxf_type.clone()).or_insert(0);
+                *n = n.saturating_add(1);
+            }
         }
     }
     out
@@ -573,6 +601,19 @@ pub fn not_saved_message(lost: &std::collections::BTreeMap<String, usize>) -> Op
     Some(format!("Cannot save to DWG without losing data (its writer cannot represent these object types yet; save as DXF to preserve them): {}", list.join(", ")))
 }
 
+/// The command-line error for DXF entities whose ACIS geometry is lost in pre-2013 versions.
+pub fn dxf_acis_lost_message(version: Version, lost: &std::collections::BTreeMap<String, usize>) -> Option<String> {
+    if lost.is_empty() {
+        return None;
+    }
+    let list: Vec<String> = lost.iter().map(|(t, n)| format!("{n} {t}")).collect();
+    Some(format!(
+        "Cannot save to DXF {} without losing data (solid modeler geometry in ACDSDATA requires AutoCAD 2013 or later; save as R2013+ DXF to preserve them): {}",
+        version.year(),
+        list.join(", ")
+    ))
+}
+
 /// Whether saving to `path` leaves out the entities [`not_saved`] counts: DWG does (the DWG
 /// bridge drops types it doesn't know); DXF writes them back as read.
 pub fn drops_unknown(path: &str) -> bool {
@@ -581,7 +622,7 @@ pub fn drops_unknown(path: &str) -> bool {
 }
 
 /// Whether `path` is saved as a drawing (DXF, DWG) rather than exported as an image.
-fn is_drawing_file(path: &str) -> bool {
+pub fn is_drawing_file(path: &str) -> bool {
     let ext = std::path::Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     matches!(ext.as_str(), "dxf" | "dwg" | "dwt" | "")
 }
