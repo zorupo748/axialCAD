@@ -953,14 +953,40 @@ fn hostile_raw_data_never_panics() {
     }
 }
 
+fn dwg_compatible_fixture() -> String {
+    let tags = cadcraft_dxf::parse(fixture().as_bytes()).expect("parse fixture");
+    let mut out_tags = Vec::new();
+    for s in sections(&tags) {
+        out_tags.push(Tag::s(0, "SECTION"));
+        out_tags.push(Tag::s(2, &s.name));
+        for (k, t) in records(&s.tags) {
+            if k == "CLASS" && t.iter().any(|x| x.code == 1 && (x.str() == "ACME_WIDGET" || x.str() == "ACME_OBJECT")) {
+                continue;
+            }
+            if k == "ACME_WIDGET" || k == "ACME_OBJECT" {
+                continue;
+            }
+            out_tags.push(Tag::s(0, &k));
+            out_tags.extend(t);
+        }
+        out_tags.push(Tag::s(0, "ENDSEC"));
+    }
+    out_tags.push(Tag::s(0, "EOF"));
+    cadcraft_dxf::write_ascii(&out_tags)
+}
+
 /// Through the DWG bridge (acadrust): what the DWG writer and reader keep of the same data.
 /// Entities and objects of custom classes, xdata on table records and blocks, entities' colour
 /// book names and reactors are not kept there (acadrust gaps); the rest is.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn dwg_keeps_extension_dictionaries_xrecords_and_entity_xdata() {
+    let unexportable = read_dxf(fixture().as_bytes()).expect("read fixture");
+    assert!(cadcraft_io::write(&unexportable, "x.dwg").is_err(), "must reject unexportable classes");
+
+    let clean = read_dxf(dwg_compatible_fixture().as_bytes()).expect("read clean fixture");
     let via_dwg = |d: &Drawing| cadcraft_io::read(&cadcraft_io::write(d, "x.dwg").expect("write DWG"), "x.dwg").expect("read DWG");
-    let d = via_dwg(&via_dwg(&read_dxf(fixture().as_bytes()).expect("read fixture")));
+    let d = via_dwg(&via_dwg(&clean));
     let o = Out::new(&write_dxf(&d));
     assert_eq!(o.dangling(), Vec::<String>::new());
     let line = o.handle("2A").expect("line").1;

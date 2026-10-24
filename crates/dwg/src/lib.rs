@@ -357,42 +357,28 @@ mod native {
         orphans.len()
     }
 
-    /// Leave out what acadrust can't write as this DWG version: other programs' custom entities
-    /// and objects without raw DWG data of that version. acadrust 0.6.4 refuses the whole file
-    /// for one of them (0.6.3 left them out); CADCraft already tells the user which entity types
-    /// a DWG doesn't keep (`not_saved`), so the rest of the drawing is written. Returns how many.
-    fn drop_unwritable(doc: &mut acadrust::CadDocument) -> usize {
+    /// Check for entities and objects acadrust cannot write as this DWG version: other programs'
+    /// custom entities and objects without raw DWG data of that version.
+    fn unwritable_summary(doc: &acadrust::CadDocument) -> std::collections::BTreeMap<String, usize> {
         let version = doc.version;
-        let unwritable: Vec<acadrust::Handle> = doc
-            .entities()
-            .filter_map(|e| match e {
-                acadrust::entities::EntityType::Unknown(u)
-                    if u.raw_dwg_data.is_none() || u.dwg_source_version.is_some_and(|v| v != version) || version == acadrust::DxfVersion::AC1009 =>
-                {
-                    Some(u.common.handle)
+        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for e in doc.entities() {
+            if let acadrust::entities::EntityType::Unknown(u) = e {
+                if u.raw_dwg_data.is_none() || u.dwg_source_version.is_some_and(|v| v != version) || version == acadrust::DxfVersion::AC1009 {
+                    let name = if u.dxf_name.is_empty() { "UNKNOWN".to_string() } else { u.dxf_name.clone() };
+                    *counts.entry(name).or_insert(0) += 1;
                 }
-                _ => None,
-            })
-            .collect();
-        for h in &unwritable {
-            doc.remove_entity(*h);
+            }
         }
-        let objects: Vec<acadrust::Handle> = doc
-            .objects
-            .iter()
-            .filter_map(|(h, o)| match o {
-                acadrust::objects::ObjectType::Unknown { raw_dwg_data, raw_dwg_version, .. }
-                    if raw_dwg_data.is_none() || raw_dwg_version.is_some_and(|v| v != version) || version == acadrust::DxfVersion::AC1009 =>
-                {
-                    Some(*h)
+        for (_, o) in &doc.objects {
+            if let acadrust::objects::ObjectType::Unknown { type_name, raw_dwg_data, raw_dwg_version, .. } = o {
+                if raw_dwg_data.is_none() || raw_dwg_version.is_some_and(|v| v != version) || version == acadrust::DxfVersion::AC1009 {
+                    let name = if type_name.is_empty() { "UNKNOWN_OBJECT".to_string() } else { type_name.clone() };
+                    *counts.entry(name).or_insert(0) += 1;
                 }
-                _ => None,
-            })
-            .collect();
-        for h in &objects {
-            doc.objects.remove(h);
+            }
         }
-        unwritable.len() + objects.len()
+        counts
     }
 
     /// Header variables the DWG reader fills in but acadrust's DXF writer (0.6.3) leaves out of
@@ -539,7 +525,14 @@ mod native {
         other_layout_owners(&mut doc);
         table_style_rows(&mut doc, true);
         dimension_flags(&mut doc);
-        drop_unwritable(&mut doc);
+        let unwritable = unwritable_summary(&doc);
+        if !unwritable.is_empty() {
+            let list: Vec<String> = unwritable.iter().map(|(t, n)| format!("{n} {t}")).collect();
+            return Err(format!(
+                "DWG: cannot save without losing data (the DWG writer cannot represent these object types yet; save as DXF to preserve them): {}",
+                list.join(", ")
+            ));
+        }
         current_dimstyle(&mut doc);
         add_variable_dictionary(&mut doc);
         current_text_style(&mut doc);
@@ -910,5 +903,15 @@ mod tests {
         assert_eq!(ls.iter().filter(|t| t.ends_with("COMPONENT")).count(), 5, "{ls:?}");
         assert!(ls.contains(&"LSDEFINITION") && !ls.contains(&"LSINTERNALCOMPONENT"), "{ls:?}");
         assert_eq!(notes, ["DWG: 3 DGN line style components that no line style definition uses were left out"]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dxf_to_dwg_rejects_unwritable_entities_with_explicit_error() {
+        let dxf = "  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1032\n  0\nENDSEC\n  0\nSECTION\n  2\nENTITIES\n  0\nAEC_WALL\n  5\n100\n  8\n0\n  0\nCUSTOM_EQUIPMENT\n  5\n101\n  8\n0\n  0\nENDSEC\n  0\nEOF\n";
+        let err = dxf_to_dwg(dxf.as_bytes()).unwrap_err();
+        assert!(err.contains("cannot save without losing data"), "{err}");
+        assert!(err.contains("AEC_WALL"), "{err}");
+        assert!(err.contains("CUSTOM_EQUIPMENT"), "{err}");
     }
 }

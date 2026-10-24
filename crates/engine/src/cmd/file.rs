@@ -397,6 +397,13 @@ fn save_as(s: &mut Session, cmd: &str, path: &str, opts: &SaveAs) -> Result<usiz
     if s.doc()?.refedit.is_some() {
         return Err(bad(cmd, "A block reference is being edited in place: finish with REFCLOSE (Save or Discard) before saving."));
     }
+    if drops_unknown(path) {
+        let version = opts.version.unwrap_or_else(|| drawing_version(s, path));
+        let lost = not_saved_as(s.doc()?, version);
+        if let Some(msg) = not_saved_message(&lost) {
+            return Err(bad(cmd, msg));
+        }
+    }
     let bytes = write_bytes(s, cmd, path, opts)?;
     let n = commit_save(s, path, &bytes, store)?;
     if is_drawing_file(path) {
@@ -502,11 +509,13 @@ fn run_bytes(s: &mut Session, p: &Value) -> Result<Value> {
     let opts = save_options("document.bytes", p)?;
     let version = opts.version.unwrap_or_else(|| drawing_version(s, &format!("drawing.{fmt}")));
     let lost = not_saved_as(s.doc()?, version);
-    let bytes = write_bytes(s, "document.bytes", &format!("drawing.{fmt}"), &opts)?;
-    let mut r = json!({ "data": base64_encode(&bytes), "bytes": bytes.len() });
     if drops_unknown(&format!("drawing.{fmt}")) {
-        report_not_saved(s, &mut r, &lost);
+        if let Some(msg) = not_saved_message(&lost) {
+            return Err(bad("document.bytes", msg));
+        }
     }
+    let bytes = write_bytes(s, "document.bytes", &format!("drawing.{fmt}"), &opts)?;
+    let r = json!({ "data": base64_encode(&bytes), "bytes": bytes.len() });
     Ok(r)
 }
 
@@ -541,13 +550,13 @@ pub fn not_saved_as(d: &Drawing, version: Version) -> std::collections::BTreeMap
     out
 }
 
-/// The command-line warning for [`not_saved`] entities, or `None` when the file keeps everything.
+/// The command-line error for [`not_saved`] entities, or `None` when the file keeps everything.
 pub fn not_saved_message(lost: &std::collections::BTreeMap<String, usize>) -> Option<String> {
     if lost.is_empty() {
         return None;
     }
     let list: Vec<String> = lost.iter().map(|(t, n)| format!("{n} {t}")).collect();
-    Some(format!("Not saved in the DWG file (its writer can't write these object types yet; DXF keeps them): {}", list.join(", ")))
+    Some(format!("Cannot save to DWG without losing data (its writer cannot represent these object types yet; save as DXF to preserve them): {}", list.join(", ")))
 }
 
 /// Whether saving to `path` leaves out the entities [`not_saved`] counts: DWG does (the DWG
@@ -563,26 +572,19 @@ fn is_drawing_file(path: &str) -> bool {
     matches!(ext.as_str(), "dxf" | "dwg" | "dwt" | "")
 }
 
-/// Say on the command line what the file couldn't keep, and list it in the result's `notSaved`.
-fn report_not_saved(s: &mut Session, r: &mut Value, lost: &std::collections::BTreeMap<String, usize>) {
-    let Some(msg) = not_saved_message(lost) else { return };
-    s.echo(msg);
-    if let Some(o) = r.as_object_mut() {
-        o.insert("notSaved".into(), json!(lost));
-    }
-}
-
-/// Save, then report the entities the file couldn't keep (nothing is dropped silently).
+/// Save, ensuring drawing data is not lost (aborts with an error if DWG cannot represent entities).
 fn save_reporting(s: &mut Session, p: &Value, run: fn(&mut Session, &Value) -> Result<Value>) -> Result<Value> {
     // What the file will hold depends on the version it is saved as (the data store from 2013).
     let path = str_param(p, "path").map(str::to_string).or_else(|| s.state().ok().and_then(|st| st.path.clone())).unwrap_or_default();
     let version = save_options("save", p).ok().and_then(|o| o.version).unwrap_or_else(|| drawing_version(s, &path));
     let lost = s.doc().map(|d| not_saved_as(d, version)).unwrap_or_default();
-    let mut r = run(s, p)?;
-    if r.get("path").and_then(Value::as_str).is_some_and(drops_unknown) {
-        report_not_saved(s, &mut r, &lost);
+    if drops_unknown(&path) {
+        if let Some(msg) = not_saved_message(&lost) {
+            let cmd = if str_param(p, "path").is_some() { "saveas" } else { "qsave" };
+            return Err(bad(cmd, msg));
+        }
     }
-    Ok(r)
+    run(s, p)
 }
 
 fn run_qsave_reporting(s: &mut Session, p: &Value) -> Result<Value> {
