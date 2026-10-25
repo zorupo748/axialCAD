@@ -249,7 +249,7 @@ pub struct KeyPress {
 
 /// Handle keyboard input destined for the command line (when no text field has focus).
 pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
-    if ctx.egui_wants_keyboard_input() {
+    if ctx.egui_wants_keyboard_input() || app.ui.dialog.is_some() {
         return;
     }
     let events = ctx.input(|i| i.events.clone());

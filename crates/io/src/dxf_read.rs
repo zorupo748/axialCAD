@@ -27,6 +27,9 @@ impl T<'_> {
     fn s(&self, code: i32) -> Option<String> {
         self.0.iter().find(|t| t.code == code).map(Tag::str)
     }
+    fn all_s(&self, code: i32) -> Vec<String> {
+        self.0.iter().filter(|t| t.code == code).map(Tag::str).collect()
+    }
     fn p(&self, code: i32) -> Vec3 {
         Vec3::new(self.fd(code, 0.0), self.fd(code + 10, 0.0), self.fd(code + 20, 0.0))
     }
@@ -520,6 +523,34 @@ fn entity_with_table_budget(kind: &str, tags: &[Tag], table_cells_left: &mut usi
                 text: t.s(1).unwrap_or_default().chars().take(MAX_FRAME_CHARS).collect(),
             })
         }
+        "CADCRAFT_SOLID3D" => {
+            let schema_version = t.i(90).unwrap_or(1) as u32;
+            let status_code = t.i(70).unwrap_or(0);
+            let min = t.p(10);
+            let max = t.p(11);
+            let bbox = cadcraft_doc::solid3d::Bounds3::new(min, max);
+            let recipe: cadcraft_doc::solid3d::Recipe = {
+                let chunks = t.all_s(300);
+                let json_str = if !chunks.is_empty() {
+                    chunks.concat()
+                } else {
+                    t.s(1).unwrap_or_default()
+                };
+                serde_json::from_str(&json_str).unwrap_or_default()
+            };
+            let status = match status_code {
+                1 => cadcraft_doc::solid3d::Solid3dStatus::Pending,
+                2 => cadcraft_doc::solid3d::Solid3dStatus::Failed("saved in failed state".into()),
+                _ => cadcraft_doc::solid3d::Solid3dStatus::Evaluated,
+            };
+            EntityKind::Solid3d(cadcraft_doc::solid3d::Solid3d {
+                schema_version,
+                recipe,
+                bbox,
+                status,
+                faces: Vec::new(),
+            })
+        }
         other => EntityKind::Unknown(Unknown {
             dxf_type: other.to_string(),
             tags: tags.iter().map(|tg| RawTag { code: tg.code, value: tg.str() }).collect(),
@@ -812,13 +843,38 @@ fn hatch(tags: &[Tag], t: &T) -> Option<EntityKind> {
         loops.push(HatchLoop { vertices: verts, outer, sources });
     }
     let solid = solid || pattern.eq_ignore_ascii_case("SOLID");
-    let (scale, angle) = (t.fd(41, 1.0), t.fd(52, 0.0).to_radians());
+    let (mut scale, angle) = (t.fd(41, 1.0), t.fd(52, 0.0).to_radians());
     // Keep the file's definition lines even for a name the library knows: the library's versions
     // of some patterns (AR-CONC) only approximate AutoCAD's, and drawing them at the file's scale
     // could be hundreds of times denser than the hatch the author saw.
-    let pattern_lines = if solid { Vec::new() } else { pattern_definition(tags, scale, angle, origin) };
+    let mut pattern_lines = if solid { Vec::new() } else { pattern_definition(tags, scale, angle, origin) };
+    if !solid && pattern_lines.is_empty() && (pattern.eq_ignore_ascii_case("_U") || pattern.eq_ignore_ascii_case("USER") || t.i(76) == Some(0)) {
+        let spacing = if scale.is_finite() && scale > 1e-4 { scale } else { 1.0 };
+        let double = t.i(77).unwrap_or(0) != 0;
+        let mut lines = vec![cadcraft_doc::library::PatternLine {
+            angle: 0.0,
+            origin: (0.0, 0.0),
+            delta: (0.0, spacing),
+            dashes: Vec::new(),
+        }];
+        if double {
+            lines.push(cadcraft_doc::library::PatternLine {
+                angle: 90.0,
+                origin: (0.0, 0.0),
+                delta: (0.0, spacing),
+                dashes: Vec::new(),
+            });
+        }
+        pattern_lines = lines;
+        scale = 1.0;
+    }
+    let canonical_pattern = if let Some(sp) = cadcraft_doc::library::pattern(&pattern) {
+        sp.name.to_string()
+    } else {
+        pattern.to_ascii_uppercase()
+    };
     Some(EntityKind::Hatch(Hatch {
-        pattern: pattern.to_ascii_uppercase(),
+        pattern: canonical_pattern,
         solid,
         loops,
         scale,
@@ -1223,6 +1279,60 @@ fn parse_entities(
                     if let Some((_, EntityKind::Insert(ins))) = kindent.as_mut() {
                         ins.attribs = attribs;
                     }
+                }
+            }
+            "3DFACE" => {
+                let x = crate::dxf_ext::xdata(tags, crate::dxf_ext::APP);
+                if x.iter().any(|tg| tg.code == 1000 && tg.str() == "SOLID3D_BEGIN") {
+                    let schema_version = x.iter().find(|tg| tg.code == 1070).map(Tag::i64).unwrap_or(1) as u32;
+                    let chunks: Vec<String> = x.iter()
+                        .filter(|tg| tg.code == 1000 && tg.str() != "SOLID3D_BEGIN" && tg.str() != "SOLID3D_PART")
+                        .map(Tag::str)
+                        .collect();
+                    let recipe_json = chunks.concat();
+                    let recipe: cadcraft_doc::solid3d::Recipe = serde_json::from_str(&recipe_json).unwrap_or_default();
+
+                    let mut faces = Vec::new();
+                    faces.push(Face3d {
+                        corners: [t.p(10), t.p(11), t.p(12), t.p(13)],
+                        hidden_edges: t.i(70).unwrap_or(0) as u8,
+                    });
+
+                    while let Some((k2, t2)) = recs.get(i) {
+                        if k2 == "3DFACE" {
+                            let x2 = crate::dxf_ext::xdata(t2, crate::dxf_ext::APP);
+                            if x2.iter().any(|tg| tg.code == 1000 && tg.str() == "SOLID3D_PART") {
+                                let tt2 = T(t2);
+                                faces.push(Face3d {
+                                    corners: [tt2.p(10), tt2.p(11), tt2.p(12), tt2.p(13)],
+                                    hidden_edges: tt2.i(70).unwrap_or(0) as u8,
+                                });
+                                i += 1;
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+
+                    let bbox = {
+                        let mut b = cadcraft_doc::solid3d::Bounds3::EMPTY;
+                        for f in &faces {
+                            for p in &f.corners {
+                                b.add_point(*p);
+                            }
+                        }
+                        b
+                    };
+
+                    kindent = Some((common(&t), EntityKind::Solid3d(cadcraft_doc::solid3d::Solid3d {
+                        schema_version,
+                        recipe,
+                        bbox,
+                        status: cadcraft_doc::solid3d::Solid3dStatus::Evaluated,
+                        faces,
+                    })));
+                } else if x.iter().any(|tg| tg.code == 1000 && tg.str() == "SOLID3D_PART") {
+                    continue;
                 }
             }
             // A VERTEX or ATTRIB with no POLYLINE or INSERT before it; a stray SEQEND holds nothing.

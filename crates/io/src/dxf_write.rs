@@ -1117,11 +1117,19 @@ fn entity(w: &mut W, d: &Drawing, e: &Entity, owner: &str, paper: bool, cx: &Ctx
                 }
             }
             w.i(75, i64::from(h.style));
-            w.i(76, 1);
+            let pat_type = if h.pattern.eq_ignore_ascii_case("_U") || h.pattern.eq_ignore_ascii_case("USER") {
+                0
+            } else if cadcraft_doc::library::pattern_for(d, &h.pattern).is_some() {
+                1
+            } else {
+                2
+            };
+            w.i(76, pat_type);
             if !h.solid {
                 w.f(52, h.angle.to_degrees());
                 w.f(41, h.scale);
-                w.i(77, 0);
+                let double_flag = if pat_type == 0 && h.pattern_lines.len() > 1 { 1 } else { 0 };
+                w.i(77, double_flag);
                 // The lines read from the file, else the library's pattern of that name.
                 let lines = if h.pattern_lines.is_empty() {
                     cadcraft_doc::library::pattern_for(d, &h.pattern).map(|p| p.lines).unwrap_or_default()
@@ -1228,6 +1236,69 @@ fn entity(w: &mut W, d: &Drawing, e: &Entity, owner: &str, paper: bool, cx: &Ctx
             w.p(10, t.insert);
             w.s(1, &t.text);
             w.p(11, t.dir);
+        }
+        EntityKind::Solid3d(s) => {
+            // Write standard 3DFACE entities for universal 3D CAD interoperability (AutoCAD, BricsCAD,
+            // Blender, QCAD, FreeCAD, etc.).
+            // The first 3DFACE carries CADCraft XDATA with the parametric recipe so CADCraft
+            // reconstructs the Solid3d on read without duplicate geometry.
+            let faces: Vec<Face3d> = if !s.faces.is_empty() {
+                s.faces.clone()
+            } else if let Ok(solid_eval) = cadcraft_brep::BrepSolid::evaluate_solid(s) {
+                solid_eval.to_face3d_mesh(0.05).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            let recipe_json = serde_json::to_string(&s.recipe).ok();
+            let recipe_chunks: Vec<String> = if let Some(json) = &recipe_json {
+                // XDATA per entity is strictly capped at 16,383 bytes in AutoCAD/DXF.
+                if json.len() <= 16_000 {
+                    let mut chunks = Vec::new();
+                    let mut start = 0;
+                    while start < json.len() {
+                        let mut end = (start + 255).min(json.len());
+                        while !json.is_char_boundary(end) {
+                            end = end.saturating_sub(1);
+                        }
+                        chunks.push(json[start..end].to_string());
+                        start = end;
+                    }
+                    chunks
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            for (idx, face) in faces.iter().enumerate() {
+                w.s(0, "3DFACE");
+                common(w, e, owner, paper, "AcDbFace");
+                w.p(10, face.corners[0]);
+                w.p(11, face.corners[1]);
+                w.p(12, face.corners[2]);
+                w.p(13, face.corners[3]);
+                w.i(70, i64::from(face.hidden_edges));
+
+                if idx == 0 && !recipe_chunks.is_empty() {
+                    let mut xdata_tags = vec![
+                        Tag::s(1001, dxf_ext::APP),
+                        Tag::s(1000, "SOLID3D_BEGIN"),
+                        Tag::i(1070, i64::from(s.schema_version)),
+                    ];
+                    for chunk in &recipe_chunks {
+                        xdata_tags.push(Tag::s(1000, chunk.as_str()));
+                    }
+                    w.xdata(xdata_tags);
+                } else if !recipe_chunks.is_empty() {
+                    let xdata_tags = vec![
+                        Tag::s(1001, dxf_ext::APP),
+                        Tag::s(1000, "SOLID3D_PART"),
+                    ];
+                    w.xdata(xdata_tags);
+                }
+            }
         }
         // Entity types CADCraft doesn't model aren't written; the save command reports them.
         EntityKind::Unknown(_) => {}

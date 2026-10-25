@@ -311,10 +311,17 @@ pub const SOLID_COVERAGE: f64 = 2.0;
 /// The line families a hatch draws with: the lines its file defined (as its author's CAD drew
 /// them), else the library's pattern of that name as drawn in `d`, else ANSI31.
 fn lines_of(d: &Drawing, h: &Hatch) -> Vec<PatternLine> {
-    if h.pattern_lines.is_empty() {
-        pattern_for(d, &h.pattern).or_else(|| pattern_for(d, "ANSI31")).map(|p| p.lines).unwrap_or_default()
-    } else {
+    if !h.pattern_lines.is_empty() {
         h.pattern_lines.iter().take(MAX_PATTERN_LINES).cloned().collect()
+    } else if h.pattern.eq_ignore_ascii_case("_U") || h.pattern.eq_ignore_ascii_case("USER") {
+        vec![PatternLine {
+            angle: 0.0,
+            origin: (0.0, 0.0),
+            delta: (0.0, 1.0),
+            dashes: Vec::new(),
+        }]
+    } else {
+        pattern_for(d, &h.pattern).or_else(|| pattern_for(d, "ANSI31")).map(|p| p.lines).unwrap_or_default()
     }
 }
 

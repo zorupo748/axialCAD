@@ -21,7 +21,9 @@ pub use pick::{HatchPicks, PickMode};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        CommandSpec::new("hatch", "Hatch...", run_hatch).menu(&["Draw", "Hatch..."]).alias(&["h", "bh", "-hatch"]).params("{points?: [[x,y]] (internal points) and/or handles?: [hex] (closed objects), pattern?: \"ANSI31\" (built in, or defined by patternFile | patternText), patternFile?: path to a .pat file | patternText?: its contents (loads the patterns it defines), scale?, angle? (degrees), associative? (HPASSOC), separate? (HPSEPARATE: a hatch per point/object), origin?: [x,y] (HPORIGIN) | originMode?: \"current\"|\"bottomLeft\"|\"bottomRight\"|\"topLeft\"|\"topRight\"|\"center\" (HPORIGINMODE), style?: \"normal\"|\"outer\"|\"ignore\" (HPISLANDDETECTION)} — gaps up to HPGAPTOL close").interactive(|s| Ok(Box::new(HatchM::new(s, false)))),
+        CommandSpec::new("hatch", "Hatch...", run_hatch).menu(&["Draw", "Hatch..."]).alias(&["h", "bh", "-hatch"]).params("{points?: [[x,y]] (internal points) and/or handles?: [hex] (closed objects), pattern?: \"ANSI31\" (built in, or defined by patternFile | patternText), patternFile?: path to a .pat file | patternText?: its contents (loads the patterns it defines), scale?, angle? (degrees), associative? (HPASSOC), separate? (HPSEPARATE: a hatch per point/object), origin?: [x,y] (HPORIGIN) | originMode?: \"current\"|\"bottomLeft\"|\"bottomRight\"|\"topLeft\"|\"topRight\"|\"center\" (HPORIGINMODE), style?: \"normal\"|\"outer\"|\"ignore\" (HPISLANDDETECTION), spacing?: f64, double?: bool, userDefined?: bool} — gaps up to HPGAPTOL close").interactive(|s| Ok(Box::new(HatchM::new(s, false)))),
+        CommandSpec::new("hatch.diag45", "Diagonal 45° Hatch", run_hatch_diag45).menu(&["Draw", "Hatch...", "Diagonal 45°"]).alias(&["diag45", "hatchdiag45"]).params("{points?: [[x,y]], handles?: [hex], origin?: [x,y]} — Diagonal 45° con separación 4 unidades").interactive(|s| Ok(Box::new(HatchM::new_pattern(s, "Diagonal 45° - separación 4")))),
+        CommandSpec::new("hatch.user", "User-Defined Hatch...", run_hatch_user).menu(&["Draw", "Hatch...", "User-Defined"]).alias(&["hatchuser", "userhatch"]).params("{points?: [[x,y]], handles?: [hex], spacing?: f64 (line distance), angle?: f64 (degrees), double?: bool (cross-hatch), origin?: [x,y], scale?: f64}").interactive(|s| Ok(Box::new(HatchM::new_user_defined(s)))),
         CommandSpec::new("gradient", "Gradient...", run_gradient).menu(&["Draw", "Gradient..."]).alias(&["gd"]).params("{points? and/or handles?, name?: \"LINEAR\"|\"CYLINDER\"|\"CURVED\"|\"SPHERICAL\"|\"HEMISPHERICAL\" or INV… (colours swapped), color1?, color2?, angle? (degrees), centered? (default true)}").interactive(|s| Ok(Box::new(HatchM::new(s, true)))),
         CommandSpec::new("boundary", "Boundary...", run_boundary).menu(&["Draw", "Boundary..."]).alias(&["bo", "bpoly"]).params("{points: [[x,y]]}").interactive(|_| Ok(Box::new(BoundaryM { region: false }))),
         CommandSpec::new("region", "Region", run_region).menu(&["Draw", "Region"]).alias(&["reg"]).params("{handles?}"),
@@ -289,6 +291,7 @@ struct HatchSettings {
     origin: Vec2,
     origin_mode: OriginMode,
     style: u8,
+    custom_lines: Option<Vec<cadcraft_doc::library::PatternLine>>,
 }
 
 impl HatchSettings {
@@ -298,7 +301,41 @@ impl HatchSettings {
             1.0,
             0.0,
         ));
-        let pattern = str_param(p, "pattern").map(str::to_ascii_uppercase).unwrap_or(hdr.0);
+        let raw_pattern = if let Some(pat_name) = str_param(p, "pattern") {
+            if let Some(sp) = cadcraft_doc::library::pattern(pat_name) {
+                sp.name.to_string()
+            } else {
+                pat_name.to_ascii_uppercase()
+            }
+        } else {
+            hdr.0
+        };
+        let is_user = p.get("spacing").is_some()
+            || bool_or(p, "userDefined", false)
+            || raw_pattern == "_U"
+            || raw_pattern == "USER"
+            || raw_pattern == "CUSTOM";
+        let (pattern, custom_lines) = if is_user {
+            let spacing = f64_or(p, "spacing", 1.0).max(1e-4);
+            let double = bool_or(p, "double", false);
+            let mut lines = vec![cadcraft_doc::library::PatternLine {
+                angle: 0.0,
+                origin: (0.0, 0.0),
+                delta: (0.0, spacing),
+                dashes: Vec::new(),
+            }];
+            if double {
+                lines.push(cadcraft_doc::library::PatternLine {
+                    angle: 90.0,
+                    origin: (0.0, 0.0),
+                    delta: (0.0, spacing),
+                    dashes: Vec::new(),
+                });
+            }
+            ("_U".to_string(), Some(lines))
+        } else {
+            (raw_pattern, None)
+        };
         let g = gradient.then(|| Gradient {
             name: str_param(p, "name").and_then(gradient_name).unwrap_or("LINEAR").to_string(),
             color1: str_param(p, "color1").and_then(Color::parse).unwrap_or(Color::Index(5)),
@@ -308,7 +345,7 @@ impl HatchSettings {
         });
         HatchSettings {
             pattern,
-            scale: f64_or(p, "scale", hdr.1).max(1e-9),
+            scale: if is_user { f64_or(p, "scale", 1.0).max(1e-9) } else { f64_or(p, "scale", hdr.1).max(1e-9) },
             angle: p.get("angle").and_then(Value::as_f64).map(f64::to_radians).unwrap_or(hdr.2),
             gradient: g,
             associative: bool_or(p, "associative", s.doc().map_or(true, |d| d.header.i64("HPASSOC", 1) != 0)),
@@ -326,6 +363,7 @@ impl HatchSettings {
             style: str_param(p, "style")
                 .and_then(island_style)
                 .unwrap_or_else(|| s.doc().map_or(0, |d| d.header.i64("HPISLANDDETECTION", 0).clamp(0, 2) as u8)),
+            custom_lines,
         }
     }
     fn hatch(&self, mut loops: Vec<HatchLoop>) -> EntityKind {
@@ -333,6 +371,11 @@ impl HatchSettings {
             loops.iter_mut().for_each(|l| l.sources.clear());
         }
         let solid = self.gradient.is_some() || self.pattern == "SOLID";
+        let lines = if let Some(ref cl) = self.custom_lines {
+            cl.clone()
+        } else {
+            patfile::lines_for(&self.pattern)
+        };
         EntityKind::Hatch(Hatch {
             pattern: if self.gradient.is_some() { "SOLID".into() } else { self.pattern.clone() },
             solid,
@@ -345,14 +388,40 @@ impl HatchSettings {
             elevation: 0.0,
             gradient: self.gradient.clone(),
             background: None,
-            pattern_lines: patfile::lines_for(&self.pattern),
+            pattern_lines: lines,
         })
     }
+}
+
+fn run_hatch_diag45(s: &mut Session, p: &Value) -> Result<Value> {
+    let mut params = p.as_object().cloned().unwrap_or_default();
+    params.insert("pattern".into(), json!("Diagonal 45° - separación 4"));
+    params.insert("scale".into(), json!(1.0));
+    params.insert("angle".into(), json!(0.0));
+    make(s, &Value::Object(params), false)
+}
+
+fn run_hatch_user(s: &mut Session, p: &Value) -> Result<Value> {
+    let mut params = p.as_object().cloned().unwrap_or_default();
+    params.insert("userDefined".into(), json!(true));
+    if !params.contains_key("pattern") {
+        params.insert("pattern".into(), json!("_U"));
+    }
+    make(s, &Value::Object(params), false)
 }
 
 fn make(s: &mut Session, p: &Value, gradient: bool) -> Result<Value> {
     // A zero or negative pattern scale would be clamped to a near-zero spacing.
     size_param(if gradient { "gradient" } else { "hatch" }, p, "scale", false)?;
+    if let Some(v) = p.get("spacing") {
+        let spacing = v.as_f64().ok_or_else(|| bad("hatch", "`spacing` must be a number"))?;
+        if !spacing.is_finite() || spacing <= 0.0 {
+            return Err(bad("hatch", "`spacing` must be positive"));
+        }
+        if spacing < 1e-4 {
+            return Err(bad("hatch", "`spacing` is too small (minimum 0.0001)"));
+        }
+    }
     let cmd = if gradient { "gradient" } else { "hatch" };
     if str_param(p, "style").is_some_and(|t| island_style(t).is_none()) {
         return Err(bad(cmd, "`style` is \"normal\", \"outer\" or \"ignore\""));
@@ -386,6 +455,20 @@ fn make(s: &mut Session, p: &Value, gradient: bool) -> Result<Value> {
         return Err(bad("hatch", "give internal `points` or boundary `handles`"));
     }
     let hs = add_hatches(s, &st, groups)?;
+    if let Ok(doc) = s.doc_mut() {
+        if st.pattern == "_U" {
+            doc.header.set_str("HPNAME", "_U");
+            if let Some(first_line) = st.custom_lines.as_ref().and_then(|l| l.first()) {
+                doc.header.set_f64("HPSPACE", first_line.delta.1);
+            }
+            let is_double = st.custom_lines.as_ref().is_some_and(|l| l.len() > 1);
+            doc.header.set_i64("HPDOUBLE", if is_double { 1 } else { 0 });
+        } else {
+            doc.header.set_str("HPNAME", &st.pattern);
+        }
+        doc.header.set_f64("HPANG", st.angle);
+        doc.header.set_f64("HPSCALE", st.scale);
+    }
     let hex: Vec<String> = hs.iter().map(|h| h.hex()).collect();
     Ok(json!({ "handle": hex.first(), "handles": hex }))
 }
@@ -460,14 +543,40 @@ fn add_hatches(s: &mut Session, st: &HatchSettings, groups: Vec<Vec<HatchLoop>>)
     Ok(out)
 }
 
+pub(crate) fn preview_entities(s: &Session, params: &Value, points: &[[f64; 2]], handles: &[Handle]) -> Vec<EntityKind> {
+    let gradient = params.get("gradient").is_some_and(|g| !g.is_null())
+        || params.get("name").is_some_and(|n| !n.is_null());
+    let st = HatchSettings::from(s, params, gradient);
+    let mut groups: Vec<Vec<HatchLoop>> = Vec::new();
+    for q in points {
+        if let Ok(l) = loops_at(s, Vec2::new(q[0], q[1])) {
+            groups.push(l);
+        }
+    }
+    if !handles.is_empty() {
+        if let Ok(l) = loops_from_handles(s, handles) {
+            groups.push(l);
+        }
+    }
+    if groups.is_empty() {
+        return Vec::new();
+    }
+    let all_loops: Vec<HatchLoop> = groups.into_iter().flatten().collect();
+    vec![st.hatch(all_loops)]
+}
+
 fn run_hatch(s: &mut Session, p: &Value) -> Result<Value> {
     patfile::load_param(p)?;
-    // Like the prompt: a name without a definition would be drawn as ANSI31.
-    if let Some(up) = str_param(p, "pattern").map(str::to_ascii_uppercase)
-        && cadcraft_doc::library::pattern(&up).is_none()
-        && patfile::user_pattern(&up).is_none()
-    {
-        return Err(bad("hatch", format!("unknown pattern {up}: not built in; load it with patternFile or patternText (a .pat file)")));
+    let is_user = p.get("spacing").is_some()
+        || bool_or(p, "userDefined", false)
+        || str_param(p, "pattern").is_some_and(|pat| pat.eq_ignore_ascii_case("_U") || pat.eq_ignore_ascii_case("USER") || pat.eq_ignore_ascii_case("CUSTOM"));
+    if !is_user {
+        if let Some(up) = str_param(p, "pattern").map(str::to_ascii_uppercase)
+            && cadcraft_doc::library::pattern(&up).is_none()
+            && patfile::user_pattern(&up).is_none()
+        {
+            return Err(bad("hatch", format!("unknown pattern {up}: not built in; load it with patternFile or patternText (a .pat file)")));
+        }
     }
     make(s, p, false)
 }
@@ -540,6 +649,7 @@ enum HatchAsk {
     Scale,
     Angle,
     Origin,
+    Spacing,
 }
 
 struct HatchM {
@@ -557,6 +667,30 @@ impl HatchM {
         HatchM {
             gradient,
             settings: HatchSettings::from(s, &Value::Null, gradient),
+            loops: Vec::new(),
+            asking: None,
+            selecting: s.last_used.hatch_select,
+        }
+    }
+    fn new_user_defined(s: &Session) -> Self {
+        let (spacing, double, angle) = s.doc().map(|d| {
+            let sp = d.header.f64("HPSPACE", 1.0);
+            let dbl = d.header.i64("HPDOUBLE", 0) != 0;
+            let ang = d.header.f64("HPANG", 0.0);
+            (if sp.is_finite() && sp > 0.0 { sp } else { 1.0 }, dbl, if ang.is_finite() { ang.to_degrees() } else { 0.0 })
+        }).unwrap_or((1.0, false, 0.0));
+        HatchM {
+            gradient: false,
+            settings: HatchSettings::from(s, &json!({ "userDefined": true, "pattern": "_U", "spacing": spacing, "double": double, "angle": angle }), false),
+            loops: Vec::new(),
+            asking: None,
+            selecting: s.last_used.hatch_select,
+        }
+    }
+    fn new_pattern(s: &Session, pattern_name: &str) -> Self {
+        HatchM {
+            gradient: false,
+            settings: HatchSettings::from(s, &json!({ "pattern": pattern_name, "scale": 1.0, "angle": 0.0 }), false),
             loops: Vec::new(),
             asking: None,
             selecting: s.last_used.hatch_select,
@@ -588,8 +722,18 @@ impl HatchM {
                     Some(n) => n,
                     None => t.trim().to_ascii_uppercase(),
                 };
-                if cadcraft_doc::library::pattern(&up).is_some() || patfile::user_pattern(&up).is_some() {
+                if up == "_U" || up == "USER" || up == "CUSTOM" {
+                    self.settings.pattern = "_U".into();
+                    self.settings.custom_lines = Some(vec![cadcraft_doc::library::PatternLine {
+                        angle: 0.0,
+                        origin: (0.0, 0.0),
+                        delta: (0.0, 1.0),
+                        dashes: Vec::new(),
+                    }]);
+                    s.doc_mut()?.header.set_str("HPNAME", "_U");
+                } else if cadcraft_doc::library::pattern(&up).is_some() || patfile::user_pattern(&up).is_some() {
                     self.settings.pattern = up.clone();
+                    self.settings.custom_lines = None;
                     s.doc_mut()?.header.set_str("HPNAME", &up);
                 } else {
                     s.echo(format!("Unknown pattern {up}. Available: {}", patfile::names().join(", ")));
@@ -599,6 +743,31 @@ impl HatchM {
                 if let Some(v) = super::machines::number(t).filter(|v| v.is_finite() && *v > 0.0) {
                     self.settings.scale = v;
                     s.doc_mut()?.header.set_f64("HPSCALE", v);
+                }
+            }
+            HatchAsk::Spacing => {
+                if let Some(v) = super::machines::number(t).filter(|v| v.is_finite() && *v > 0.0) {
+                    let spacing = v.max(1e-4);
+                    let double = self.settings.custom_lines.as_ref().is_some_and(|l| l.len() > 1);
+                    let mut lines = vec![cadcraft_doc::library::PatternLine {
+                        angle: 0.0,
+                        origin: (0.0, 0.0),
+                        delta: (0.0, spacing),
+                        dashes: Vec::new(),
+                    }];
+                    if double {
+                        lines.push(cadcraft_doc::library::PatternLine {
+                            angle: 90.0,
+                            origin: (0.0, 0.0),
+                            delta: (0.0, spacing),
+                            dashes: Vec::new(),
+                        });
+                    }
+                    self.settings.pattern = "_U".into();
+                    self.settings.custom_lines = Some(lines);
+                    let h = &mut s.doc_mut()?.header;
+                    h.set_str("HPNAME", "_U");
+                    h.set_f64("HPSPACE", spacing);
                 }
             }
             HatchAsk::Angle => {
@@ -648,6 +817,10 @@ impl Interactive for HatchM {
             Some(HatchAsk::Scale) => {
                 return Prompt::new("Specify a scale for the hatch pattern", Accept::NUMBER).default(format!("{:.4}", self.settings.scale));
             }
+            Some(HatchAsk::Spacing) => {
+                let spacing = self.settings.custom_lines.as_ref().and_then(|l| l.first()).map(|l| l.delta.1).unwrap_or(1.0);
+                return Prompt::new("Specify spacing between lines", Accept::NUMBER).default(format!("{:.4}", spacing));
+            }
             Some(HatchAsk::Angle) => {
                 let (au, ap) = s.doc().map(|d| (d.header.i64("AUNITS", 0), d.header.i64("AUPREC", 0))).unwrap_or((0, 0));
                 // Offered as it would be typed: clockwise is positive when ANGDIR is 1.
@@ -659,28 +832,24 @@ impl Interactive for HatchM {
             None => {}
         }
         // The pattern picker stays offered while boundaries are picked: a choice sets the pattern.
-        let picker = |p: Prompt| if self.gradient { p } else { p.picker(Picker::HatchPattern(self.settings.pattern.clone())) };
+        let is_user = self.settings.pattern == "_U";
+        let picker = |p: Prompt| if self.gradient || is_user { p } else { p.picker(Picker::HatchPattern(self.settings.pattern.clone())) };
         if self.selecting {
-            return picker(Prompt::new("Select objects", Accept::SELECT).kw(&[
-                "picK internal point",
-                "Undo",
-                "seTtings",
-                "sCale",
-                "Angle",
-                "Origin",
-                "sEparate",
-            ]));
+            let mut kw = vec!["picK internal point", "Undo", "seTtings"];
+            if is_user {
+                kw.extend(&["Spacing", "Double", "Angle", "Origin", "sEparate"]);
+            } else {
+                kw.extend(&["sCale", "Angle", "Origin", "sEparate"]);
+            }
+            return picker(Prompt::new("Select objects", Accept::SELECT).kw(&kw));
         }
-        picker(Prompt::new("Pick internal point", Accept::POINT).kw(&[
-            "Select objects",
-            "Undo",
-            "seTtings",
-            "Pattern",
-            "sCale",
-            "Angle",
-            "Origin",
-            "sEparate",
-        ]))
+        let mut kw = vec!["Select objects", "Undo", "seTtings"];
+        if is_user {
+            kw.extend(&["Spacing", "Double", "Angle", "Origin", "sEparate"]);
+        } else {
+            kw.extend(&["Pattern", "sCale", "Angle", "Origin", "sEparate"]);
+        }
+        picker(Prompt::new("Pick internal point", Accept::POINT).kw(&kw))
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
         if let Some(a) = self.asking.take() {
@@ -723,6 +892,28 @@ impl Interactive for HatchM {
                     "Undo" => self.loops.clear(),
                     "Pattern" | "seTtings" => self.asking = Some(HatchAsk::Pattern),
                     "sCale" => self.asking = Some(HatchAsk::Scale),
+                    "Spacing" => self.asking = Some(HatchAsk::Spacing),
+                    "Double" => {
+                        let cur_double = self.settings.custom_lines.as_ref().is_some_and(|l| l.len() > 1);
+                        let spacing = self.settings.custom_lines.as_ref().and_then(|l| l.first()).map(|l| l.delta.1).unwrap_or(1.0);
+                        let new_double = !cur_double;
+                        let mut lines = vec![cadcraft_doc::library::PatternLine {
+                            angle: 0.0,
+                            origin: (0.0, 0.0),
+                            delta: (0.0, spacing),
+                            dashes: Vec::new(),
+                        }];
+                        if new_double {
+                            lines.push(cadcraft_doc::library::PatternLine {
+                                angle: 90.0,
+                                origin: (0.0, 0.0),
+                                delta: (0.0, spacing),
+                                dashes: Vec::new(),
+                            });
+                        }
+                        self.settings.custom_lines = Some(lines);
+                        s.echo(if new_double { "Double cross-hatch: on" } else { "Double cross-hatch: off" });
+                    }
                     "Angle" => self.asking = Some(HatchAsk::Angle),
                     "Origin" => self.asking = Some(HatchAsk::Origin),
                     "sEparate" => {

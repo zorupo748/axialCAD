@@ -234,11 +234,27 @@ pub fn standard_patterns() -> Vec<HatchPattern> {
             },
             16.0,
         ),
+        HatchPattern {
+            name: "Diagonal 45° - separación 4",
+            description: "Líneas a 45° separadas 4 unidades",
+            lines: vec![pl(45.0, (0.0, 0.0), (0.0, 4.0), &[])],
+        },
     ]
 }
 
 pub fn pattern(name: &str) -> Option<HatchPattern> {
-    standard_patterns().into_iter().find(|p| p.name.eq_ignore_ascii_case(name))
+    let norm = |s: &str| {
+        s.replace(['ó', 'Ó'], "O")
+            .to_ascii_uppercase()
+            .replace('°', "")
+            .replace([' ', '-', '_'], "")
+    };
+    let target = norm(name);
+    standard_patterns().into_iter().find(|p| {
+        p.name.eq_ignore_ascii_case(name)
+            || norm(p.name) == target
+            || ((target == "DIAG454" || target == "DIAGONAL454") && p.name == "Diagonal 45° - separación 4")
+    })
 }
 
 /// The library pattern `name` as drawn in `d`. In a metric drawing (`MEASUREMENT` 1) every
@@ -247,6 +263,10 @@ pub fn pattern(name: &str) -> Option<HatchPattern> {
 /// what it measures in inches in an imperial drawing.
 pub fn pattern_for(d: &Drawing, name: &str) -> Option<HatchPattern> {
     let p = pattern(name)?;
+    // Defined in absolute drawing units (4 units between lines) regardless of measurement system.
+    if p.name == "Diagonal 45° - separación 4" {
+        return Some(p);
+    }
     Some(if d.header.i64("MEASUREMENT", 0) == 1 { scaled_pattern(p, 25.4) } else { p })
 }
 
@@ -273,5 +293,19 @@ mod tests {
         assert_eq!(imp, Some(0.125));
         assert!(met.is_some_and(|m| (m - 0.125 * 25.4).abs() < 1e-12), "{met:?}");
         assert!(pattern_for(&Drawing::new_metric(), "NOPE").is_none());
+    }
+
+    #[test]
+    fn diagonal_45_separation_4_maintains_exact_drawing_units() {
+        let imp = pattern_for(&Drawing::new_imperial(), "Diagonal 45° - separación 4").expect("found in imperial");
+        let met = pattern_for(&Drawing::new_metric(), "Diagonal 45° - separación 4").expect("found in metric");
+        let met_ascii = pattern_for(&Drawing::new_metric(), "diagonal 45 - separacion 4").expect("found without accents");
+        let alias = pattern_for(&Drawing::new_metric(), "DIAG45_4").expect("found by alias");
+        assert_eq!(imp.lines[0].delta.1, 4.0);
+        assert_eq!(met.lines[0].delta.1, 4.0);
+        assert_eq!(met_ascii.lines[0].delta.1, 4.0);
+        assert_eq!(alias.lines[0].delta.1, 4.0);
+        assert_eq!(met.lines[0].angle, 45.0);
+        assert!(met.lines[0].dashes.is_empty());
     }
 }

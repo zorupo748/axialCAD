@@ -15,6 +15,8 @@ fn harness(state: Option<UiState>, width: f32, scale: f32) -> Harness<'static, C
     app.run("view.set", json!({"center":[100,70],"height":220})).unwrap();
     if let Some(state) = state {
         app.ui = state;
+    } else {
+        app.ui.show_toolsets = true;
     }
     app.ui.in_window_menu = false;
     app.integrated_titlebar = true;

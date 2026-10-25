@@ -6,6 +6,8 @@ use cadcraft_geom::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::solid3d::Solid3d;
+
 mod mline;
 pub use mline::*;
 
@@ -1005,6 +1007,7 @@ pub enum EntityKind {
     Wipeout(Wipeout),
     Table(Table),
     Tolerance(crate::Tolerance),
+    Solid3d(Solid3d),
     Unknown(Unknown),
 }
 
@@ -1059,6 +1062,7 @@ impl EntityKind {
             EntityKind::Wipeout(_) => "Wipeout",
             EntityKind::Table(_) => "Table",
             EntityKind::Tolerance(_) => "Tolerance",
+            EntityKind::Solid3d(_) => "3D Solid",
             EntityKind::Unknown(_) => "Proxy",
         }
     }
@@ -1094,6 +1098,7 @@ impl EntityKind {
             EntityKind::Wipeout(_) => "WIPEOUT",
             EntityKind::Table(_) => "ACAD_TABLE",
             EntityKind::Tolerance(_) => "TOLERANCE",
+            EntityKind::Solid3d(_) => "CADCRAFT_SOLID3D",
             EntityKind::Unknown(u) => u.dxf_type.as_str(),
         }
     }
@@ -1171,6 +1176,19 @@ impl EntityKind {
             EntityKind::Image(i) => vec![Prim::Point(i.insert.xy())],
             EntityKind::Table(t) => vec![Prim::Point(t.insert.xy())],
             EntityKind::Tolerance(t) => vec![Prim::Point(t.insert.xy())],
+            EntityKind::Solid3d(s) => {
+                if s.bbox.is_empty() {
+                    Vec::new()
+                } else {
+                    let (min, max) = (s.bbox.min.xy(), s.bbox.max.xy());
+                    vec![
+                        Prim::Seg(Segment::Line(GLine::new(min, Vec2::new(max.x, min.y)))),
+                        Prim::Seg(Segment::Line(GLine::new(Vec2::new(max.x, min.y), max))),
+                        Prim::Seg(Segment::Line(GLine::new(max, Vec2::new(min.x, max.y)))),
+                        Prim::Seg(Segment::Line(GLine::new(Vec2::new(min.x, max.y), min))),
+                    ]
+                }
+            }
             EntityKind::Unknown(_) => Vec::new(),
         }
     }
@@ -1378,6 +1396,12 @@ impl EntityKind {
                 let a = if mirror { t.rotation() } else { t.rotation() + rot };
                 t.dir = Vec2::from_angle(cadcraft_geom::norm_angle(a)).to3(0.0);
             }
+            EntityKind::Solid3d(s) => {
+                let delta = m.apply(Vec2::ZERO);
+                if delta.x != 0.0 || delta.y != 0.0 {
+                    s.translate(Vec3::new(delta.x, delta.y, 0.0));
+                }
+            }
             EntityKind::Unknown(_) => {}
         }
     }
@@ -1453,6 +1477,13 @@ impl EntityKind {
             EntityKind::Wipeout(w) => w.boundary.clone(),
             EntityKind::Table(t) => vec![t.insert.xy()],
             EntityKind::Tolerance(t) => vec![t.insert.xy()],
+            EntityKind::Solid3d(s) => {
+                if s.bbox.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![s.bbox.min.xy(), s.bbox.max.xy(), s.bbox.center().xy()]
+                }
+            }
             EntityKind::Unknown(_) => Vec::new(),
         }
     }

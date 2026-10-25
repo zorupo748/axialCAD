@@ -295,7 +295,7 @@ pub fn stretch_grip(kind: &EntityKind, index: usize, to: Vec2) -> Option<EntityK
             v.height = h;
         }
         EntityKind::Wipeout(w) => *w.boundary.get_mut(index)? = to,
-        EntityKind::Unknown(_) => return None,
+        EntityKind::Solid3d(_) | EntityKind::Unknown(_) => return None,
     }
     Some(k)
 }

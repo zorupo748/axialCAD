@@ -211,6 +211,13 @@ fn bounds_in<'a>(d: &'a Drawing, e: &Entity, depth: usize, blocks: &mut HashMap<
             Bounds2::from_points([o, o + u, o + v, o + u + v])
         }
         EntityKind::LwPolyline(p) => lwpolyline_bounds(p),
+        EntityKind::Solid3d(s) => {
+            if s.bbox.is_empty() {
+                Bounds2::EMPTY
+            } else {
+                Bounds2::new(s.bbox.min.xy(), s.bbox.max.xy())
+            }
+        }
         kind => {
             let mut b = Bounds2::EMPTY;
             for p in kind.prims() {

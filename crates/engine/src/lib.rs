@@ -708,6 +708,8 @@ pub struct Session {
     lisp_last: Option<std::result::Result<lisp::value::Value, String>>,
     /// What the last HATCHPICK kept (the Hatch and Gradient dialog's picks).
     pub hatch_picks: Option<cmd::hatch::HatchPicks>,
+    /// Hatch preview parameters set during point/boundary picking or dialog preview.
+    pub hatch_preview_params: Option<serde_json::Value>,
 }
 
 impl Default for Session {
@@ -757,6 +759,7 @@ impl Session {
             lisp: lisp::LispState::default(),
             lisp_last: None,
             hatch_picks: None,
+            hatch_preview_params: None,
         }
     }
     pub fn new_drawing(&mut self, metric: bool) -> usize {
@@ -1018,8 +1021,10 @@ impl Session {
         if nested {
             // The outer command stays the one Enter repeats.
             self.echo(format!(">>{}", spec.id.to_ascii_uppercase()));
-        } else {
+        } else if spec.id != "hatchpick" {
             self.last_command = Some(spec.id.to_string());
+            self.echo(format!("Command: {}", spec.id.to_ascii_uppercase()));
+        } else {
             self.echo(format!("Command: {}", spec.id.to_ascii_uppercase()));
         }
         match spec.interactive {
@@ -1454,6 +1459,11 @@ impl Session {
         }
         out.extend(kinds.into_iter().map(|k| Entity { handle: Handle(0), common: common.clone(), kind: k }));
         out
+    }
+
+    /// Preview entities for a hatch with given parameters and points/handles (used by hatch dialog and canvas).
+    pub fn hatch_preview_entities(&self, params: &serde_json::Value, points: &[[f64; 2]], handles: &[Handle]) -> Vec<EntityKind> {
+        cmd::hatch::preview_entities(self, params, points, handles)
     }
 
     /// The active command's preview as a transform of existing objects (see

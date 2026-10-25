@@ -219,6 +219,9 @@ impl Interactive for HatchPickM {
         if loops.is_empty() {
             return Vec::new();
         }
-        vec![HatchSettings::from(s, &Value::Null, false).hatch(loops)]
+        let p = s.hatch_preview_params.as_ref().unwrap_or(&Value::Null);
+        let gradient = p.get("gradient").is_some_and(|g| !g.is_null())
+            || p.get("name").is_some_and(|n| !n.is_null());
+        vec![HatchSettings::from(s, p, gradient).hatch(loops)]
     }
 }

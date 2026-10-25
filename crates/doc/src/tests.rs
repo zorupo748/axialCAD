@@ -581,3 +581,57 @@ fn space_names_its_tab() {
     assert_eq!(p.layout(), Some("Sheet A"));
     assert_eq!(p.tab_name(), "Sheet A");
 }
+
+#[test]
+fn test_solid3d_document_lifecycle() {
+    let mut d = Drawing::new_metric();
+    let mut recipe = Recipe::new();
+    recipe.add_feature(
+        1,
+        FeatureOp::Box {
+            origin: Vec3::new(10.0, 20.0, 30.0),
+            size: Vec3::new(100.0, 50.0, 25.0),
+        },
+    );
+    let bbox = Bounds3::new(Vec3::new(10.0, 20.0, 30.0), Vec3::new(110.0, 70.0, 55.0));
+    let solid = Solid3d::with_bbox(recipe, bbox);
+    let handle = d.add(&Space::Model, Common::default(), EntityKind::Solid3d(solid)).expect("add solid3d");
+
+    // Verify retrieval
+    let ent = d.entity(handle).expect("solid entity found");
+    assert_eq!(ent.kind.type_name(), "3D Solid");
+    let EntityKind::Solid3d(s) = &ent.kind else { panic!("expected Solid3d") };
+    assert_eq!(s.schema_version, SOLID3D_SCHEMA_VERSION);
+    assert_eq!(s.status, Solid3dStatus::Evaluated);
+    assert_eq!(s.bbox.size(), Vec3::new(100.0, 50.0, 25.0));
+
+    // Verify extents
+    let ext = d.extents(&Space::Model);
+    assert_eq!(ext.min, Vec2::new(10.0, 20.0));
+    assert_eq!(ext.max, Vec2::new(110.0, 70.0));
+
+    // Verify drawing clone (undo snapshot) preserves solid and supports CoW mutation
+    let mut cloned = d.clone();
+    cloned
+        .modify_entity(handle, |e| {
+            let EntityKind::Solid3d(s) = &mut e.kind else { panic!("expected Solid3d") };
+            s.translate(Vec3::new(5.0, 0.0, 0.0));
+        })
+        .expect("modify cloned entity");
+
+    let ent_cloned = cloned.entity(handle).expect("cloned entity found");
+    let EntityKind::Solid3d(s_cloned) = &ent_cloned.kind else { panic!("expected Solid3d") };
+    assert_eq!(s_cloned.bbox.min.x, 15.0);
+    assert_eq!(s_cloned.recipe.features.len(), 2);
+
+    // Verify original drawing is unmodified (CoW isolation)
+    let orig = d.entity(handle).expect("orig entity found");
+    let EntityKind::Solid3d(s_orig) = &orig.kind else { panic!("expected Solid3d") };
+    assert_eq!(s_orig.bbox.min.x, 10.0);
+    assert_eq!(s_orig.recipe.features.len(), 1);
+
+    // Verify JSON serialization roundtrip
+    let json = serde_json::to_string(&s_orig).expect("serialize solid");
+    let back: Solid3d = serde_json::from_str(&json).expect("deserialize solid");
+    assert_eq!(back, *s_orig);
+}

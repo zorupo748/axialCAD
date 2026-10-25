@@ -2749,3 +2749,34 @@ fn proxies_keep_their_class_when_classes_are_rewritten() {
         dxf_records(&pairs, "ACAD_PROXY_OBJECT").iter().map(|r| classes[own_91(r).parse::<usize>().unwrap() - 500].clone()).collect();
     assert_eq!(names, ["VISUALSTYLE", "WIDGETX"]);
 }
+
+#[test]
+fn test_solid3d_dxf_roundtrip() {
+    let mut d = Drawing::new_metric();
+    let mut recipe = Recipe::new();
+    recipe.add_feature(
+        1,
+        FeatureOp::Box {
+            origin: Vec3::new(10.0, 20.0, 30.0),
+            size: Vec3::new(100.0, 50.0, 25.0),
+        },
+    );
+    let bbox = Bounds3::new(Vec3::new(10.0, 20.0, 30.0), Vec3::new(110.0, 70.0, 55.0));
+    let solid = Solid3d::with_bbox(recipe, bbox);
+    d.add(&Space::Model, Common::default(), EntityKind::Solid3d(solid)).unwrap();
+
+    let bytes = write(&d, "solid.dxf").unwrap();
+    let back = read(&bytes, "solid.dxf").unwrap();
+
+    let mut solids = back.model.iter().filter_map(|e| match &e.kind {
+        EntityKind::Solid3d(s) => Some(s.clone()),
+        _ => None,
+    });
+    let s = solids.next().expect("roundtrip should find Solid3d");
+    assert_eq!(s.schema_version, 1);
+    assert_eq!(s.status, Solid3dStatus::Evaluated);
+    assert_eq!(s.bbox.min, Vec3::new(10.0, 20.0, 30.0));
+    assert_eq!(s.bbox.max, Vec3::new(110.0, 70.0, 55.0));
+    assert_eq!(s.recipe.features.len(), 1);
+    assert!(matches!(s.recipe.features[0].op, FeatureOp::Box { .. }));
+}

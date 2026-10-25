@@ -1985,6 +1985,20 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             let list = rebuilt_preview(&st.doc, ents.iter(), scale);
             draw_list(&painter, &xf, &list, bg, false);
         }
+    } else if app.ui.dialog.as_deref() == Some("hatch")
+        && let Some(hd) = &app.hatch_dlg
+        && (!hd.points.is_empty() || !hd.handles.is_empty())
+    {
+        let p = crate::hatchdlg::preview_params(&hd.fill);
+        let kinds = app.session.hatch_preview_entities(&p, &hd.points, &hd.handles);
+        if !kinds.is_empty()
+            && let Ok(st) = app.session.state()
+        {
+            let common = app.session.current_common();
+            let ents: Vec<cadcraft_doc::Entity> = kinds.into_iter().map(|k| cadcraft_doc::Entity { handle: cadcraft_doc::Handle(0), common: common.clone(), kind: k }).collect();
+            let list = rebuilt_preview(&st.doc, ents.iter(), scale);
+            draw_list(&painter, &xf, &list, bg, false);
+        }
     }
     // Pending selection window.
     if let (Some(pw), Some(c)) = (app.session.pending_window, raw_world) {

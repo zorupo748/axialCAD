@@ -1,0 +1,22 @@
+[package]
+name = "cadcraft-brep"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cadcraft-geom = { workspace = true }
+cadcraft-doc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# Truck geometry & B-Rep kernel (pinned to audited upstream commit)
+truck-modeling = { git = "https://github.com/ricosjp/truck.git", rev = "78d699b0792b39e27c2bf073b682986701644e91" }
+truck-shapeops = { git = "https://github.com/ricosjp/truck.git", rev = "78d699b0792b39e27c2bf073b682986701644e91" }
+truck-meshalgo = { git = "https://github.com/ricosjp/truck.git", rev = "78d699b0792b39e27c2bf073b682986701644e91" }
+truck-polymesh = { git = "https://github.com/ricosjp/truck.git", rev = "78d699b0792b39e27c2bf073b682986701644e91" }
+truck-stepio = { git = "https://github.com/ricosjp/truck.git", rev = "78d699b0792b39e27c2bf073b682986701644e91" }
+
+[dev-dependencies]

@@ -48,6 +48,8 @@
 	An array that would create more objects than this is refused.	Se rechaza una matriz que crearía más objetos que este límite.
 	Angle	Ángulo
 	Angular	Angular
+	Annotate	Anotar
+	Annotation	Anotación
 	Annotation Visibility	Visibilidad de anotaciones
 	Annotation scale	Escala de anotación
 	Annotative Object Scale	Escala de objeto anotativo
@@ -68,6 +70,7 @@
 	Attribute	Atributo
 	Attribute Definition	Definición de atributo
 	Attribute Display	Visualización de atributos
+	Attributes	Atributos
 	Audit	Verificar dibujo
 	Auto (system language)	Automático (idioma del sistema)
 	Auto Constrain	Restricciones automáticas
@@ -183,10 +186,13 @@
 	Count	Contar
 	Count List	Lista de recuento
 	Count Table	Tabla de recuento
+	Create	Crear
 	Create Block	Crear bloque
 	Creates a user parameter	Crea un parámetro de usuario
 	Crosshair size	Tamaño del cursor en cruz
 	Ctrl+Enter to finish	Ctrl+Intro para terminar
+	Current	Actual
+	Current Layer	Capa actual
 	Current Scale Only	Solo la escala actual
 	Current layer	Capa actual
 	Current selection	Selección actual
@@ -273,6 +279,7 @@
 	Edit Attributes...	Editar atributos...
 	Edit Table Cell	Editar celda de tabla
 	Edit Text...	Editar texto...
+	Editor	Editar
 	Elevation	Elevación
 	Ellipse	Elipse
 	Elliptical Arc	Arco elíptico
@@ -527,12 +534,14 @@
 	MText	Texto multilínea
 	Magenta	Magenta
 	Major line every	Línea principal cada
+	Manage	Administrar
 	Make Current	Establecer actual
 	Make Object's Layer Current	Usar como actual la capa del objeto
 	Make it a block of this drawing, keeping its layer names	Convertirla en un bloque de este dibujo, conservando los nombres de sus capas
 	Make it a block of this drawing; its layers become NAME$0$LAYER	Convertirla en un bloque de este dibujo; sus capas pasan a ser NAME$0$LAYER
 	Make...	Crear...
 	Match Layer	Igualar capa
+	Match Prop	Igualar propiedades
 	Match Properties	Igualar propiedades
 	Measure	Medir
 	Measure Distance	Medir distancia
@@ -543,6 +552,7 @@
 	Midpoint	Punto medio
 	Mirror	Simetría
 	Model	Modelo
+	More	Más
 	Model Space (in viewport)	Espacio modelo (en ventana gráfica)
 	Model background	Fondo del modelo
 	Modeling	Modelado
@@ -630,6 +640,7 @@
 	Ortho Mode (F8)	Modo ortogonal (F8)
 	Osnap Settings...	Configuración de referencia a objetos...
 	Out	Alejar
+	Output	Salida
 	Over-constrained	Restricciones excesivas
 	Overlay	Superposición
 	Override	Modificar
@@ -786,6 +797,7 @@
 	Quadrant	Cuadrante
 	Query Entities	Consultar entidades
 	Quick	Rápido
+	Quick Access Toolbar	Barra de acceso rápido
 	Quick Dimension	Acotación rápida
 	Quick Properties	Propiedades rápidas
 	Quick Select	Selección rápida
@@ -1077,6 +1089,8 @@
 	Specify width for rectangles	Indica la anchura de los rectángulos
 	Sphere	Esfera
 	Spline	Spline
+	Spline Fit	Ajuste de spline
+	Spline CV	Vértices de control de spline
 	Stack (type 1/2 then select)	Apilar (escribe 1/2 y selecciona)
 	Standard	Estándar
 	Start	Inicio
@@ -1154,6 +1168,7 @@
 	User Parameters	Parámetros de usuario
 	User Preferences	Preferencias de usuario
 	Username	Nombre de usuario
+	Utilities	Utilidades
 	VP Color	Color en ventana gráfica
 	VP Freeze	Inutilizar en ventana gráfica
 	Value	Valor
@@ -1247,3 +1262,11 @@
 	Not a number or distance: {text}	No es un número ni una distancia: {text}
 	Query Texts	Consultar textos
 	Analyze Shapes	Analizar formas
+	User-Defined Hatch	Sombreado personalizado
+	User-Defined Hatch...	Sombreado personalizado...
+	User-defined	Personalizado
+	Predefined	Predefinido
+	Spacing	Separación
+	Double	Cruzado
+	Diagonal 45° - separación 4	Diagonal 45° - separación 4
+	Diagonal 45° Hatch	Sombreado diagonal 45°

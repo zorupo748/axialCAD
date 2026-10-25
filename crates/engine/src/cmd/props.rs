@@ -390,16 +390,72 @@ fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
                 }
                 EntityKind::Hatch(h) => {
                     if let Some(v) = str_param(p, "pattern") {
-                        if !h.pattern.eq_ignore_ascii_case(v) {
-                            h.pattern_lines = super::hatch::lines_for(v);
+                        let up = v.to_ascii_uppercase();
+                        if !h.pattern.eq_ignore_ascii_case(&up) {
+                            if up == "_U" || up == "USER" {
+                                let spacing = p.get("spacing").and_then(Value::as_f64).filter(|x| x.is_finite() && *x > 0.0).unwrap_or(1.0);
+                                let double = bool_or(p, "double", false);
+                                let mut lines = vec![cadcraft_doc::library::PatternLine {
+                                    angle: 0.0,
+                                    origin: (0.0, 0.0),
+                                    delta: (0.0, spacing),
+                                    dashes: Vec::new(),
+                                }];
+                                if double {
+                                    lines.push(cadcraft_doc::library::PatternLine {
+                                        angle: 90.0,
+                                        origin: (0.0, 0.0),
+                                        delta: (0.0, spacing),
+                                        dashes: Vec::new(),
+                                    });
+                                }
+                                h.pattern_lines = lines;
+                            } else {
+                                h.pattern_lines = super::hatch::lines_for(&up);
+                            }
+                            h.pattern = up;
                         }
-                        h.pattern = v.to_ascii_uppercase();
-                        // The old pattern's definition lines no longer apply.
-                        h.pattern_lines.clear();
                         h.solid = h.pattern == "SOLID";
                         if !h.solid {
                             // A named pattern replaces the gradient fill; the renderer draws the gradient first when it is set.
                             h.gradient = None;
+                        }
+                    }
+                    if h.pattern == "_U" || h.pattern == "USER" {
+                        if let Some(sp) = p.get("spacing").and_then(Value::as_f64).filter(|x| x.is_finite() && *x > 0.0) {
+                            let double = bool_or(p, "double", h.pattern_lines.len() > 1);
+                            let mut lines = vec![cadcraft_doc::library::PatternLine {
+                                angle: 0.0,
+                                origin: (0.0, 0.0),
+                                delta: (0.0, sp),
+                                dashes: Vec::new(),
+                            }];
+                            if double {
+                                lines.push(cadcraft_doc::library::PatternLine {
+                                    angle: 90.0,
+                                    origin: (0.0, 0.0),
+                                    delta: (0.0, sp),
+                                    dashes: Vec::new(),
+                                });
+                            }
+                            h.pattern_lines = lines;
+                        } else if let Some(dbl) = p.get("double").and_then(Value::as_bool) {
+                            let sp = h.pattern_lines.first().map(|pl| pl.delta.1.abs()).filter(|x| *x > 0.0).unwrap_or(1.0);
+                            let mut lines = vec![cadcraft_doc::library::PatternLine {
+                                angle: 0.0,
+                                origin: (0.0, 0.0),
+                                delta: (0.0, sp),
+                                dashes: Vec::new(),
+                            }];
+                            if dbl {
+                                lines.push(cadcraft_doc::library::PatternLine {
+                                    angle: 90.0,
+                                    origin: (0.0, 0.0),
+                                    delta: (0.0, sp),
+                                    dashes: Vec::new(),
+                                });
+                            }
+                            h.pattern_lines = lines;
                         }
                     }
                     if let Some(x) = num("scale").filter(|x| *x > 0.0) {

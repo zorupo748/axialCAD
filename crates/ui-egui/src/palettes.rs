@@ -317,7 +317,7 @@ fn section_header(ui: &mut egui::Ui, title: &str) -> Rect {
     hr
 }
 
-fn swatch(p: &egui::Painter, r: Rect, c: Color) {
+pub(crate) fn swatch(p: &egui::Painter, r: Rect, c: Color) {
     let rgb = c.resolve(Color::Index(7), Color::Index(7));
     p.rect_filled(r, 1.0, Color32::from_rgb(rgb.0, rgb.1, rgb.2));
     p.rect_stroke(r, 1.0, Stroke::new(1.0, Color32::from_gray(30)), egui::StrokeKind::Inside);
@@ -1079,7 +1079,19 @@ pub(crate) fn properties_section(app: &mut CadApp, ui: &mut egui::Ui) {
                         }
                     });
                 });
-                num(ui, "Scale", "scale", real(hh.scale), &mut set, &mut bad, &ids);
+                let is_user = hh.pattern.eq_ignore_ascii_case("_U") || hh.pattern.eq_ignore_ascii_case("USER");
+                if is_user {
+                    let cur_sp = hh.pattern_lines.first().map(|pl| pl.delta.1.abs()).unwrap_or(1.0);
+                    num(ui, "Spacing", "spacing", real(cur_sp), &mut set, &mut bad, &ids);
+                    let mut dbl = hh.pattern_lines.len() > 1;
+                    prop_row(ui, "Double", |ui| {
+                        if ui.checkbox(&mut dbl, "").changed() {
+                            set = Some(json!({ "handles": ids, "double": dbl }));
+                        }
+                    });
+                } else {
+                    num(ui, "Scale", "scale", real(hh.scale), &mut set, &mut bad, &ids);
+                }
                 num(ui, "Angle", "angle", real(hh.angle.to_degrees()), &mut set, &mut bad, &ids);
             }
             EntityKind::Dimension(dm) => {

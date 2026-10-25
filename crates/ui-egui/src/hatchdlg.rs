@@ -22,8 +22,11 @@ pub(crate) const ORIGIN_MODES: [&str; 5] = ["bottomLeft", "bottomRight", "topRig
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fill {
     pub gradient: bool,
+    pub user_defined: bool,
     pub pattern: String,
     pub scale: f64,
+    pub spacing: f64,
+    pub double: bool,
     /// Pattern or gradient angle, degrees.
     pub angle: f64,
     /// One of [`SHAPES`].
@@ -78,10 +81,17 @@ pub fn create_state(d: &Drawing, uid: u64, gradient: bool) -> HatchDlgState {
     let angle = Some(h.f64("HPANG", 0.0).to_degrees()).filter(|v| v.is_finite()).unwrap_or(0.0);
     let mode = h.i64("HPORIGINMODE", 0);
     let origin_mode = mode.checked_sub(1).and_then(|i| usize::try_from(i).ok()).and_then(|i| ORIGIN_MODES.get(i)).copied().unwrap_or("bottomLeft");
+    let hpname = h.str("HPNAME", "ANSI31");
+    let is_user = hpname.eq_ignore_ascii_case("_U") || hpname.eq_ignore_ascii_case("USER");
+    let spacing = Some(h.f64("HPSPACE", 1.0)).filter(|v| v.is_finite() && *v > 0.0).unwrap_or(1.0);
+    let double = h.i64("HPDOUBLE", 0) != 0;
     let fill = Fill {
         gradient,
-        pattern: h.str("HPNAME", "ANSI31"),
+        user_defined: is_user,
+        pattern: hpname,
         scale,
+        spacing,
+        double,
         angle,
         shape: "LINEAR".into(),
         inverted: false,
@@ -123,6 +133,14 @@ pub fn edit_state(d: &Drawing, uid: u64, handles: Vec<Handle>) -> Option<HatchDl
     // A gradient's own pattern is SOLID; its Pattern tab offers the current pattern (HPNAME).
     if first.gradient.is_none() {
         f.pattern = first.pattern.clone();
+        if first.pattern.eq_ignore_ascii_case("_U")
+            || first.pattern.eq_ignore_ascii_case("USER")
+            || (!first.pattern_lines.is_empty() && cadcraft_doc::library::pattern(&first.pattern).is_none())
+        {
+            f.user_defined = true;
+            f.spacing = first.pattern_lines.first().map(|pl| pl.delta.1.abs()).filter(|s| *s > 0.0).unwrap_or(1.0);
+            f.double = first.pattern_lines.len() > 1;
+        }
     }
     f.scale = if first.scale.is_finite() && first.scale > 0.0 { first.scale } else { 1.0 };
     f.angle = Some(first.angle.to_degrees()).filter(|a| a.is_finite()).unwrap_or(0.0);
@@ -188,6 +206,12 @@ pub fn ok_call(st: &HatchDlgState) -> Option<(&'static str, Value)> {
             p.insert("color1".into(), json!(f.color1.name()));
             p.insert("color2".into(), json!(f.color2.name()));
             p.insert("centered".into(), json!(f.centered));
+        } else if f.user_defined {
+            p.insert("pattern".into(), json!("_U"));
+            p.insert("userDefined".into(), json!(true));
+            p.insert("spacing".into(), json!(f.spacing));
+            p.insert("double".into(), json!(f.double));
+            p.insert("scale".into(), json!(1.0));
         } else {
             p.insert("pattern".into(), json!(f.pattern));
             p.insert("scale".into(), json!(f.scale));
@@ -201,7 +225,7 @@ pub fn ok_call(st: &HatchDlgState) -> Option<(&'static str, Value)> {
             (true, None) => p.insert("originMode".into(), json!(f.origin_mode)),
             (false, _) => p.insert("originMode".into(), json!("current")),
         };
-        return Some((if f.gradient { "gradient" } else { "hatch" }, Value::Object(p)));
+        return Some((if f.gradient { "gradient" } else if f.user_defined { "hatch.user" } else { "hatch" }, Value::Object(p)));
     }
     let o = &st.opened;
     if !st.points.is_empty() {
@@ -227,8 +251,15 @@ pub fn ok_call(st: &HatchDlgState) -> Option<(&'static str, Value)> {
                 json!({ "name": gradient_name(f), "color1": f.color1.name(), "color2": f.color2.name(), "angle": f.angle, "centered": f.centered }),
             );
         }
+    } else if f.user_defined {
+        p.insert("userDefined".into(), json!(true));
+        p.insert("pattern".into(), json!("_U"));
+        p.insert("spacing".into(), json!(f.spacing));
+        p.insert("double".into(), json!(f.double));
+        p.insert("scale".into(), json!(1.0));
+        p.insert("angle".into(), json!(f.angle));
     } else {
-        if o.gradient || f.pattern != o.pattern {
+        if o.gradient || o.user_defined || f.pattern != o.pattern {
             p.insert("pattern".into(), json!(f.pattern));
         }
         if f.scale != o.scale {
@@ -255,6 +286,29 @@ pub fn ok_call(st: &HatchDlgState) -> Option<(&'static str, Value)> {
     }
     p.insert("handles".into(), hexes(&st.edit));
     Some(("hatchedit", Value::Object(p)))
+}
+
+/// Parameter map for rendering a live preview of `fill`.
+pub fn preview_params(f: &Fill) -> Value {
+    let mut p = serde_json::Map::new();
+    if f.gradient {
+        p.insert(
+            "gradient".into(),
+            json!({ "name": gradient_name(f), "color1": f.color1.name(), "color2": f.color2.name(), "angle": f.angle, "centered": f.centered }),
+        );
+    } else if f.user_defined {
+        p.insert("userDefined".into(), json!(true));
+        p.insert("pattern".into(), json!("_U"));
+        p.insert("spacing".into(), json!(f.spacing));
+        p.insert("double".into(), json!(f.double));
+        p.insert("scale".into(), json!(1.0));
+        p.insert("angle".into(), json!(f.angle));
+    } else {
+        p.insert("pattern".into(), json!(f.pattern));
+        p.insert("scale".into(), json!(f.scale));
+        p.insert("angle".into(), json!(f.angle));
+    }
+    Value::Object(p)
 }
 
 /// Take a HATCHPICK's picks into the dialog (Hatch picks are taken by `resume`).
@@ -293,6 +347,28 @@ pub fn open_create(app: &mut CadApp, gradient: bool) {
     app.ui.dialog = Some("hatch".into());
 }
 
+/// Create mode (User-Defined Hatch): the dialog initialized with user-defined pattern mode.
+pub fn open_create_user(app: &mut CadApp) {
+    let Ok(st) = app.session.state() else { return };
+    let mut dlg = create_state(&st.doc, st.uid, false);
+    dlg.fill.user_defined = true;
+    dlg.fill.pattern = "_U".into();
+    dlg.space = st.edit_space();
+    app.hatch_dlg = Some(dlg);
+    app.ui.dialog = Some("hatch".into());
+}
+
+/// Create mode initialized with a specific pattern.
+pub fn open_create_pattern(app: &mut CadApp, pattern_name: &str) {
+    let Ok(st) = app.session.state() else { return };
+    let mut dlg = create_state(&st.doc, st.uid, false);
+    dlg.fill.user_defined = false;
+    dlg.fill.pattern = pattern_name.to_string();
+    dlg.space = st.edit_space();
+    app.hatch_dlg = Some(dlg);
+    app.ui.dialog = Some("hatch".into());
+}
+
 /// Edit mode (HATCHEDIT, right-click, double-click) on the selected hatches; with none selected,
 /// pick a hatch first.
 pub fn open_edit(app: &mut CadApp) {
@@ -320,6 +396,7 @@ pub fn start_pick(app: &mut CadApp, mode: PickMode) {
     st.picking = Some(mode);
     st.error = None;
     app.session.hatch_picks = None;
+    app.session.hatch_preview_params = Some(preview_params(&st.fill));
     app.ui.dialog = None;
     app.start("hatchpick");
     let kw = match mode {
@@ -358,6 +435,7 @@ pub fn resume(app: &mut CadApp) {
     } else if let Some(p) = picks {
         merge_picks(&mut st, p);
     }
+    app.session.hatch_preview_params = None;
     app.hatch_dlg = Some(st);
     app.ui.dialog = Some("hatch".into());
 }
@@ -368,11 +446,19 @@ pub fn ok(app: &mut CadApp) -> bool {
     let Some(call) = app.hatch_dlg.as_ref().map(ok_call) else { return true };
     let Some((cmd, p)) = call else {
         app.hatch_dlg = None;
+        app.session.hatch_preview_params = None;
+        app.session.hatch_picks = None;
         return true;
     };
     match app.run(cmd, p) {
         Ok(_) => {
             app.hatch_dlg = None;
+            app.session.hatch_preview_params = None;
+            app.session.hatch_picks = None;
+            app.session.last_command = Some(cmd.to_string());
+            if app.session.running.as_ref().is_some_and(|r| r.id == "hatchpick") {
+                app.session.cancel();
+            }
             true
         }
         Err(e) => {
@@ -456,6 +542,11 @@ pub fn dialog(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
             if ui.button(crate::tl!("Cancel")).clicked() {
                 action = Action::Cancel;
             }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                action = Action::Cancel;
+            } else if ui.input(|i| i.key_pressed(egui::Key::Enter)) && ready {
+                action = Action::Ok;
+            }
         });
     });
     app.hatch_dlg = Some(st);
@@ -467,12 +558,22 @@ pub fn dialog(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
         }
         Action::Cancel => {
             app.hatch_dlg = None;
+            app.session.hatch_preview_params = None;
+            app.session.hatch_picks = None;
+            if app.session.running.as_ref().is_some_and(|r| r.id == "hatchpick") {
+                app.session.cancel();
+            }
             *open = false;
         }
         Action::Pick(mode) => start_pick(app, mode),
         Action::None => {
             if !*open {
                 app.hatch_dlg = None;
+                app.session.hatch_preview_params = None;
+                app.session.hatch_picks = None;
+                if app.session.running.as_ref().is_some_and(|r| r.id == "hatchpick") {
+                    app.session.cancel();
+                }
             }
         }
     }
@@ -480,8 +581,21 @@ pub fn dialog(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
 
 fn fill_ui(ui: &mut egui::Ui, f: &mut Fill, action: &mut Action) {
     ui.horizontal(|ui| {
-        ui.selectable_value(&mut f.gradient, false, crate::tl!("Pattern"));
-        ui.selectable_value(&mut f.gradient, true, crate::tl!("Gradient"));
+        if ui.selectable_label(!f.gradient && !f.user_defined, crate::tl!("Predefined")).clicked() {
+            f.gradient = false;
+            f.user_defined = false;
+        }
+        if ui.selectable_label(!f.gradient && f.user_defined, crate::tl!("User-defined")).clicked() {
+            f.gradient = false;
+            f.user_defined = true;
+            if f.pattern != "_U" && f.pattern != "USER" {
+                f.pattern = "_U".into();
+            }
+        }
+        if ui.selectable_label(f.gradient, crate::tl!("Gradient")).clicked() {
+            f.gradient = true;
+            f.user_defined = false;
+        }
     });
     ui.separator();
     if f.gradient {
@@ -513,7 +627,24 @@ fn fill_ui(ui: &mut egui::Ui, f: &mut Fill, action: &mut Action) {
             ui.add(egui::DragValue::new(&mut f.angle).speed(1.0).range(-360.0..=360.0).clamp_existing_to_range(false).suffix("°"));
             ui.end_row();
         });
+    } else if f.user_defined {
+        egui::Grid::new("hatch_user_defined").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
+            ui.label(crate::tl!("Angle"));
+            ui.add(egui::DragValue::new(&mut f.angle).speed(1.0).range(-360.0..=360.0).clamp_existing_to_range(false).suffix("°"));
+            ui.end_row();
+
+            ui.label(crate::tl!("Spacing"));
+            ui.add(egui::DragValue::new(&mut f.spacing).speed(0.1).range(0.0001..=1.0e6).clamp_existing_to_range(true));
+            ui.end_row();
+
+            ui.label("");
+            ui.checkbox(&mut f.double, crate::tl!("Double"));
+            ui.end_row();
+        });
     } else {
+        ui.horizontal(|ui| {
+            ui.label(format!("{}: {}", crate::tl!("Pattern"), f.pattern));
+        });
         egui::ScrollArea::vertical().id_salt("hatch_swatches").max_height(220.0).show(ui, |ui| {
             if let Some(name) = crate::palettes::patterns::grid(ui, &f.pattern, "") {
                 f.pattern = name;

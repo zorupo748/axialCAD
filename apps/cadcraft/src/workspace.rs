@@ -36,6 +36,9 @@ fn snapshot(ui: &UiState) -> Result<Value, String> {
     if !matches!(ui.toolset_tab.as_str(), "Drafting" | "Modeling") {
         return Err("toolsetTab must be Drafting or Modeling".into());
     }
+    if ui.ribbon_tab.len() > 64 {
+        return Err("ribbonTab exceeds the workspace size limit".into());
+    }
     if ui.collapsed_groups.len() > 64 || ui.collapsed_groups.iter().any(|name| name.len() > 256) {
         return Err("collapsedGroups exceeds the workspace size limit".into());
     }
@@ -53,6 +56,9 @@ fn snapshot(ui: &UiState) -> Result<Value, String> {
         "showViewcube": ui.show_viewcube,
         "showUcsIcon": ui.show_ucs_icon,
         "showLayerList": ui.show_layer_list,
+        "showRibbon": ui.show_ribbon,
+        "ribbonTab": ui.ribbon_tab,
+        "ribbonCollapsed": ui.ribbon_collapsed,
         "toolsetTab": ui.toolset_tab,
         "collapsedGroups": ui.collapsed_groups,
         "propertiesAll": ui.properties_all,
@@ -88,6 +94,13 @@ fn read(path: &Path) -> Result<Option<UiState>, String> {
         && docking.validate().is_ok()
     {
         ui.docking = docking;
+    }
+    // If the saved workspace predates ribbon support, migrate to ribbon-first layout:
+    // show ribbon and hide toolsets by default.
+    if workspace.get("showRibbon").is_none() {
+        ui.show_ribbon = true;
+        ui.show_toolsets = false;
+        let _ = ui.docking.set_visible(cadcraft_ui_egui::docking::Panel::ToolSets, false);
     }
     // Old or hand-edited files cannot reopen a dialog or replace the active drawing view.
     ui.dialog = None;

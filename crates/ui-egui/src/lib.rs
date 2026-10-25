@@ -43,6 +43,7 @@ pub mod palettes;
 pub mod parametric;
 pub mod plotstyles;
 pub mod quick;
+pub mod ribbon;
 pub mod shortcut_menus;
 pub mod theme;
 pub mod viewcube;
@@ -72,6 +73,9 @@ pub struct UiState {
 
     pub interface_language: i18n::Preference,
     pub show_toolsets: bool,
+    pub show_ribbon: bool,
+    pub ribbon_tab: String,
+    pub ribbon_collapsed: bool,
     pub show_palettes: bool,
     pub show_toolbar: bool,
     pub show_file_tabs: bool,
@@ -155,11 +159,16 @@ impl SaveFormat {
 
 impl Default for UiState {
     fn default() -> Self {
+        let mut docking = docking::Workspace::default();
+        let _ = docking.set_visible(docking::Panel::ToolSets, false);
         UiState {
-            docking: docking::Workspace::default(),
+            docking,
 
             interface_language: i18n::Preference::default(),
-            show_toolsets: true,
+            show_toolsets: false,
+            show_ribbon: true,
+            ribbon_tab: "Home".into(),
+            ribbon_collapsed: false,
             show_palettes: true,
             show_toolbar: true,
             show_file_tabs: true,
@@ -402,6 +411,15 @@ impl CadApp {
         if let Some(dir) = &self.ui.last_lisp_dir {
             prefs["lispDir"] = json!(dir);
         }
+        if !self.ui.show_ribbon {
+            prefs["showRibbon"] = json!(false);
+        }
+        if self.ui.ribbon_tab != "Home" {
+            prefs["ribbonTab"] = json!(self.ui.ribbon_tab);
+        }
+        if self.ui.ribbon_collapsed {
+            prefs["ribbonCollapsed"] = json!(true);
+        }
         prefs.to_string()
     }
 
@@ -431,6 +449,15 @@ impl CadApp {
         }
         if let Some(dir) = v.get("lispDir").and_then(Value::as_str).filter(|d| !d.is_empty()) {
             self.ui.last_lisp_dir = Some(dir.to_string());
+        }
+        if let Some(r) = v.get("showRibbon").and_then(Value::as_bool) {
+            self.ui.show_ribbon = r;
+        }
+        if let Some(t) = v.get("ribbonTab").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            self.ui.ribbon_tab = t.to_string();
+        }
+        if let Some(c) = v.get("ribbonCollapsed").and_then(Value::as_bool) {
+            self.ui.ribbon_collapsed = c;
         }
     }
 
@@ -718,13 +745,16 @@ impl CadApp {
         if self.ui.in_window_menu {
             menus::menu_bar(self, ui);
         }
+        let has_doc = !self.session.docs.is_empty() && !self.ui.start_tab;
+        if self.ui.show_ribbon && has_doc {
+            ribbon::show(self, ui);
+        }
         if self.ui.show_status_bar {
             chrome::status_bar(self, ui);
         }
         if self.ui.show_file_tabs {
             chrome::file_tabs(self, ui);
         }
-        let has_doc = !self.session.docs.is_empty() && !self.ui.start_tab;
         if has_doc && !self.ui.show_toolsets {
             palettes::toolsets_strip(self, ui);
         }

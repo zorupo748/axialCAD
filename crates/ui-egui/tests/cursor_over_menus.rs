@@ -95,6 +95,8 @@ fn an_open_menu_keeps_the_os_cursor_visible_over_the_drawing() {
 #[test]
 fn docked_palettes_keep_the_os_cursor_visible() {
     let mut harness = harness();
+    harness.state_mut().ui.show_toolsets = true;
+    harness.run_steps(3);
     hover_canvas(&mut harness);
     assert_eq!(cursor(&harness), egui::CursorIcon::None);
 

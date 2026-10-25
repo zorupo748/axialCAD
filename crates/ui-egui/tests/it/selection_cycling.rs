@@ -122,10 +122,10 @@ fn a_command_closes_the_list_and_gets_its_first_click() {
     assert_eq!(h.state().canvas.cycle_rows().len(), 2);
     type_line(&mut h, "L");
     assert!(h.state().canvas.cycle_rows().is_empty(), "starting a command closes the list");
-    let elsewhere = h.state().canvas.xf.unwrap().to_screen(Vec2::new(5.0, 8.0));
+    let elsewhere = h.state().canvas.xf.unwrap().to_screen(Vec2::new(5.0, 3.0));
     click(&mut h, elsewhere);
     let start = line_started_at(&h).expect("the click placed LINE's first point");
-    assert!(start.dist(Vec2::new(5.0, 8.0)) < 0.5, "{start:?}");
+    assert!(start.dist(Vec2::new(5.0, 3.0)) < 0.5, "{start:?}");
 }
 
 #[test]

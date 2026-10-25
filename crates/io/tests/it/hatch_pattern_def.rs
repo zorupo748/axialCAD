@@ -146,3 +146,41 @@ fn hostile_pattern_definitions_are_capped() {
     d.add(&Space::Model, Common::default(), EntityKind::Hatch(h)).expect("add");
     let _ = cadcraft_render::build(&d, &Space::Model, &cadcraft_render::Options::default());
 }
+
+#[test]
+fn diagonal_45_separation_4_dxf_roundtrip_preserves_lines_and_spacing() {
+    let mut d = Drawing::new_imperial();
+    let pat = cadcraft_doc::library::pattern("Diagonal 45° - separación 4").expect("found in library");
+    let h = hatch("Diagonal 45° - separación 4", 1.0, 0.0, Vec2::ZERO, pat.lines);
+    d.add(&Space::Model, Common::default(), EntityKind::Hatch(h)).expect("add");
+
+    let text = write_dxf(&d);
+    let back_d = read_dxf(text.as_bytes()).expect("read");
+    let back_h = back_d
+        .model
+        .iter()
+        .find_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None })
+        .expect("hatch found");
+
+    assert_eq!(back_h.pattern, "Diagonal 45° - separación 4");
+    // Verify render on reloaded drawing
+    let loops = vec![square().vertices.iter().map(|v| v.p).collect()];
+    let lines = cadcraft_render::pattern_lines(&back_d, &back_h, &loops, 0.0, None);
+    assert!(!lines.is_empty());
+
+    for seg in &lines {
+        if seg.len() >= 2 {
+            let dx = (seg[1].x - seg[0].x).abs();
+            let dy = (seg[1].y - seg[0].y).abs();
+            assert!((dx - dy).abs() < 1e-4, "Line is at 45°");
+        }
+    }
+
+    let mut c_vals: Vec<f64> = lines.iter().filter_map(|seg| seg.first().map(|p| p.y - p.x)).collect();
+    c_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    c_vals.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+    for w in c_vals.windows(2) {
+        let perp_dist = (w[1] - w[0]) / std::f64::consts::SQRT_2;
+        assert!((perp_dist - 4.0).abs() < 1e-3, "Perpendicular distance is 4.0, got {}", perp_dist);
+    }
+}

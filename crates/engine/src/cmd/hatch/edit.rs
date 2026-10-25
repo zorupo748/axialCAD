@@ -144,7 +144,11 @@ fn separate(s: &mut Session, handle: Handle) -> Result<Vec<Handle>> {
 /// Pattern, scale and angle (degrees) from the parameters.
 fn properties(h: &mut Hatch, p: &Value) {
     if let Some(v) = str_param(p, "pattern").map(str::trim).filter(|v| !v.is_empty()) {
-        h.pattern = v.to_ascii_uppercase();
+        h.pattern = if let Some(sp) = cadcraft_doc::library::pattern(v) {
+            sp.name.to_string()
+        } else {
+            v.to_ascii_uppercase()
+        };
         h.solid = h.pattern == "SOLID";
         // A named pattern, SOLID included, replaces the gradient fill; the renderer draws the
         // gradient first when it is set.
@@ -158,6 +162,35 @@ fn properties(h: &mut Hatch, p: &Value) {
                 h.pattern_lines = user.lines;
             }
         }
+    }
+    let is_user = p.get("spacing").is_some()
+        || bool_or(p, "userDefined", false)
+        || p.get("pattern").and_then(Value::as_str).is_some_and(|pat| pat.eq_ignore_ascii_case("_U") || pat.eq_ignore_ascii_case("USER"))
+        || (h.pattern == "_U" && (p.get("spacing").is_some() || p.get("double").is_some()));
+    if is_user {
+        let spacing = p.get("spacing").and_then(Value::as_f64).filter(|x| x.is_finite() && *x > 0.0).unwrap_or_else(|| {
+            h.pattern_lines.first().map(|pl| pl.delta.1.abs()).filter(|x| *x > 0.0).unwrap_or(1.0)
+        }).max(1e-4);
+        let double = bool_or(p, "double", h.pattern_lines.len() > 1);
+        let mut lines = vec![cadcraft_doc::library::PatternLine {
+            angle: 0.0,
+            origin: (0.0, 0.0),
+            delta: (0.0, spacing),
+            dashes: Vec::new(),
+        }];
+        if double {
+            lines.push(cadcraft_doc::library::PatternLine {
+                angle: 90.0,
+                origin: (0.0, 0.0),
+                delta: (0.0, spacing),
+                dashes: Vec::new(),
+            });
+        }
+        h.pattern = "_U".into();
+        h.solid = false;
+        h.gradient = None;
+        h.pattern_lines = lines;
+        h.scale = 1.0;
     }
     if let Some(x) = p.get("scale").and_then(Value::as_f64).filter(|x| x.is_finite() && *x > 0.0) {
         h.scale = x;
@@ -252,6 +285,15 @@ fn gradient_edit(p: &Value) -> Result<Option<GradientEdit>> {
 /// is edited so a refused request changes nothing (absent and null leave them as they are).
 fn check_numbers(p: &Value) -> Result<()> {
     size_param("hatchedit", p, "scale", false)?;
+    if let Some(v) = p.get("spacing") {
+        let spacing = v.as_f64().ok_or_else(|| bad("hatchedit", "`spacing` must be a number"))?;
+        if !spacing.is_finite() || spacing <= 0.0 {
+            return Err(bad("hatchedit", "`spacing` must be positive"));
+        }
+        if spacing < 1e-4 {
+            return Err(bad("hatchedit", "`spacing` is too small (minimum 0.0001)"));
+        }
+    }
     match p.get("angle") {
         None | Some(Value::Null) => Ok(()),
         Some(v) if v.as_f64().is_some_and(f64::is_finite) => Ok(()),
@@ -390,6 +432,9 @@ pub(super) fn run_hatchedit(s: &mut Session, p: &Value) -> Result<Value> {
     // pattern read from a file keeps its definition).
     if let Some(up) = str_param(p, "pattern").map(|v| v.trim().to_ascii_uppercase()).filter(|v| !v.is_empty())
         && up != "SOLID"
+        && up != "_U"
+        && up != "USER"
+        && up != "CUSTOM"
         && cadcraft_doc::library::pattern(&up).is_none()
         && super::patfile::user_pattern(&up).is_none()
     {

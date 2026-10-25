@@ -8,6 +8,7 @@ use egui_kittest::kittest::Queryable;
 
 fn app() -> CadApp {
     let mut app = CadApp::new(Session::default(), Services::default());
+    app.ui.show_toolsets = true;
     app.run("ui.sample", serde_json::json!({})).unwrap();
     app
 }

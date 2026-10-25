@@ -45,6 +45,7 @@ mod txt2mtxt;
 pub use txt2mtxt::Txt2MtxtOptions;
 mod utility;
 mod view;
+pub mod solids;
 
 pub mod curves;
 pub mod helpers;
@@ -207,6 +208,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(txt2mtxt::specs());
         v.extend(constraints::specs());
         v.extend(lisp::specs());
+        v.extend(solids::specs());
         v
     })
 }

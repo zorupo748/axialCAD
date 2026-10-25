@@ -80,19 +80,29 @@ fn status_labels_never_overlap_at_standard_and_compact_sizes() {
 }
 
 #[test]
-fn compact_toolbar_overflow_keeps_help_reachable() {
+fn quick_access_toolbar_actions_work() {
     let mut h = harness(900.0, 560.0, 1.0, false);
-    h.get_by_label("More toolbar commands").click();
+    let mac = h.ctx.os().is_mac();
+    let before = h.state().session.docs.len();
+    let new_label = format!("New Drawing ({})", if mac { "⌘N" } else { "Ctrl+N" });
+    let print_label = format!("Print ({})", if mac { "⌘P" } else { "Ctrl+P" });
+    h.get_by_label(&new_label).click();
     h.run_steps(3);
-    h.get_by_label("Help").click();
+    assert_eq!(h.state().session.docs.len(), before + 1);
+
+    h.get_by_label(&print_label).click();
     h.run_steps(3);
-    assert_eq!(h.state().ui.dialog.as_deref(), Some("about"));
+    assert_eq!(h.state().ui.dialog.as_deref(), Some("plot"));
 }
 
 #[test]
-fn toolbar_plot_preview_opens_dialog() {
+fn quick_access_toolbar_undo_redo_reachable() {
     let mut h = harness(1200.0, 760.0, 1.0, false);
-    h.get_by_label("Plot Preview").click();
-    h.run_steps(3);
-    assert_eq!(h.state().ui.dialog.as_deref(), Some("preview"));
+    let mac = h.ctx.os().is_mac();
+    let undo_label = format!("Undo ({})", if mac { "⌘Z" } else { "Ctrl+Z" });
+    let redo_label = format!("Redo ({})", if mac { "⇧⌘Z" } else { "Ctrl+Shift+Z" });
+    h.get_by_label(&undo_label).click();
+    h.run_steps(2);
+    h.get_by_label(&redo_label).click();
+    h.run_steps(2);
 }

@@ -34,7 +34,10 @@ pub const UI_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("ui.animations.on", "On", &["View", "Accessibility", "Animation Effects", "On"], None),
     ("ui.animations.off", "Off", &["View", "Accessibility", "Animation Effects", "Off"], None),
     ("ui.animations", "Animation Effects", &[], None),
-    ("ui.toggle.toolbar", "Tool Bar", &["Window", "Tool Bar"], None),
+    ("ui.toggle.toolbar", "Quick Access Toolbar", &["Window", "Quick Access Toolbar"], None),
+    ("ui.toggle.ribbon", "Ribbon", &["Window", "Ribbon"], None),
+    ("ribbon", "Ribbon", &[], None),
+    ("ribbonclose", "Close Ribbon", &[], None),
     ("ui.toggle.filetabs", "File Tab", &["Window", "File Tab"], None),
     ("ui.toggle.statusbar", "Status Bar", &["Window", "Status Bar"], None),
     ("ui.toggle.cmdline", "Command Line", &["Window", "Command Line"], Some("Cmd+9")),
@@ -241,6 +244,19 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
             toggle(&mut app.ui.show_toolbar, params);
             Ok(Value::Null)
         }
+        "ui.toggle.ribbon" => {
+            toggle(&mut app.ui.show_ribbon, params);
+            Ok(Value::Null)
+        }
+        "ribbon" => {
+            app.ui.show_ribbon = true;
+            app.ui.ribbon_collapsed = false;
+            Ok(Value::Null)
+        }
+        "ribbonclose" => {
+            app.ui.show_ribbon = false;
+            Ok(Value::Null)
+        }
         "ui.toggle.filetabs" => {
             toggle(&mut app.ui.show_file_tabs, params);
             Ok(Value::Null)
@@ -419,6 +435,14 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
         }
         // Typed or from a menu (no parameters): the Hatch and Gradient dialog (HPDLGMODE 1) and the
         // Hatch Edit dialog. -HATCH, -HATCHEDIT and JSON calls keep the command line and the JSON form.
+        "hatch.user" | "hatchuser" | "userhatch" if params.is_null() && crate::hatchdlg::dialog_on(app) => {
+            crate::hatchdlg::open_create_user(app);
+            Ok(Value::Null)
+        }
+        "hatch.diag45" | "diag45" | "hatchdiag45" if params.is_null() && crate::hatchdlg::dialog_on(app) => {
+            crate::hatchdlg::open_create_pattern(app, "Diagonal 45° - separación 4");
+            Ok(Value::Null)
+        }
         "hatch" | "h" | "bh" | "gradient" | "gd" if params.is_null() && crate::hatchdlg::dialog_on(app) => {
             crate::hatchdlg::open_create(app, matches!(id, "gradient" | "gd"));
             Ok(Value::Null)
@@ -597,24 +621,50 @@ pub fn menu_bar(app: &mut CadApp, ui: &mut egui::Ui) {
     let t = crate::theme::Tokens::get();
     let tree = tree(app);
     let mut clicked = None;
-    egui::Panel::top("cc_menubar").exact_size(22.0).frame(egui::Frame::NONE.fill(t.chrome_dark).inner_margin(egui::Margin::symmetric(6, 0))).show(
+    let show_qat = !app.integrated_titlebar && app.ui.show_toolbar;
+
+    egui::Panel::top("cc_menubar").exact_size(24.0).frame(egui::Frame::NONE.fill(t.chrome_dark).inner_margin(egui::Margin::symmetric(4, 0))).show(
         ui,
         |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                // Titles first, so a hovered title can take over before any menu is drawn.
-                let titles: Vec<egui::Response> = tree.iter().map(|(name, _)| ui.add(egui::Button::new(crate::i18n::menu(name)))).collect();
-                switch_on_hover(ui.ctx(), &titles);
-                for ((_, entries), title) in tree.iter().zip(&titles) {
-                    egui::Popup::menu(title).show(|ui| {
-                        for e in entries {
-                            entry_ui(ui, e, &mut clicked);
-                        }
-                    });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+
+                if show_qat {
+                    let r = ui.available_rect_before_wrap();
+                    let (qat_cmd, qat_w) = crate::chrome::render_quick_access(ui, r, r.left() + 2.0, 20.0);
+                    if let Some(c) = qat_cmd {
+                        clicked = Some(c.to_string());
+                    }
+                    ui.add_space(qat_w + 4.0);
+                    // Separator before menus
+                    let sep_x = r.left() + qat_w + 4.0;
+                    ui.painter().vline(
+                        sep_x,
+                        (r.center().y - 8.0)..=(r.center().y + 8.0),
+                        egui::Stroke::new(1.0, t.border),
+                    );
+                    ui.add_space(6.0);
                 }
+
+                egui::MenuBar::new().ui(ui, |ui| {
+                    // Titles first, so a hovered title can take over before any menu is drawn.
+                    let titles: Vec<egui::Response> = tree.iter().map(|(name, _)| ui.add(egui::Button::new(crate::i18n::menu(name)))).collect();
+                    switch_on_hover(ui.ctx(), &titles);
+                    for ((_, entries), title) in tree.iter().zip(&titles) {
+                        egui::Popup::menu(title).show(|ui| {
+                            for e in entries {
+                                entry_ui(ui, e, &mut clicked);
+                            }
+                        });
+                    }
+                });
             });
         },
     );
     if let Some(id) = clicked {
+        if id == "new" {
+            app.ui.start_tab = false;
+        }
         activate(app, &id);
     }
 }
