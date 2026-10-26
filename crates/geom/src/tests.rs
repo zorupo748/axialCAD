@@ -331,3 +331,60 @@ fn long_secant_keeps_both_intersections() {
     assert!(hits[0].0.near(Vec2::new(-2.0, 0.0), 1e-8), "{hits:?}");
     assert!(hits[1].0.near(Vec2::new(2.0, 0.0), 1e-8), "{hits:?}");
 }
+
+#[test]
+fn test_validate_simple_polygon() {
+    use crate::validate_simple_polygon;
+
+    // 1. Valid convex square
+    let square = vec![Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), Vec2::new(10.0, 10.0), Vec2::new(0.0, 10.0)];
+    assert!(validate_simple_polygon(&square).is_ok());
+
+    // 2. Valid non-convex L-shape
+    let l_shape =
+        vec![Vec2::new(0.0, 0.0), Vec2::new(30.0, 0.0), Vec2::new(30.0, 10.0), Vec2::new(10.0, 10.0), Vec2::new(10.0, 30.0), Vec2::new(0.0, 30.0)];
+    assert!(validate_simple_polygon(&l_shape).is_ok());
+
+    // 3. Self-intersecting bowtie (crossing edges)
+    let bowtie = vec![Vec2::new(0.0, 0.0), Vec2::new(30.0, 20.0), Vec2::new(0.0, 20.0), Vec2::new(20.0, 0.0)];
+    let err = validate_simple_polygon(&bowtie).unwrap_err();
+    assert!(err.contains("intersect"), "must report intersection: {err}");
+
+    // 4. Touching at coincident vertex (figure-8 pinch point)
+    let pinch = vec![
+        Vec2::new(0.0, 0.0),
+        Vec2::new(20.0, 0.0),
+        Vec2::new(10.0, 10.0),
+        Vec2::new(20.0, 20.0),
+        Vec2::new(0.0, 20.0),
+        Vec2::new(10.0, 10.0), // touches vertex 2
+    ];
+    let err = validate_simple_polygon(&pinch).unwrap_err();
+    assert!(err.contains("coincident") || err.contains("touches"), "must report coincident vertices: {err}");
+
+    // 5. Edge doubling back
+    let backtrack = vec![
+        Vec2::new(0.0, 0.0),
+        Vec2::new(20.0, 0.0),
+        Vec2::new(5.0, 0.0), // doubles back along edge 0
+        Vec2::new(5.0, 10.0),
+        Vec2::new(0.0, 10.0),
+    ];
+    assert!(validate_simple_polygon(&backtrack).is_err());
+
+    // 6. Collinear overlapping non-adjacent edges
+    let overlap = vec![
+        Vec2::new(0.0, 0.0),
+        Vec2::new(20.0, 0.0),
+        Vec2::new(20.0, 10.0),
+        Vec2::new(5.0, 0.0), // lies right on edge 0
+        Vec2::new(0.0, 10.0),
+    ];
+    assert!(validate_simple_polygon(&overlap).is_err());
+
+    // 7. Less than 3 vertices
+    assert!(validate_simple_polygon(&[Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0)]).is_err());
+
+    // 8. Non-finite coordinates
+    assert!(validate_simple_polygon(&[Vec2::new(0.0, 0.0), Vec2::new(f64::NAN, 1.0), Vec2::new(1.0, 1.0),]).is_err());
+}

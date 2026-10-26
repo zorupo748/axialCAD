@@ -144,11 +144,7 @@ fn separate(s: &mut Session, handle: Handle) -> Result<Vec<Handle>> {
 /// Pattern, scale and angle (degrees) from the parameters.
 fn properties(h: &mut Hatch, p: &Value) {
     if let Some(v) = str_param(p, "pattern").map(str::trim).filter(|v| !v.is_empty()) {
-        h.pattern = if let Some(sp) = cadcraft_doc::library::pattern(v) {
-            sp.name.to_string()
-        } else {
-            v.to_ascii_uppercase()
-        };
+        h.pattern = if let Some(sp) = cadcraft_doc::library::pattern(v) { sp.name.to_string() } else { v.to_ascii_uppercase() };
         h.solid = h.pattern == "SOLID";
         // A named pattern, SOLID included, replaces the gradient fill; the renderer draws the
         // gradient first when it is set.
@@ -168,23 +164,16 @@ fn properties(h: &mut Hatch, p: &Value) {
         || p.get("pattern").and_then(Value::as_str).is_some_and(|pat| pat.eq_ignore_ascii_case("_U") || pat.eq_ignore_ascii_case("USER"))
         || (h.pattern == "_U" && (p.get("spacing").is_some() || p.get("double").is_some()));
     if is_user {
-        let spacing = p.get("spacing").and_then(Value::as_f64).filter(|x| x.is_finite() && *x > 0.0).unwrap_or_else(|| {
-            h.pattern_lines.first().map(|pl| pl.delta.1.abs()).filter(|x| *x > 0.0).unwrap_or(1.0)
-        }).max(1e-4);
+        let spacing = p
+            .get("spacing")
+            .and_then(Value::as_f64)
+            .filter(|x| x.is_finite() && *x > 0.0)
+            .unwrap_or_else(|| h.pattern_lines.first().map(|pl| pl.delta.1.abs()).filter(|x| *x > 0.0).unwrap_or(1.0))
+            .max(1e-4);
         let double = bool_or(p, "double", h.pattern_lines.len() > 1);
-        let mut lines = vec![cadcraft_doc::library::PatternLine {
-            angle: 0.0,
-            origin: (0.0, 0.0),
-            delta: (0.0, spacing),
-            dashes: Vec::new(),
-        }];
+        let mut lines = vec![cadcraft_doc::library::PatternLine { angle: 0.0, origin: (0.0, 0.0), delta: (0.0, spacing), dashes: Vec::new() }];
         if double {
-            lines.push(cadcraft_doc::library::PatternLine {
-                angle: 90.0,
-                origin: (0.0, 0.0),
-                delta: (0.0, spacing),
-                dashes: Vec::new(),
-            });
+            lines.push(cadcraft_doc::library::PatternLine { angle: 90.0, origin: (0.0, 0.0), delta: (0.0, spacing), dashes: Vec::new() });
         }
         h.pattern = "_U".into();
         h.solid = false;

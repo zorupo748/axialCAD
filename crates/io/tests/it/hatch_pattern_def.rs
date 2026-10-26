@@ -156,11 +156,7 @@ fn diagonal_45_separation_4_dxf_roundtrip_preserves_lines_and_spacing() {
 
     let text = write_dxf(&d);
     let back_d = read_dxf(text.as_bytes()).expect("read");
-    let back_h = back_d
-        .model
-        .iter()
-        .find_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None })
-        .expect("hatch found");
+    let back_h = back_d.model.iter().find_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None }).expect("hatch found");
 
     assert_eq!(back_h.pattern, "Diagonal 45° - separación 4");
     // Verify render on reloaded drawing

@@ -1282,20 +1282,13 @@ fn entity(w: &mut W, d: &Drawing, e: &Entity, owner: &str, paper: bool, cx: &Ctx
                 w.i(70, i64::from(face.hidden_edges));
 
                 if idx == 0 && !recipe_chunks.is_empty() {
-                    let mut xdata_tags = vec![
-                        Tag::s(1001, dxf_ext::APP),
-                        Tag::s(1000, "SOLID3D_BEGIN"),
-                        Tag::i(1070, i64::from(s.schema_version)),
-                    ];
+                    let mut xdata_tags = vec![Tag::s(1001, dxf_ext::APP), Tag::s(1000, "SOLID3D_BEGIN"), Tag::i(1070, i64::from(s.schema_version))];
                     for chunk in &recipe_chunks {
                         xdata_tags.push(Tag::s(1000, chunk.as_str()));
                     }
                     w.xdata(xdata_tags);
                 } else if !recipe_chunks.is_empty() {
-                    let xdata_tags = vec![
-                        Tag::s(1001, dxf_ext::APP),
-                        Tag::s(1000, "SOLID3D_PART"),
-                    ];
+                    let xdata_tags = vec![Tag::s(1001, dxf_ext::APP), Tag::s(1000, "SOLID3D_PART")];
                     w.xdata(xdata_tags);
                 }
             }

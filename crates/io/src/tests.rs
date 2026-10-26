@@ -2754,13 +2754,7 @@ fn proxies_keep_their_class_when_classes_are_rewritten() {
 fn test_solid3d_dxf_roundtrip() {
     let mut d = Drawing::new_metric();
     let mut recipe = Recipe::new();
-    recipe.add_feature(
-        1,
-        FeatureOp::Box {
-            origin: Vec3::new(10.0, 20.0, 30.0),
-            size: Vec3::new(100.0, 50.0, 25.0),
-        },
-    );
+    recipe.add_feature(1, FeatureOp::Box { origin: Vec3::new(10.0, 20.0, 30.0), size: Vec3::new(100.0, 50.0, 25.0) });
     let bbox = Bounds3::new(Vec3::new(10.0, 20.0, 30.0), Vec3::new(110.0, 70.0, 55.0));
     let solid = Solid3d::with_bbox(recipe, bbox);
     d.add(&Space::Model, Common::default(), EntityKind::Solid3d(solid)).unwrap();

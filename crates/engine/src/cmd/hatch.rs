@@ -302,35 +302,18 @@ impl HatchSettings {
             0.0,
         ));
         let raw_pattern = if let Some(pat_name) = str_param(p, "pattern") {
-            if let Some(sp) = cadcraft_doc::library::pattern(pat_name) {
-                sp.name.to_string()
-            } else {
-                pat_name.to_ascii_uppercase()
-            }
+            if let Some(sp) = cadcraft_doc::library::pattern(pat_name) { sp.name.to_string() } else { pat_name.to_ascii_uppercase() }
         } else {
             hdr.0
         };
-        let is_user = p.get("spacing").is_some()
-            || bool_or(p, "userDefined", false)
-            || raw_pattern == "_U"
-            || raw_pattern == "USER"
-            || raw_pattern == "CUSTOM";
+        let is_user =
+            p.get("spacing").is_some() || bool_or(p, "userDefined", false) || raw_pattern == "_U" || raw_pattern == "USER" || raw_pattern == "CUSTOM";
         let (pattern, custom_lines) = if is_user {
             let spacing = f64_or(p, "spacing", 1.0).max(1e-4);
             let double = bool_or(p, "double", false);
-            let mut lines = vec![cadcraft_doc::library::PatternLine {
-                angle: 0.0,
-                origin: (0.0, 0.0),
-                delta: (0.0, spacing),
-                dashes: Vec::new(),
-            }];
+            let mut lines = vec![cadcraft_doc::library::PatternLine { angle: 0.0, origin: (0.0, 0.0), delta: (0.0, spacing), dashes: Vec::new() }];
             if double {
-                lines.push(cadcraft_doc::library::PatternLine {
-                    angle: 90.0,
-                    origin: (0.0, 0.0),
-                    delta: (0.0, spacing),
-                    dashes: Vec::new(),
-                });
+                lines.push(cadcraft_doc::library::PatternLine { angle: 90.0, origin: (0.0, 0.0), delta: (0.0, spacing), dashes: Vec::new() });
             }
             ("_U".to_string(), Some(lines))
         } else {
@@ -371,11 +354,7 @@ impl HatchSettings {
             loops.iter_mut().for_each(|l| l.sources.clear());
         }
         let solid = self.gradient.is_some() || self.pattern == "SOLID";
-        let lines = if let Some(ref cl) = self.custom_lines {
-            cl.clone()
-        } else {
-            patfile::lines_for(&self.pattern)
-        };
+        let lines = if let Some(ref cl) = self.custom_lines { cl.clone() } else { patfile::lines_for(&self.pattern) };
         EntityKind::Hatch(Hatch {
             pattern: if self.gradient.is_some() { "SOLID".into() } else { self.pattern.clone() },
             solid,
@@ -544,8 +523,7 @@ fn add_hatches(s: &mut Session, st: &HatchSettings, groups: Vec<Vec<HatchLoop>>)
 }
 
 pub(crate) fn preview_entities(s: &Session, params: &Value, points: &[[f64; 2]], handles: &[Handle]) -> Vec<EntityKind> {
-    let gradient = params.get("gradient").is_some_and(|g| !g.is_null())
-        || params.get("name").is_some_and(|n| !n.is_null());
+    let gradient = params.get("gradient").is_some_and(|g| !g.is_null()) || params.get("name").is_some_and(|n| !n.is_null());
     let st = HatchSettings::from(s, params, gradient);
     let mut groups: Vec<Vec<HatchLoop>> = Vec::new();
     for q in points {
@@ -553,10 +531,10 @@ pub(crate) fn preview_entities(s: &Session, params: &Value, points: &[[f64; 2]],
             groups.push(l);
         }
     }
-    if !handles.is_empty() {
-        if let Ok(l) = loops_from_handles(s, handles) {
-            groups.push(l);
-        }
+    if !handles.is_empty()
+        && let Ok(l) = loops_from_handles(s, handles)
+    {
+        groups.push(l);
     }
     if groups.is_empty() {
         return Vec::new();
@@ -569,14 +547,14 @@ fn run_hatch(s: &mut Session, p: &Value) -> Result<Value> {
     patfile::load_param(p)?;
     let is_user = p.get("spacing").is_some()
         || bool_or(p, "userDefined", false)
-        || str_param(p, "pattern").is_some_and(|pat| pat.eq_ignore_ascii_case("_U") || pat.eq_ignore_ascii_case("USER") || pat.eq_ignore_ascii_case("CUSTOM"));
-    if !is_user {
-        if let Some(up) = str_param(p, "pattern").map(str::to_ascii_uppercase)
-            && cadcraft_doc::library::pattern(&up).is_none()
-            && patfile::user_pattern(&up).is_none()
-        {
-            return Err(bad("hatch", format!("unknown pattern {up}: not built in; load it with patternFile or patternText (a .pat file)")));
-        }
+        || str_param(p, "pattern")
+            .is_some_and(|pat| pat.eq_ignore_ascii_case("_U") || pat.eq_ignore_ascii_case("USER") || pat.eq_ignore_ascii_case("CUSTOM"));
+    if !is_user
+        && let Some(up) = str_param(p, "pattern").map(str::to_ascii_uppercase)
+        && cadcraft_doc::library::pattern(&up).is_none()
+        && patfile::user_pattern(&up).is_none()
+    {
+        return Err(bad("hatch", format!("unknown pattern {up}: not built in; load it with patternFile or patternText (a .pat file)")));
     }
     make(s, p, false)
 }
@@ -673,15 +651,22 @@ impl HatchM {
         }
     }
     fn new_user_defined(s: &Session) -> Self {
-        let (spacing, double, angle) = s.doc().map(|d| {
-            let sp = d.header.f64("HPSPACE", 1.0);
-            let dbl = d.header.i64("HPDOUBLE", 0) != 0;
-            let ang = d.header.f64("HPANG", 0.0);
-            (if sp.is_finite() && sp > 0.0 { sp } else { 1.0 }, dbl, if ang.is_finite() { ang.to_degrees() } else { 0.0 })
-        }).unwrap_or((1.0, false, 0.0));
+        let (spacing, double, angle) = s
+            .doc()
+            .map(|d| {
+                let sp = d.header.f64("HPSPACE", 1.0);
+                let dbl = d.header.i64("HPDOUBLE", 0) != 0;
+                let ang = d.header.f64("HPANG", 0.0);
+                (if sp.is_finite() && sp > 0.0 { sp } else { 1.0 }, dbl, if ang.is_finite() { ang.to_degrees() } else { 0.0 })
+            })
+            .unwrap_or((1.0, false, 0.0));
         HatchM {
             gradient: false,
-            settings: HatchSettings::from(s, &json!({ "userDefined": true, "pattern": "_U", "spacing": spacing, "double": double, "angle": angle }), false),
+            settings: HatchSettings::from(
+                s,
+                &json!({ "userDefined": true, "pattern": "_U", "spacing": spacing, "double": double, "angle": angle }),
+                false,
+            ),
             loops: Vec::new(),
             asking: None,
             selecting: s.last_used.hatch_select,
@@ -724,12 +709,8 @@ impl HatchM {
                 };
                 if up == "_U" || up == "USER" || up == "CUSTOM" {
                     self.settings.pattern = "_U".into();
-                    self.settings.custom_lines = Some(vec![cadcraft_doc::library::PatternLine {
-                        angle: 0.0,
-                        origin: (0.0, 0.0),
-                        delta: (0.0, 1.0),
-                        dashes: Vec::new(),
-                    }]);
+                    self.settings.custom_lines =
+                        Some(vec![cadcraft_doc::library::PatternLine { angle: 0.0, origin: (0.0, 0.0), delta: (0.0, 1.0), dashes: Vec::new() }]);
                     s.doc_mut()?.header.set_str("HPNAME", "_U");
                 } else if cadcraft_doc::library::pattern(&up).is_some() || patfile::user_pattern(&up).is_some() {
                     self.settings.pattern = up.clone();
@@ -749,19 +730,10 @@ impl HatchM {
                 if let Some(v) = super::machines::number(t).filter(|v| v.is_finite() && *v > 0.0) {
                     let spacing = v.max(1e-4);
                     let double = self.settings.custom_lines.as_ref().is_some_and(|l| l.len() > 1);
-                    let mut lines = vec![cadcraft_doc::library::PatternLine {
-                        angle: 0.0,
-                        origin: (0.0, 0.0),
-                        delta: (0.0, spacing),
-                        dashes: Vec::new(),
-                    }];
+                    let mut lines =
+                        vec![cadcraft_doc::library::PatternLine { angle: 0.0, origin: (0.0, 0.0), delta: (0.0, spacing), dashes: Vec::new() }];
                     if double {
-                        lines.push(cadcraft_doc::library::PatternLine {
-                            angle: 90.0,
-                            origin: (0.0, 0.0),
-                            delta: (0.0, spacing),
-                            dashes: Vec::new(),
-                        });
+                        lines.push(cadcraft_doc::library::PatternLine { angle: 90.0, origin: (0.0, 0.0), delta: (0.0, spacing), dashes: Vec::new() });
                     }
                     self.settings.pattern = "_U".into();
                     self.settings.custom_lines = Some(lines);
@@ -897,12 +869,8 @@ impl Interactive for HatchM {
                         let cur_double = self.settings.custom_lines.as_ref().is_some_and(|l| l.len() > 1);
                         let spacing = self.settings.custom_lines.as_ref().and_then(|l| l.first()).map(|l| l.delta.1).unwrap_or(1.0);
                         let new_double = !cur_double;
-                        let mut lines = vec![cadcraft_doc::library::PatternLine {
-                            angle: 0.0,
-                            origin: (0.0, 0.0),
-                            delta: (0.0, spacing),
-                            dashes: Vec::new(),
-                        }];
+                        let mut lines =
+                            vec![cadcraft_doc::library::PatternLine { angle: 0.0, origin: (0.0, 0.0), delta: (0.0, spacing), dashes: Vec::new() }];
                         if new_double {
                             lines.push(cadcraft_doc::library::PatternLine {
                                 angle: 90.0,

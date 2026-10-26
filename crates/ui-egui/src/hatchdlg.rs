@@ -225,7 +225,16 @@ pub fn ok_call(st: &HatchDlgState) -> Option<(&'static str, Value)> {
             (true, None) => p.insert("originMode".into(), json!(f.origin_mode)),
             (false, _) => p.insert("originMode".into(), json!("current")),
         };
-        return Some((if f.gradient { "gradient" } else if f.user_defined { "hatch.user" } else { "hatch" }, Value::Object(p)));
+        return Some((
+            if f.gradient {
+                "gradient"
+            } else if f.user_defined {
+                "hatch.user"
+            } else {
+                "hatch"
+            },
+            Value::Object(p),
+        ));
     }
     let o = &st.opened;
     if !st.points.is_empty() {

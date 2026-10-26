@@ -15,19 +15,13 @@ fn create_app_with_rect(w: f64, h: f64) -> CadApp {
     // Create a closed rectangular polyline boundary [0, 0] to [w, h]
     let p1 = [0.0, 0.0];
     let p2 = [w, h];
-    app.session
-        .execute("rectang", &json!({ "p1": p1, "p2": p2 }))
-        .expect("rectang boundary creation");
+    app.session.execute("rectang", &json!({ "p1": p1, "p2": p2 })).expect("rectang boundary creation");
     app
 }
 
 fn get_last_hatch(app: &CadApp) -> cadcraft_doc::Hatch {
     let doc = app.session.doc().expect("doc");
-    doc.model
-        .iter()
-        .filter_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None })
-        .last()
-        .expect("hatch entity exists")
+    doc.model.iter().filter_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None }).last().expect("hatch entity exists")
 }
 
 fn render_hatch_lines(app: &CadApp, hatch: &cadcraft_doc::Hatch) -> Vec<Vec<Vec2>> {
@@ -236,7 +230,6 @@ fn provisional_pattern_diag45_separation_4_geometry_and_dxf_roundtrip() {
         let perp_dist = (w[1] - w[0]) / std::f64::consts::SQRT_2;
         assert!((perp_dist - 4.0).abs() < 1e-3, "Perpendicular distance is exactly 4.0, got {}", perp_dist);
     }
-
 }
 
 #[test]
@@ -381,7 +374,8 @@ fn hatch_full_ui_flow_enter_esc_persistence() {
     // El documento clonado / reabierto conserva exactamente las entidades y parámetros
     let cloned_doc = app.session.doc().unwrap().clone();
     assert_eq!(cloned_doc.model.len(), 2, "Moment 7: model has 2 entities after reopen");
-    let reloaded_hatch = cloned_doc.model.iter().find_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h) } else { None }).expect("hatch exists after reload");
+    let reloaded_hatch =
+        cloned_doc.model.iter().find_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h) } else { None }).expect("hatch exists after reload");
     assert_eq!(reloaded_hatch.pattern, "_U");
     assert!((reloaded_hatch.angle - 45.0f64.to_radians()).abs() < 1e-4);
     assert!((reloaded_hatch.pattern_lines[0].delta.1 - 5.0).abs() < 1e-4);
@@ -456,13 +450,7 @@ fn hatch_ui_kittest_harness_enter_confirms_dialog_and_persists_after_enter_and_e
     h.run_steps(2);
 
     // 1. Send Key::Enter to confirm dialog
-    h.event(egui::Event::Key {
-        key: Key::Enter,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers: Modifiers::NONE,
-    });
+    h.event(egui::Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(2);
 
     // Dialog must be closed and hatch created
@@ -475,26 +463,14 @@ fn hatch_ui_kittest_harness_enter_confirms_dialog_and_persists_after_enter_and_e
     assert!((h1.pattern_lines[0].delta.1 - 5.0).abs() < 1e-4);
 
     // 2. Send Key::Enter in canvas
-    h.event(egui::Event::Key {
-        key: Key::Enter,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers: Modifiers::NONE,
-    });
+    h.event(egui::Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(2);
 
     // Entity must still be in model!
     assert_eq!(h.state().session.doc().unwrap().model.len(), 2, "hatch STILL in model after Enter");
 
     // 3. Send Key::Escape in canvas
-    h.event(egui::Event::Key {
-        key: Key::Escape,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers: Modifiers::NONE,
-    });
+    h.event(egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(2);
 
     // Entity must still be in model!
@@ -522,13 +498,7 @@ fn hatch_ui_kittest_harness_escape_cancels_dialog_without_creating_entity() {
     h.run_steps(2);
 
     // Send Key::Escape to cancel dialog
-    h.event(egui::Event::Key {
-        key: Key::Escape,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers: Modifiers::NONE,
-    });
+    h.event(egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(2);
 
     // Dialog must be closed and NO hatch created
@@ -537,13 +507,7 @@ fn hatch_ui_kittest_harness_escape_cancels_dialog_without_creating_entity() {
     assert_eq!(h.state().session.doc().unwrap().model.len(), 1, "no hatch entity created on Escape");
 
     // Pressing Enter in canvas afterwards must NOT create anything
-    h.event(egui::Event::Key {
-        key: Key::Enter,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers: Modifiers::NONE,
-    });
+    h.event(egui::Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(2);
     assert_eq!(h.state().session.doc().unwrap().model.len(), 1, "no entity created by subsequent Enter");
 }

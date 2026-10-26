@@ -15,23 +15,23 @@ use super::super::*;
 use super::SelfCheck;
 use crate::{EngineError, Input, Interactive, Prompt, Result, Session, Step};
 
-/// The region commands: UNION, SUBTRACT and INTERSECT combine regions, MASSPROP measures them.
+/// UNION, SUBTRACT and INTERSECT combine solids or regions, MASSPROP measures regions.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("union", "Union", run_union)
             .menu(&["Modify", "Solid Editing", "Union"])
             .alias(&["uni"])
-            .params("{handles?} (regions)")
+            .params("{handles?} (solids or regions)")
             .interactive(|_| Ok(Box::new(SelectRun::new("union", "UNION")))),
         CommandSpec::new("subtract", "Subtract", run_subtract)
             .menu(&["Modify", "Solid Editing", "Subtract"])
             .alias(&["su"])
-            .params("{from: [handles], remove: [handles]} (regions)")
+            .params("{from: [handles], remove: [handles]} (solids or regions)")
             .interactive(|_| Ok(Box::new(SubtractM::default()))),
         CommandSpec::new("intersect", "Intersect", run_intersect)
             .menu(&["Modify", "Solid Editing", "Intersect"])
             .alias(&["in"])
-            .params("{handles?} (regions)")
+            .params("{handles?} (solids or regions)")
             .interactive(|_| Ok(Box::new(SelectRun::new("intersect", "INTERSECT")))),
         CommandSpec::new("massprop", "Region/Mass Properties", run_massprop)
             .menu(&["Tools", "Inquiry", "Region/Mass Properties"])
@@ -147,7 +147,75 @@ fn apply(s: &mut Session, keep: Handle, r: Region, erase: &[Handle]) -> Result<(
     Ok(())
 }
 
+fn classify_operands(s: &Session, hs: &[Handle]) -> Result<(Vec<Handle>, Vec<Handle>)> {
+    let d = s.doc()?;
+    let mut reg_handles = Vec::new();
+    let mut sol_handles = Vec::new();
+    for h in hs {
+        if let Some(ent) = d.entity(*h) {
+            match &ent.kind {
+                EntityKind::Region(_) => reg_handles.push(*h),
+                EntityKind::Solid3d(_) => sol_handles.push(*h),
+                _ => {}
+            }
+        }
+    }
+    Ok((reg_handles, sol_handles))
+}
+
+fn fold_solids(s: &mut Session, solids: &[Handle], op: Op) -> Result<Value> {
+    if solids.len() < 2 {
+        return Err(other("Select at least two solids to combine."));
+    }
+    let Some((h0, rest)) = solids.split_first() else {
+        return Err(other("Select at least two solids to combine."));
+    };
+
+    let cmd_name = match op {
+        Op::Union => "solid.union",
+        Op::Subtract => "solid.subtract",
+        Op::Intersect => "solid.intersect",
+    };
+
+    let doc_backup = s.doc()?.clone();
+    let mut current_handle = h0.hex();
+
+    for tool_h in rest {
+        let params = json!({
+            "target": current_handle,
+            "tool": tool_h.hex(),
+            "delete_operands": true,
+        });
+        match s.execute(cmd_name, &params) {
+            Ok(val) => {
+                if let Some(h) = val.get("handle").and_then(Value::as_str) {
+                    current_handle = h.to_string();
+                } else {
+                    *s.doc_mut()? = doc_backup;
+                    return Err(other("Solid boolean operation returned no handle."));
+                }
+            }
+            Err(e) => {
+                *s.doc_mut()? = doc_backup;
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(json!({
+        "handle": current_handle,
+        "message": ""
+    }))
+}
+
 fn fold(s: &mut Session, hs: &[Handle], op: Op) -> Result<Value> {
+    let (reg_handles, sol_handles) = classify_operands(s, hs)?;
+    if !reg_handles.is_empty() && !sol_handles.is_empty() {
+        return Err(other("Cannot combine solids with regions."));
+    }
+    if !sol_handles.is_empty() {
+        return fold_solids(s, &sol_handles, op);
+    }
     let rs = regions(s, hs)?;
     let Some(((h0, first), rest)) = rs.split_first() else { return Err(other("Select at least one region.")) };
     let mut acc = first.clone();
@@ -178,6 +246,62 @@ fn handles(p: &Value, key: &str) -> Result<Vec<Handle>> {
 }
 
 fn subtract(s: &mut Session, from: &[Handle], remove: &[Handle]) -> Result<Value> {
+    let (from_reg, from_sol) = classify_operands(s, from)?;
+    let (rem_reg, rem_sol) = classify_operands(s, remove)?;
+
+    if (!from_sol.is_empty() || !rem_sol.is_empty()) && (!from_reg.is_empty() || !rem_reg.is_empty()) {
+        return Err(other("Cannot combine solids with regions."));
+    }
+
+    if !from_sol.is_empty() || !rem_sol.is_empty() {
+        if from_sol.is_empty() {
+            return Err(other("Select solids to subtract from."));
+        }
+        if rem_sol.is_empty() {
+            return Err(other("Select solids to subtract."));
+        }
+
+        let doc_backup = s.doc()?.clone();
+        let mut results = Vec::new();
+
+        for target in &from_sol {
+            let mut curr = target.hex();
+            for tool in &rem_sol {
+                if target == tool {
+                    *s.doc_mut()? = doc_backup;
+                    return Err(other("A solid can't be subtracted from itself."));
+                }
+                let params = json!({
+                    "target": curr,
+                    "tool": tool.hex(),
+                    "delete_operands": true,
+                });
+                match s.execute("solid.subtract", &params) {
+                    Ok(val) => {
+                        if let Some(h) = val.get("handle").and_then(Value::as_str) {
+                            curr = h.to_string();
+                        } else {
+                            *s.doc_mut()? = doc_backup;
+                            return Err(other("Solid subtraction returned no handle."));
+                        }
+                    }
+                    Err(e) => {
+                        *s.doc_mut()? = doc_backup;
+                        return Err(e);
+                    }
+                }
+            }
+            results.push(curr);
+        }
+
+        let first = results.first().cloned().unwrap_or_default();
+        return Ok(json!({
+            "handle": first,
+            "handles": results,
+            "message": ""
+        }));
+    }
+
     let (a, b) = (regions(s, from)?, regions(s, remove)?);
     let Some(((h0, first), rest)) = a.split_first() else { return Err(other("Select regions to subtract from.")) };
     let mut acc = first.clone();
@@ -213,16 +337,16 @@ impl Interactive for SubtractM {
     fn name(&self) -> &'static str {
         "SUBTRACT"
     }
-    /// Tell the user what to select first: the regions to subtract from.
+    /// Tell the user what to select first: the solids or regions to subtract from.
     fn begin(&mut self, s: &mut Session) -> Result<Step> {
-        s.echo("Select regions to subtract from ..");
+        s.echo("Select solids or regions to subtract from ..");
         Ok(Step::Continue)
     }
-    /// Prompt for the current selection phase (regions to subtract from, then regions to remove).
+    /// Prompt for the current selection phase (solids or regions to subtract from, then solids or regions to remove).
     fn prompt(&self, _s: &Session) -> Prompt {
         self.sel.prompt()
     }
-    /// The first selection is the regions to subtract from; the second is subtracted from them.
+    /// The first selection is the objects to subtract from; the second is subtracted from them.
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
         match self.sel.feed(s, &i)? {
             SelOutcome::More => Ok(Step::Continue),
@@ -232,7 +356,7 @@ impl Interactive for SubtractM {
                     self.from = Some(hs);
                     self.sel = SelectPhase::default();
                     s.set_selection(Vec::new());
-                    s.echo("Select regions to subtract ..");
+                    s.echo("Select solids or regions to subtract ..");
                     Ok(Step::Continue)
                 }
                 Some(from) => {

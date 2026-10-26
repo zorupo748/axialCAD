@@ -11,8 +11,7 @@ use crate::solid::{BrepSolid, SubtractOptions};
 
 #[test]
 fn test_box_creation() {
-    let b = BrepSolid::box_dimensions(Vec3::new(10.0, 20.0, 30.0), Vec3::new(100.0, 50.0, 25.0))
-        .expect("box should succeed");
+    let b = BrepSolid::box_dimensions(Vec3::new(10.0, 20.0, 30.0), Vec3::new(100.0, 50.0, 25.0)).expect("box should succeed");
     let bbox = b.bounding_box();
     assert!((bbox.min.x - 10.0).abs() < 1e-4);
     assert!((bbox.min.y - 20.0).abs() < 1e-4);
@@ -29,8 +28,7 @@ fn test_box_creation() {
 
 #[test]
 fn test_cylinder_creation() {
-    let cyl = BrepSolid::cylinder(Vec3::new(0.0, 0.0, 0.0), 10.0, 50.0, Vec3::new(0.0, 0.0, 1.0))
-        .expect("cylinder should succeed");
+    let cyl = BrepSolid::cylinder(Vec3::new(0.0, 0.0, 0.0), 10.0, 50.0, Vec3::new(0.0, 0.0, 1.0)).expect("cylinder should succeed");
     let bbox = cyl.bounding_box();
     assert!((bbox.min.x - (-10.0)).abs() < 1.0);
     assert!((bbox.max.x - 10.0).abs() < 1.0);
@@ -44,16 +42,74 @@ fn test_cylinder_creation() {
 
 #[test]
 fn test_extrusion_closed_polygon() {
-    let profile = vec![
-        Vec3::new(10.0, 10.0, 0.0),
-        Vec3::new(40.0, 10.0, 0.0),
-        Vec3::new(40.0, 30.0, 0.0),
-        Vec3::new(10.0, 30.0, 0.0),
-    ];
+    let profile = vec![Vec3::new(10.0, 10.0, 0.0), Vec3::new(40.0, 10.0, 0.0), Vec3::new(40.0, 30.0, 0.0), Vec3::new(10.0, 30.0, 0.0)];
     let prism = BrepSolid::extrude(&profile, Vec3::new(0.0, 0.0, 25.0)).expect("extrusion should succeed");
     let vol = prism.volume().expect("prism volume");
     let expected_vol = 30.0 * 20.0 * 25.0; // 15,000.0
     assert!((vol - expected_vol).abs() / expected_vol < 0.01);
+}
+
+#[test]
+fn test_extrusion_negative_direction_and_topology() {
+    let profile = vec![Vec3::new(10.0, 10.0, 0.0), Vec3::new(40.0, 10.0, 0.0), Vec3::new(40.0, 30.0, 0.0), Vec3::new(10.0, 30.0, 0.0)];
+    let prism = BrepSolid::extrude(&profile, Vec3::new(0.0, 0.0, -25.0)).expect("negative extrusion should succeed");
+    let vol = prism.volume().expect("prism volume");
+    let expected_vol = 30.0 * 20.0 * 25.0;
+    assert!((vol - expected_vol).abs() / expected_vol < 0.01);
+
+    let bbox = prism.bounding_box();
+    assert!((bbox.min.z - (-25.0)).abs() < 1e-3);
+    assert!((bbox.max.z - 0.0).abs() < 1e-3);
+
+    let mesh = prism.triangulate(0.05).expect("triangulate");
+    let topo = mesh.analyze_topology(1e-4);
+    assert_eq!(topo.open_edges, 0, "must be a closed manifold solid");
+    assert_eq!(topo.non_manifold_edges, 0, "must have zero non-manifold edges");
+}
+
+#[test]
+fn test_extrusion_validation_and_rejections() {
+    // 1. Self-intersecting bowtie
+    let bowtie_profile = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(30.0, 20.0, 0.0), Vec3::new(0.0, 20.0, 0.0), Vec3::new(20.0, 0.0, 0.0)];
+    let res = BrepSolid::extrude(&bowtie_profile, Vec3::new(0.0, 0.0, 25.0));
+    assert!(res.is_err(), "bowtie profile must be rejected");
+    let err = res.unwrap_err();
+    assert!(matches!(err, BrepError::InvalidGeometry(_)), "expected InvalidGeometry, got {err:?}");
+    let err_str = err.to_string();
+    assert!(err_str.contains("self-intersects"), "must report self-intersection: {err_str}");
+
+    // 2. Extrusion direction coplanar with profile plane
+    let valid_profile = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(30.0, 0.0, 0.0), Vec3::new(30.0, 20.0, 0.0), Vec3::new(0.0, 20.0, 0.0)];
+    let coplanar_res = BrepSolid::extrude(&valid_profile, Vec3::new(10.0, 0.0, 0.0));
+    assert!(coplanar_res.is_err(), "coplanar direction must be rejected");
+    let err = coplanar_res.unwrap_err();
+    assert!(matches!(err, BrepError::InvalidGeometry(_)));
+    assert!(err.to_string().contains("coplanar"), "must mention coplanar: {err}");
+
+    // 3. Degenerate collinear vertices (zero area)
+    let collinear_profile = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Vec3::new(20.0, 0.0, 0.0)];
+    let col_res = BrepSolid::extrude(&collinear_profile, Vec3::new(0.0, 0.0, 10.0));
+    assert!(col_res.is_err(), "collinear zero-area profile must be rejected");
+
+    // 4. Non-planar 3D profile
+    let nonplanar_profile = vec![
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(10.0, 0.0, 0.0),
+        Vec3::new(10.0, 10.0, 0.0),
+        Vec3::new(0.0, 10.0, 5.0), // z deviates significantly
+    ];
+    let np_res = BrepSolid::extrude(&nonplanar_profile, Vec3::new(0.0, 0.0, 10.0));
+    assert!(np_res.is_err(), "non-planar profile must be rejected");
+    assert!(np_res.unwrap_err().to_string().contains("coplanar"));
+}
+
+#[test]
+fn test_disjoint_intersection() {
+    let box_a = BrepSolid::box_dimensions(Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 10.0, 10.0)).expect("box a");
+    let box_b = BrepSolid::box_dimensions(Vec3::new(100.0, 100.0, 100.0), Vec3::new(10.0, 10.0, 10.0)).expect("box b");
+    let solid = box_a.intersect(&box_b).expect("disjoint intersection evaluation");
+    assert!(solid.is_empty(), "disjoint intersection must be empty solid");
+    assert_eq!(solid.boundaries_count(), 0);
 }
 
 #[test]
@@ -63,10 +119,7 @@ fn test_boolean_coplanar_rejection() {
     let cyl = BrepSolid::cylinder(Vec3::new(50.0, 50.0, 0.0), 10.0, 50.0, Vec3::new(0.0, 0.0, 1.0)).expect("cyl");
 
     let err = cube.subtract(&cyl, SubtractOptions::default()).unwrap_err();
-    assert!(
-        matches!(err, BrepError::NonTransversalIntersection(_)),
-        "coplanar subtraction must return NonTransversalIntersection, got {err:?}"
-    );
+    assert!(matches!(err, BrepError::NonTransversalIntersection(_)), "coplanar subtraction must return NonTransversalIntersection, got {err:?}");
 }
 
 #[test]
@@ -119,13 +172,8 @@ fn test_deterministic_translations_suite() {
     let punched = cube.subtract(&cyl, SubtractOptions::default()).expect("punched");
 
     // Sequence of various translations ensuring no lockups or boundary corruption
-    let test_vectors = [
-        Vec3::new(0.0, 0.0, 0.0),
-        Vec3::new(100.0, 0.0, 0.0),
-        Vec3::new(0.0, -50.0, 0.0),
-        Vec3::new(0.0, 0.0, 120.0),
-        Vec3::new(-33.3, 44.4, -11.1),
-    ];
+    let test_vectors =
+        [Vec3::new(0.0, 0.0, 0.0), Vec3::new(100.0, 0.0, 0.0), Vec3::new(0.0, -50.0, 0.0), Vec3::new(0.0, 0.0, 120.0), Vec3::new(-33.3, 44.4, -11.1)];
 
     let mut current = punched;
     let mut total_offset = Vec3::ZERO;
@@ -156,10 +204,7 @@ fn test_triangulation_tolerance_control() {
 
     // Unsafe tolerance (< 0.01) must be rejected with NumericalConvergenceFailed without crashing
     let err = punched.triangulate(0.005).unwrap_err();
-    assert!(
-        matches!(err, BrepError::NumericalConvergenceFailed(_)),
-        "unsafe fine tolerance should return NumericalConvergenceFailed, got {err:?}"
-    );
+    assert!(matches!(err, BrepError::NumericalConvergenceFailed(_)), "unsafe fine tolerance should return NumericalConvergenceFailed, got {err:?}");
 }
 
 #[test]
@@ -202,19 +247,15 @@ fn test_step_export_no_duplicate_ids() {
     let mut duplicates = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with('#') && trimmed.contains('=') {
-            if let Some(id_str) = trimmed.split('=').next() {
-                if !ids.insert(id_str.to_string()) {
-                    duplicates.push(id_str.to_string());
-                }
-            }
+        if trimmed.starts_with('#')
+            && trimmed.contains('=')
+            && let Some(id_str) = trimmed.split('=').next()
+            && !ids.insert(id_str.to_string())
+        {
+            duplicates.push(id_str.to_string());
         }
     }
-    assert!(
-        duplicates.is_empty(),
-        "STEP file contains duplicate entity IDs: {:?}",
-        duplicates
-    );
+    assert!(duplicates.is_empty(), "STEP file contains duplicate entity IDs: {:?}", duplicates);
 
     let _ = std::fs::remove_file(out_path);
 }
@@ -248,38 +289,10 @@ fn test_brep_snapshot_versioning() {
 #[test]
 fn test_recipe_evaluation_reconstructs_solid() {
     let mut recipe = Recipe::new();
-    recipe.add_feature(
-        1,
-        FeatureOp::Box {
-            origin: Vec3::ZERO,
-            size: Vec3::new(100.0, 100.0, 50.0),
-        },
-    );
-    recipe.add_feature(
-        2,
-        FeatureOp::Cylinder {
-            center: Vec3::new(50.0, 50.0, -5.0),
-            radius: 10.0,
-            height: 60.0,
-            axis: Vec3::new(0.0, 0.0, 1.0),
-        },
-    );
-    recipe.add_feature(
-        3,
-        FeatureOp::Boolean {
-            kind: BooleanKind::Difference,
-            target_id: 1,
-            tool_id: 2,
-            oversized: true,
-        },
-    );
-    recipe.add_feature(
-        4,
-        FeatureOp::Translation {
-            target_id: 3,
-            delta: Vec3::new(10.0, 20.0, 30.0),
-        },
-    );
+    recipe.add_feature(1, FeatureOp::Box { origin: Vec3::ZERO, size: Vec3::new(100.0, 100.0, 50.0) });
+    recipe.add_feature(2, FeatureOp::Cylinder { center: Vec3::new(50.0, 50.0, -5.0), radius: 10.0, height: 60.0, axis: Vec3::new(0.0, 0.0, 1.0) });
+    recipe.add_feature(3, FeatureOp::Boolean { kind: BooleanKind::Difference, target_id: 1, tool_id: 2, oversized: true });
+    recipe.add_feature(4, FeatureOp::Translation { target_id: 3, delta: Vec3::new(10.0, 20.0, 30.0) });
 
     let evaluated = recipe.evaluate().expect("recipe evaluation should succeed");
     assert_eq!(evaluated.boundaries_count(), 1);

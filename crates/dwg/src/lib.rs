@@ -363,19 +363,19 @@ mod native {
         let version = doc.version;
         let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
         for e in doc.entities() {
-            if let acadrust::entities::EntityType::Unknown(u) = e {
-                if u.raw_dwg_data.is_none() || u.dwg_source_version.is_some_and(|v| v != version) || version == acadrust::DxfVersion::AC1009 {
-                    let name = if u.dxf_name.is_empty() { "UNKNOWN".to_string() } else { u.dxf_name.clone() };
-                    *counts.entry(name).or_insert(0) += 1;
-                }
+            if let acadrust::entities::EntityType::Unknown(u) = e
+                && (u.raw_dwg_data.is_none() || u.dwg_source_version.is_some_and(|v| v != version) || version == acadrust::DxfVersion::AC1009)
+            {
+                let name = if u.dxf_name.is_empty() { "UNKNOWN".to_string() } else { u.dxf_name.clone() };
+                *counts.entry(name).or_insert(0) += 1;
             }
         }
-        for (_, o) in &doc.objects {
-            if let acadrust::objects::ObjectType::Unknown { type_name, raw_dwg_data, raw_dwg_version, .. } = o {
-                if raw_dwg_data.is_none() || raw_dwg_version.is_some_and(|v| v != version) || version == acadrust::DxfVersion::AC1009 {
-                    let name = if type_name.is_empty() { "UNKNOWN_OBJECT".to_string() } else { type_name.clone() };
-                    *counts.entry(name).or_insert(0) += 1;
-                }
+        for o in doc.objects.values() {
+            if let acadrust::objects::ObjectType::Unknown { type_name, raw_dwg_data, raw_dwg_version, .. } = o
+                && (raw_dwg_data.is_none() || raw_dwg_version.is_some_and(|v| v != version) || version == acadrust::DxfVersion::AC1009)
+            {
+                let name = if type_name.is_empty() { "UNKNOWN_OBJECT".to_string() } else { type_name.clone() };
+                *counts.entry(name).or_insert(0) += 1;
             }
         }
         counts

@@ -582,11 +582,12 @@ pub fn acis_data_store_lost_as(d: &Drawing, version: Version) -> std::collection
     }
     let stores = std::iter::once(&d.model).chain(d.layouts.iter().map(|l| &l.entities)).chain(d.blocks.values().map(|b| &b.entities));
     for e in stores.flat_map(|s| s.iter()) {
-        if let cadcraft_doc::EntityKind::Unknown(u) = &e.kind {
-            if MODELER_TYPES.iter().any(|t| u.dxf_type.eq_ignore_ascii_case(t)) && stored.contains(&e.handle) {
-                let n = out.entry(u.dxf_type.clone()).or_insert(0);
-                *n = n.saturating_add(1);
-            }
+        if let cadcraft_doc::EntityKind::Unknown(u) = &e.kind
+            && MODELER_TYPES.iter().any(|t| u.dxf_type.eq_ignore_ascii_case(t))
+            && stored.contains(&e.handle)
+        {
+            let n = out.entry(u.dxf_type.clone()).or_insert(0);
+            *n = n.saturating_add(1);
         }
     }
     out
@@ -598,7 +599,10 @@ pub fn not_saved_message(lost: &std::collections::BTreeMap<String, usize>) -> Op
         return None;
     }
     let list: Vec<String> = lost.iter().map(|(t, n)| format!("{n} {t}")).collect();
-    Some(format!("Cannot save to DWG without losing data (its writer cannot represent these object types yet; save as DXF to preserve them): {}", list.join(", ")))
+    Some(format!(
+        "Cannot save to DWG without losing data (its writer cannot represent these object types yet; save as DXF to preserve them): {}",
+        list.join(", ")
+    ))
 }
 
 /// The command-line error for DXF entities whose ACIS geometry is lost in pre-2013 versions.

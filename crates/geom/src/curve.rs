@@ -631,3 +631,136 @@ pub fn point_in_polygon(poly: &[Vec2], p: Vec2) -> bool {
     }
     inside
 }
+
+/// Validate whether a sequence of 2D vertices forms a simple (non-self-intersecting) closed polygon.
+///
+/// Returns `Ok(())` if the polygon is valid and simple, or an `Err` with a diagnostic message:
+/// - Fails if fewer than 3 vertices.
+/// - Fails if any coordinate is non-finite.
+/// - Fails if non-adjacent vertices coincide (touching at a pinch point).
+/// - Fails if consecutive edges double back on each other (degenerate zero-angle spike).
+/// - Fails if any pair of non-adjacent edges cross, intersect, or overlap collinear segments.
+pub fn validate_simple_polygon(pts: &[Vec2]) -> Result<(), String> {
+    let n = pts.len();
+    if n < 3 {
+        return Err(format!("polygon requires at least 3 vertices, got {n}"));
+    }
+    for (i, p) in pts.iter().enumerate() {
+        if !p.is_finite() {
+            return Err(format!("vertex {i} has non-finite coordinates: {p:?}"));
+        }
+    }
+
+    const TOL: f64 = 1e-7;
+
+    // 1. Check for duplicate vertices (coincident vertices)
+    for i in 0..n {
+        let p_i = match pts.get(i) {
+            Some(p) => *p,
+            None => continue,
+        };
+        for j in (i.saturating_add(1))..n {
+            let p_j = match pts.get(j) {
+                Some(p) => *p,
+                None => continue,
+            };
+            if (p_i.x - p_j.x).abs() <= TOL && (p_i.y - p_j.y).abs() <= TOL {
+                if j == i.saturating_add(1) || (i == 0 && j == n.saturating_sub(1)) {
+                    return Err(format!("polygon has zero-length edge between consecutive vertices {i} and {j}"));
+                } else {
+                    return Err(format!("polygon touches itself: non-adjacent vertices {i} and {j} are coincident"));
+                }
+            }
+        }
+    }
+
+    // 2. Check each pair of edges for intersection or overlap
+    for i in 0..n {
+        let next_i = (i.saturating_add(1)) % n;
+        let a = match pts.get(i) {
+            Some(p) => *p,
+            None => continue,
+        };
+        let b = match pts.get(next_i) {
+            Some(p) => *p,
+            None => continue,
+        };
+        let r = b - a;
+        let r_len2 = r.len2();
+        if r_len2 <= TOL * TOL {
+            return Err(format!("edge {i} has zero length"));
+        }
+
+        for j in (i.saturating_add(1))..n {
+            let next_j = (j.saturating_add(1)) % n;
+            let c = match pts.get(j) {
+                Some(p) => *p,
+                None => continue,
+            };
+            let d = match pts.get(next_j) {
+                Some(p) => *p,
+                None => continue,
+            };
+            let s = d - c;
+            let s_len2 = s.len2();
+            if s_len2 <= TOL * TOL {
+                return Err(format!("edge {j} has zero length"));
+            }
+
+            let is_adjacent = (j == next_i) || (i == 0 && next_j == 0);
+
+            if is_adjacent {
+                let (shared, tip1, tip2) = if j == next_i { (b, a, d) } else { (a, b, c) };
+                let v1 = tip1 - shared;
+                let v2 = tip2 - shared;
+                let cross = v1.cross(v2);
+                let dot = v1.dot(v2);
+                if cross.abs() <= TOL * v1.len() && dot > 0.0 {
+                    return Err(format!("consecutive edges {i} and {j} double back on each other"));
+                }
+                continue;
+            }
+
+            // AABB quick rejection
+            let min_x1 = a.x.min(b.x) - TOL;
+            let max_x1 = a.x.max(b.x) + TOL;
+            let min_y1 = a.y.min(b.y) - TOL;
+            let max_y1 = a.y.max(b.y) + TOL;
+
+            let min_x2 = c.x.min(d.x) - TOL;
+            let max_x2 = c.x.max(d.x) + TOL;
+            let min_y2 = c.y.min(d.y) - TOL;
+            let max_y2 = c.y.max(d.y) + TOL;
+
+            if max_x1 < min_x2 || min_x1 > max_x2 || max_y1 < min_y2 || min_y1 > max_y2 {
+                continue;
+            }
+
+            let denom = r.cross(s);
+            let qp = c - a;
+
+            if denom.abs() > 1e-11 {
+                let t = qp.cross(s) / denom;
+                let u = qp.cross(r) / denom;
+
+                if (-TOL..=1.0 + TOL).contains(&t) && (-TOL..=1.0 + TOL).contains(&u) {
+                    return Err(format!("non-adjacent edges {i} and {j} intersect"));
+                }
+            } else {
+                let cross_collinear = qp.cross(r);
+                if cross_collinear.abs() <= TOL * r.len() {
+                    let t_c = qp.dot(r) / r_len2;
+                    let t_d = (d - a).dot(r) / r_len2;
+                    let t_min = t_c.min(t_d);
+                    let t_max = t_c.max(t_d);
+
+                    if t_max > TOL && t_min < 1.0 - TOL {
+                        return Err(format!("edges {i} and {j} are collinear and overlap"));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}

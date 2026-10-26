@@ -7,8 +7,12 @@ pub fn v3(p: Vec2) -> Vec3 {
     p.to3(0.0)
 }
 
+pub fn line3(a: Vec3, b: Vec3) -> EntityKind {
+    EntityKind::Line(Line { a, b })
+}
+
 pub fn line(a: Vec2, b: Vec2) -> EntityKind {
-    EntityKind::Line(Line { a: v3(a), b: v3(b) })
+    line3(v3(a), v3(b))
 }
 
 pub fn circle(c: Vec2, r: f64) -> EntityKind {

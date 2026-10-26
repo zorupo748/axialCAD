@@ -243,12 +243,7 @@ pub fn standard_patterns() -> Vec<HatchPattern> {
 }
 
 pub fn pattern(name: &str) -> Option<HatchPattern> {
-    let norm = |s: &str| {
-        s.replace(['ó', 'Ó'], "O")
-            .to_ascii_uppercase()
-            .replace('°', "")
-            .replace([' ', '-', '_'], "")
-    };
+    let norm = |s: &str| s.replace(['ó', 'Ó'], "O").to_ascii_uppercase().replace('°', "").replace([' ', '-', '_'], "");
     let target = norm(name);
     standard_patterns().into_iter().find(|p| {
         p.name.eq_ignore_ascii_case(name)

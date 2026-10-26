@@ -377,23 +377,12 @@ fn main() -> eframe::Result {
 }
 
 /// Apply startup file opening and initial drawing creation according to CLI options.
-pub(crate) fn apply_startup(
-    app: &mut CadApp,
-    sample: bool,
-    control_port: Option<u16>,
-    files: &[String],
-) {
+pub(crate) fn apply_startup(app: &mut CadApp, sample: bool, control_port: Option<u16>, files: &[String]) {
     if sample {
         let _ = app.run("ui.sample", serde_json::json!({}));
     }
     app.open_paths(files);
-    if should_create_initial_drawing(
-        sample,
-        control_port.is_some(),
-        files,
-        !app.session.docs.is_empty(),
-        app.opening.busy(),
-    ) {
+    if should_create_initial_drawing(sample, control_port.is_some(), files, !app.session.docs.is_empty(), app.opening.busy()) {
         // In the units the profile asks for (MEASUREINIT, restored above).
         let metric = app.session.settings.measureinit;
         app.session.new_drawing(metric);
@@ -401,13 +390,7 @@ pub(crate) fn apply_startup(
 }
 
 /// Whether startup should create a new blank drawing (Drawing1) instead of showing the Start page.
-pub(crate) fn should_create_initial_drawing(
-    sample: bool,
-    has_control: bool,
-    files: &[String],
-    has_docs: bool,
-    is_opening: bool,
-) -> bool {
+pub(crate) fn should_create_initial_drawing(sample: bool, has_control: bool, files: &[String], has_docs: bool, is_opening: bool) -> bool {
     if sample || has_docs || is_opening {
         return false;
     }

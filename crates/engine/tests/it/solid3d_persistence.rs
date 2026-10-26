@@ -7,16 +7,14 @@
 //! 4. 1 op (Box), 2 ops (Box+Translate), 10 ops, and 50 ops scaling.
 //! 5. Lifecycle test generating box and cylinder via engine commands and verifying standard DXF.
 
-use std::fs;
 use cadcraft_brep::EvaluateRecipe;
-use cadcraft_doc::solid3d::{
-    FeatureNode, FeatureOp, Recipe, Solid3d, Solid3dStatus, SOLID3D_SCHEMA_VERSION,
-};
+use cadcraft_doc::solid3d::{FeatureNode, FeatureOp, Recipe, SOLID3D_SCHEMA_VERSION, Solid3d, Solid3dStatus};
 use cadcraft_doc::{Common, Drawing, Entity, EntityKind};
 use cadcraft_engine::Session;
 use cadcraft_engine::cmd::file::{IoHooks, set_io};
 use cadcraft_geom::Vec3;
 use serde_json::json;
+use std::fs;
 
 fn init_io_hooks() {
     set_io(IoHooks {
@@ -32,46 +30,22 @@ fn test_recipe_length_and_dxf_roundtrip_scaling() {
 
     // Case 1: 1 operation (Box)
     let mut recipe_1 = Recipe::new();
-    recipe_1.features.push(FeatureNode {
-        id: 1,
-        op: FeatureOp::Box {
-            origin: Vec3::new(0.0, 0.0, 0.0),
-            size: Vec3::new(100.0, 50.0, 25.0),
-        },
-    });
+    recipe_1.features.push(FeatureNode { id: 1, op: FeatureOp::Box { origin: Vec3::new(0.0, 0.0, 0.0), size: Vec3::new(100.0, 50.0, 25.0) } });
 
     // Case 2: 2 operations (Box + Translation)
     let mut recipe_2 = recipe_1.clone();
-    recipe_2.features.push(FeatureNode {
-        id: 2,
-        op: FeatureOp::Translation {
-            target_id: 1,
-            delta: Vec3::new(15.0, -10.0, 20.0),
-        },
-    });
+    recipe_2.features.push(FeatureNode { id: 2, op: FeatureOp::Translation { target_id: 1, delta: Vec3::new(15.0, -10.0, 20.0) } });
 
     // Case 3: 10 operations (Box + 9 sequential translations)
     let mut recipe_10 = recipe_1.clone();
     for i in 2..=10 {
-        recipe_10.features.push(FeatureNode {
-            id: i,
-            op: FeatureOp::Translation {
-                target_id: i - 1,
-                delta: Vec3::new(2.0, 1.0, 0.5),
-            },
-        });
+        recipe_10.features.push(FeatureNode { id: i, op: FeatureOp::Translation { target_id: i - 1, delta: Vec3::new(2.0, 1.0, 0.5) } });
     }
 
     // Case 4: 50 operations (Box + 49 sequential operations)
     let mut recipe_50 = recipe_1.clone();
     for i in 2..=50 {
-        recipe_50.features.push(FeatureNode {
-            id: i,
-            op: FeatureOp::Translation {
-                target_id: i - 1,
-                delta: Vec3::new(1.0, 0.5, 0.25),
-            },
-        });
+        recipe_50.features.push(FeatureNode { id: i, op: FeatureOp::Translation { target_id: i - 1, delta: Vec3::new(1.0, 0.5, 0.25) } });
     }
 
     let cases = vec![
@@ -174,32 +148,33 @@ fn test_box_cylinder_interoperable_dxf_export() {
     let mut session = Session::new();
 
     // 1. Create a box of dimensions 100 x 50 x 25
-    let box_res = session.execute(
-        "solid.box",
-        &json!({
-            "origin": [0.0, 0.0, 0.0],
-            "size": [100.0, 50.0, 25.0]
-        }),
-    ).expect("execute solid.box");
+    let box_res = session
+        .execute(
+            "solid.box",
+            &json!({
+                "origin": [0.0, 0.0, 0.0],
+                "size": [100.0, 50.0, 25.0]
+            }),
+        )
+        .expect("execute solid.box");
     assert_eq!(box_res["status"], "ok");
 
     // 2. Create a cylinder of radius 15, height 60 at (200, 0, 0)
-    let cyl_res = session.execute(
-        "solid.cylinder",
-        &json!({
-            "center": [200.0, 0.0, 0.0],
-            "radius": 15.0,
-            "height": 60.0,
-            "axis": [0.0, 0.0, 1.0]
-        }),
-    ).expect("execute solid.cylinder");
+    let cyl_res = session
+        .execute(
+            "solid.cylinder",
+            &json!({
+                "center": [200.0, 0.0, 0.0],
+                "radius": 15.0,
+                "height": 60.0,
+                "axis": [0.0, 0.0, 1.0]
+            }),
+        )
+        .expect("execute solid.cylinder");
     assert_eq!(cyl_res["status"], "ok");
 
     // 3. Export to DXF
-    session.execute(
-        "saveas",
-        &json!({ "path": dxf_path.to_string_lossy() }),
-    ).expect("execute saveas");
+    session.execute("saveas", &json!({ "path": dxf_path.to_string_lossy() })).expect("execute saveas");
     assert!(dxf_path.exists(), "dxf file must exist on disk");
 
     // 4. Verify the raw DXF file content
@@ -209,22 +184,13 @@ fn test_box_cylinder_interoperable_dxf_export() {
 
     // 5. Read back via CADCraft DXF reader
     session.execute("close", &json!({})).expect("execute close");
-    session.execute(
-        "open",
-        &json!({ "path": dxf_path.to_string_lossy() }),
-    ).expect("execute open");
+    session.execute("open", &json!({ "path": dxf_path.to_string_lossy() })).expect("execute open");
 
     // 6. Verify that exactly 2 solid entities were restored (no loose duplicate faces in model space)
     let doc = session.doc().expect("session doc");
     assert_eq!(doc.model.len(), 2, "must restore exactly 2 Solid3d entities, no duplicated faces");
 
-    let solids: Vec<&Solid3d> = doc.model.iter().filter_map(|e| {
-        if let EntityKind::Solid3d(s) = &e.kind {
-            Some(s)
-        } else {
-            None
-        }
-    }).collect();
+    let solids: Vec<&Solid3d> = doc.model.iter().filter_map(|e| if let EntityKind::Solid3d(s) = &e.kind { Some(s) } else { None }).collect();
 
     assert_eq!(solids.len(), 2, "both solids must be restored as Solid3d");
 

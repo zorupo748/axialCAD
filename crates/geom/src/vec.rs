@@ -174,6 +174,12 @@ impl Vec3 {
     pub fn is_finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
     }
+    pub fn dist(self, o: Vec3) -> f64 {
+        (self - o).len()
+    }
+    pub fn near(self, o: Vec3, tol: f64) -> bool {
+        tol.is_finite() && tol >= 0.0 && self.dist(o) <= tol
+    }
 }
 
 impl Add for Vec3 {

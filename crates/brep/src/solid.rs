@@ -7,7 +7,7 @@ use std::path::Path;
 use cadcraft_geom::Vec3;
 use truck_meshalgo::prelude::*;
 use truck_modeling::cgmath::{Point3, Rad, Vector3};
-use truck_modeling::{builder, Face, Wire};
+use truck_modeling::{Face, Wire, builder};
 use truck_stepio::out::{StepDesign, StepDisplay, StepHeaderDescriptor, StepModel};
 
 use crate::bounds::Bounds3;
@@ -103,8 +103,8 @@ impl BrepSolid {
                 Rad(std::f64::consts::TAU),
                 4,
             );
-            let cap = builder::try_attach_plane(&[circle_wire])
-                .map_err(|e| BrepError::InvalidGeometry(format!("failed to attach cylinder cap: {e:?}")))?;
+            let cap =
+                builder::try_attach_plane(&[circle_wire]).map_err(|e| BrepError::InvalidGeometry(format!("failed to attach cylinder cap: {e:?}")))?;
             let solid = builder::tsweep(&cap, Vector3::new(sweep_vec.x, sweep_vec.y, sweep_vec.z));
             Ok(BrepSolid { inner: solid })
         }));
@@ -118,10 +118,7 @@ impl BrepSolid {
     /// Extrude a closed 3D polygon profile along a direction vector.
     pub fn extrude(points: &[Vec3], direction: Vec3) -> Result<Self, BrepError> {
         if points.len() < 3 {
-            return Err(BrepError::InvalidGeometry(format!(
-                "extrusion profile requires at least 3 vertices, got {}",
-                points.len()
-            )));
+            return Err(BrepError::InvalidGeometry(format!("extrusion profile requires at least 3 vertices, got {}", points.len())));
         }
         if !direction.is_finite() || direction.len() <= 1e-9 {
             return Err(BrepError::InvalidGeometry("extrusion direction must be non-zero and finite".into()));
@@ -132,11 +129,63 @@ impl BrepSolid {
             }
         }
 
+        // 1. Compute Newell's polygon normal
+        let n = points.len();
+        let mut normal = Vec3::ZERO;
+        for i in 0..n {
+            let p0 = match points.get(i) {
+                Some(p) => *p,
+                None => continue,
+            };
+            let p1 = match points.get((i.saturating_add(1)) % n) {
+                Some(p) => *p,
+                None => continue,
+            };
+            normal.x += (p0.y - p1.y) * (p0.z + p1.z);
+            normal.y += (p0.z - p1.z) * (p0.x + p1.x);
+            normal.z += (p0.x - p1.x) * (p0.y + p1.y);
+        }
+        let normal_len = normal.len();
+        if normal_len <= 1e-9 {
+            return Err(BrepError::InvalidGeometry("extrusion profile has degenerate zero area or collinear vertices".into()));
+        }
+        let unit_normal = normal.normalized();
+
+        // 2. Verify all vertices are coplanar with the polygon plane
+        let p_base = match points.first() {
+            Some(p) => *p,
+            None => return Err(BrepError::InvalidGeometry("empty profile".into())),
+        };
+        for (i, p) in points.iter().enumerate() {
+            let dist = (*p - p_base).dot(unit_normal).abs();
+            if dist > 1e-4 {
+                return Err(BrepError::InvalidGeometry(format!("vertex {i} is not coplanar with profile plane: distance {dist} exceeds tolerance")));
+            }
+        }
+
+        // 3. Verify extrusion direction is not coplanar with the profile plane (which would collapse volume to zero)
+        if unit_normal.dot(direction).abs() <= 1e-9 * direction.len() {
+            return Err(BrepError::InvalidGeometry(
+                "extrusion direction cannot be coplanar with profile plane (would create zero-volume solid)".into(),
+            ));
+        }
+
+        // 4. Project into 2D plane and validate that the polygon is simple (no self-intersections or pinch points)
+        let perp = if unit_normal.z.abs() < 0.9 {
+            unit_normal.cross(Vec3::new(0.0, 0.0, 1.0)).normalized()
+        } else {
+            unit_normal.cross(Vec3::new(1.0, 0.0, 0.0)).normalized()
+        };
+        let u = perp;
+        let v = unit_normal.cross(u);
+        let pts2d: Vec<cadcraft_geom::Vec2> = points.iter().map(|p| cadcraft_geom::Vec2::new(p.dot(u), p.dot(v))).collect();
+
+        if let Err(err_msg) = cadcraft_geom::validate_simple_polygon(&pts2d) {
+            return Err(BrepError::InvalidGeometry(format!("extrusion profile self-intersects: {err_msg}")));
+        }
+
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let vertices: Vec<_> = points
-                .iter()
-                .map(|p| builder::vertex(Point3::new(p.x, p.y, p.z)))
-                .collect();
+            let vertices: Vec<_> = points.iter().map(|p| builder::vertex(Point3::new(p.x, p.y, p.z))).collect();
 
             let mut edges = Vec::with_capacity(vertices.len());
             for i in 0..vertices.len() {
@@ -145,8 +194,8 @@ impl BrepSolid {
             }
 
             let wire = Wire::from_iter(edges);
-            let face: Face = builder::try_attach_plane(&[wire])
-                .map_err(|e| BrepError::InvalidGeometry(format!("profile is not planar or valid: {e:?}")))?;
+            let face: Face =
+                builder::try_attach_plane(&[wire]).map_err(|e| BrepError::InvalidGeometry(format!("profile is not planar or valid: {e:?}")))?;
 
             let solid = builder::tsweep(&face, Vector3::new(direction.x, direction.y, direction.z));
             Ok(BrepSolid { inner: solid })
@@ -164,26 +213,18 @@ impl BrepSolid {
         let self_clone = self.inner.clone();
         let other_clone = other.inner.clone();
 
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            truck_shapeops::or(&self_clone, &other_clone, tolerance)
-        }));
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| truck_shapeops::or(&self_clone, &other_clone, tolerance)));
 
         match res {
             Ok(Some(solid)) => Ok(BrepSolid { inner: solid }),
-            Ok(None) => Err(BrepError::NonTransversalIntersection(
-                "boolean union failed: faces are coincident, tangent, or non-transversal".into(),
-            )),
+            Ok(None) => Err(BrepError::NonTransversalIntersection("boolean union failed: faces are coincident, tangent, or non-transversal".into())),
             Err(_) => Err(BrepError::KernelPanic("panic in boolean union".into())),
         }
     }
 
     /// Compute the boolean difference (self minus tool).
     pub fn subtract(&self, tool: &BrepSolid, options: SubtractOptions) -> Result<BrepSolid, BrepError> {
-        let tol = if options.tolerance.is_finite() && options.tolerance > 1e-9 {
-            options.tolerance
-        } else {
-            0.05
-        };
+        let tol = if options.tolerance.is_finite() && options.tolerance > 1e-9 { options.tolerance } else { 0.05 };
 
         let self_clone = self.inner.clone();
         let mut tool_clone = tool.inner.clone();
@@ -210,15 +251,13 @@ impl BrepSolid {
         let self_clone = self.inner.clone();
         let other_clone = other.inner.clone();
 
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            truck_shapeops::and(&self_clone, &other_clone, tolerance)
-        }));
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| truck_shapeops::and(&self_clone, &other_clone, tolerance)));
 
         match res {
             Ok(Some(solid)) => Ok(BrepSolid { inner: solid }),
-            Ok(None) => Err(BrepError::NonTransversalIntersection(
-                "boolean intersection failed: faces are coincident, tangent, or non-transversal".into(),
-            )),
+            Ok(None) => {
+                Err(BrepError::NonTransversalIntersection("boolean intersection failed: faces are coincident, tangent, or non-transversal".into()))
+            }
             Err(_) => Err(BrepError::KernelPanic("panic in boolean intersection".into())),
         }
     }
@@ -230,9 +269,8 @@ impl BrepSolid {
         }
 
         let self_clone = self.inner.clone();
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            builder::translated(&self_clone, Vector3::new(delta.x, delta.y, delta.z))
-        }));
+        let res =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| builder::translated(&self_clone, Vector3::new(delta.x, delta.y, delta.z))));
 
         match res {
             Ok(solid) => Ok(BrepSolid { inner: solid }),
@@ -243,6 +281,11 @@ impl BrepSolid {
     /// Number of connected shell boundaries in the B-Rep solid.
     pub fn boundaries_count(&self) -> usize {
         self.inner.boundaries().len()
+    }
+
+    /// Whether the B-Rep solid has zero boundary shells (empty solid).
+    pub fn is_empty(&self) -> bool {
+        self.inner.boundaries().is_empty()
     }
 
     /// Compute the 3D bounding box by triangulating with a coarse tolerance.
@@ -268,9 +311,7 @@ impl BrepSolid {
     /// Generate a triangle mesh approximation with the specified chordal tolerance.
     pub fn triangulate(&self, tolerance: f64) -> Result<TriangleMesh, BrepError> {
         if !tolerance.is_finite() || tolerance <= 0.0 {
-            return Err(BrepError::InvalidGeometry(format!(
-                "meshing tolerance must be positive and finite, got {tolerance}"
-            )));
+            return Err(BrepError::InvalidGeometry(format!("meshing tolerance must be positive and finite, got {tolerance}")));
         }
 
         // Controlled protection against Newton convergence divergence in upstream intersection curves
@@ -290,17 +331,11 @@ impl BrepSolid {
         let polymesh = match res {
             Ok(m) => m,
             Err(_) => {
-                return Err(BrepError::NumericalConvergenceFailed(
-                    "kernel panicked during surface discretization".into(),
-                ));
+                return Err(BrepError::NumericalConvergenceFailed("kernel panicked during surface discretization".into()));
             }
         };
 
-        let positions: Vec<Vec3> = polymesh
-            .positions()
-            .iter()
-            .map(|p| Vec3::new(p.x, p.y, p.z))
-            .collect();
+        let positions: Vec<Vec3> = polymesh.positions().iter().map(|p| Vec3::new(p.x, p.y, p.z)).collect();
 
         let mut triangles = Vec::new();
         let mut normals = Vec::new();
@@ -329,11 +364,7 @@ impl BrepSolid {
             }
         }
 
-        Ok(TriangleMesh {
-            positions,
-            triangles,
-            normals,
-        })
+        Ok(TriangleMesh { positions, triangles, normals })
     }
 
     /// Export the solid to binary STL file.
@@ -350,13 +381,7 @@ impl BrepSolid {
             let compressed = self_clone.compress();
             let model = StepModel::from(&compressed);
             let repr = StepDesign::from_model(model);
-            let display = StepDisplay::new(
-                StepHeaderDescriptor {
-                    organization_system: "CADCraft B-Rep".to_string(),
-                    ..Default::default()
-                },
-                repr,
-            );
+            let display = StepDisplay::new(StepHeaderDescriptor { organization_system: "CADCraft B-Rep".to_string(), ..Default::default() }, repr);
             display.to_string()
         }));
 
@@ -366,8 +391,7 @@ impl BrepSolid {
         };
 
         let mut file = File::create(path).map_err(|e| BrepError::IoError(e.to_string()))?;
-        file.write_all(step_text.as_bytes())
-            .map_err(|e| BrepError::IoError(e.to_string()))?;
+        file.write_all(step_text.as_bytes()).map_err(|e| BrepError::IoError(e.to_string()))?;
         file.flush().map_err(|e| BrepError::IoError(e.to_string()))?;
 
         Ok(())
@@ -375,16 +399,15 @@ impl BrepSolid {
 
     /// Serialize this B-Rep solid into a versioned snapshot.
     pub fn to_snapshot(&self) -> Result<BrepSnapshot, BrepError> {
-        let payload = serde_json::to_vec(&self.inner)
-            .map_err(|e| BrepError::SerializationError(format!("JSON serialization failed: {e}")))?;
+        let payload = serde_json::to_vec(&self.inner).map_err(|e| BrepError::SerializationError(format!("JSON serialization failed: {e}")))?;
         Ok(BrepSnapshot::new(payload))
     }
 
     /// Reconstruct a B-Rep solid from a versioned snapshot.
     pub fn from_snapshot(snapshot: &BrepSnapshot) -> Result<Self, BrepError> {
         snapshot.validate_compatibility()?;
-        let inner: truck_modeling::Solid = serde_json::from_slice(&snapshot.payload)
-            .map_err(|e| BrepError::SerializationError(format!("JSON deserialization failed: {e}")))?;
+        let inner: truck_modeling::Solid =
+            serde_json::from_slice(&snapshot.payload).map_err(|e| BrepError::SerializationError(format!("JSON deserialization failed: {e}")))?;
         Ok(BrepSolid { inner })
     }
 }

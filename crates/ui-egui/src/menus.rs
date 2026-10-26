@@ -285,7 +285,7 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
             toggle(&mut app.ui.show_ucs_icon, params);
             Ok(Value::Null)
         }
-        "ui.toggle.menubar" => {
+        "ui.toggle.menubar" | "menubar" => {
             toggle(&mut app.ui.in_window_menu, params);
             Ok(Value::Null)
         }
@@ -621,30 +621,11 @@ pub fn menu_bar(app: &mut CadApp, ui: &mut egui::Ui) {
     let t = crate::theme::Tokens::get();
     let tree = tree(app);
     let mut clicked = None;
-    let show_qat = !app.integrated_titlebar && app.ui.show_toolbar;
-
     egui::Panel::top("cc_menubar").exact_size(24.0).frame(egui::Frame::NONE.fill(t.chrome_dark).inner_margin(egui::Margin::symmetric(4, 0))).show(
         ui,
         |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
-
-                if show_qat {
-                    let r = ui.available_rect_before_wrap();
-                    let (qat_cmd, qat_w) = crate::chrome::render_quick_access(ui, r, r.left() + 2.0, 20.0);
-                    if let Some(c) = qat_cmd {
-                        clicked = Some(c.to_string());
-                    }
-                    ui.add_space(qat_w + 4.0);
-                    // Separator before menus
-                    let sep_x = r.left() + qat_w + 4.0;
-                    ui.painter().vline(
-                        sep_x,
-                        (r.center().y - 8.0)..=(r.center().y + 8.0),
-                        egui::Stroke::new(1.0, t.border),
-                    );
-                    ui.add_space(6.0);
-                }
 
                 egui::MenuBar::new().ui(ui, |ui| {
                     // Titles first, so a hovered title can take over before any menu is drawn.

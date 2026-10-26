@@ -660,6 +660,20 @@ impl Interactive for TanCircleM {
             }
         }
     }
+    fn preview(&self, _s: &Session, c: Vec2) -> Vec<EntityKind> {
+        if self.radius_mode && self.picks.len() == 2 {
+            let r = self.picks.last().map(|x| x.1.dist(c)).unwrap_or(0.0);
+            if r > 1e-6
+                && let (Some(first), Some(second)) = (self.picks.first(), self.picks.get(1))
+            {
+                let ((o1, p1), (o2, p2)) = (*first, *second);
+                if let Some(circ) = curves::ttr(o1, p1, o2, p2, r) {
+                    return vec![circle(circ.center, circ.radius)];
+                }
+            }
+        }
+        Vec::new()
+    }
 }
 
 // ---------------- ellipse entries ----------------

@@ -3,13 +3,11 @@
 //! Separates the editable parametric intent (the recipe) from the evaluated
 //! B-Rep solid and derived tessellations.
 
-use std::collections::HashMap;
 use crate::error::BrepError;
 use crate::solid::{BrepSolid, SubtractOptions};
+use std::collections::HashMap;
 
-pub use cadcraft_doc::solid3d::{
-    BooleanKind, FeatureNode, FeatureOp, Recipe, Solid3d, Solid3dStatus, SOLID3D_SCHEMA_VERSION,
-};
+pub use cadcraft_doc::solid3d::{BooleanKind, FeatureNode, FeatureOp, Recipe, SOLID3D_SCHEMA_VERSION, Solid3d, Solid3dStatus};
 
 /// Trait to evaluate a parametric recipe into a concrete `BrepSolid`.
 pub trait EvaluateRecipe {
@@ -25,19 +23,14 @@ impl EvaluateRecipe for Recipe {
         for feature in &self.features {
             let solid = match &feature.op {
                 FeatureOp::Box { origin, size } => BrepSolid::box_dimensions(*origin, *size)?,
-                FeatureOp::Cylinder { center, radius, height, axis } => {
-                    BrepSolid::cylinder(*center, *radius, *height, *axis)?
-                }
-                FeatureOp::Extrusion { profile, direction } => {
-                    BrepSolid::extrude(profile, *direction)?
-                }
+                FeatureOp::Cylinder { center, radius, height, axis } => BrepSolid::cylinder(*center, *radius, *height, *axis)?,
+                FeatureOp::Extrusion { profile, direction } => BrepSolid::extrude(profile, *direction)?,
                 FeatureOp::Boolean { kind, target_id, tool_id, .. } => {
-                    let target = solids.get(target_id).ok_or_else(|| {
-                        BrepError::InvalidGeometry(format!("boolean target feature id {target_id} not found"))
-                    })?;
-                    let tool = solids.get(tool_id).ok_or_else(|| {
-                        BrepError::InvalidGeometry(format!("boolean tool feature id {tool_id} not found"))
-                    })?;
+                    let target = solids
+                        .get(target_id)
+                        .ok_or_else(|| BrepError::InvalidGeometry(format!("boolean target feature id {target_id} not found")))?;
+                    let tool =
+                        solids.get(tool_id).ok_or_else(|| BrepError::InvalidGeometry(format!("boolean tool feature id {tool_id} not found")))?;
                     match kind {
                         BooleanKind::Union => target.union(tool)?,
                         BooleanKind::Difference => target.subtract(tool, SubtractOptions::default())?,
@@ -45,9 +38,9 @@ impl EvaluateRecipe for Recipe {
                     }
                 }
                 FeatureOp::Translation { target_id, delta } => {
-                    let target = solids.get(target_id).ok_or_else(|| {
-                        BrepError::InvalidGeometry(format!("translation target feature id {target_id} not found"))
-                    })?;
+                    let target = solids
+                        .get(target_id)
+                        .ok_or_else(|| BrepError::InvalidGeometry(format!("translation target feature id {target_id} not found")))?;
                     target.translate(*delta)?
                 }
             };

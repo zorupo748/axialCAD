@@ -182,7 +182,7 @@ impl Default for UiState {
             collapsed_groups: Vec::new(),
             hidden_tools: Vec::new(),
             properties_all: true,
-            in_window_menu: !cfg!(target_os = "macos"),
+            in_window_menu: false,
             start_tab: false,
             dialog: None,
             history_lines: 3,

@@ -314,12 +314,7 @@ fn lines_of(d: &Drawing, h: &Hatch) -> Vec<PatternLine> {
     if !h.pattern_lines.is_empty() {
         h.pattern_lines.iter().take(MAX_PATTERN_LINES).cloned().collect()
     } else if h.pattern.eq_ignore_ascii_case("_U") || h.pattern.eq_ignore_ascii_case("USER") {
-        vec![PatternLine {
-            angle: 0.0,
-            origin: (0.0, 0.0),
-            delta: (0.0, 1.0),
-            dashes: Vec::new(),
-        }]
+        vec![PatternLine { angle: 0.0, origin: (0.0, 0.0), delta: (0.0, 1.0), dashes: Vec::new() }]
     } else {
         pattern_for(d, &h.pattern).or_else(|| pattern_for(d, "ANSI31")).map(|p| p.lines).unwrap_or_default()
     }

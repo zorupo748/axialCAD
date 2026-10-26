@@ -97,7 +97,8 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui, l: &Layout) {
     let face_col = if part == Some(Part::Face) { Color32::from_rgb(0xb8, 0xbc, 0xc2) } else { Color32::from_rgb(0x9a, 0x9e, 0xa4) };
     p.rect_filled(l.face, 2.0, face_col);
     p.rect_stroke(l.face, 2.0, Stroke::new(1.0, Color32::from_rgb(0x6c, 0x70, 0x76)), egui::StrokeKind::Inside);
-    p.text(c, egui::Align2::CENTER_CENTER, crate::tl!("TOP"), egui::FontId::proportional(13.0), Color32::from_rgb(0x50, 0x54, 0x5a));
+    let view_name = app.session.camera().view_name();
+    p.text(c, egui::Align2::CENTER_CENTER, view_name, egui::FontId::proportional(11.0), Color32::from_rgb(0x50, 0x54, 0x5a));
     paint_home(&p, l.home, part == Some(Part::Home));
 
     let resp = match part {
@@ -105,20 +106,39 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui, l: &Layout) {
         None => resp,
     };
     let pressed_on = resp.interact_pointer_pos().and_then(|o| l.part_at(o));
+    if resp.dragged() {
+        let d = resp.drag_delta();
+        let _ = app.session.orbit_step(f64::from(d.x), f64::from(d.y));
+    }
     if resp.clicked() {
         match pressed_on {
             Some(Part::Face | Part::Home) => {
-                let _ = app.run("zoom.extents", json!({}));
+                let _ = app.run("plan", json!({}));
             }
-            Some(Part::Ring) => app.session.echo(NO_TWIST),
+            Some(Part::Ring) => {
+                app.session.echo(NO_TWIST);
+            }
             None => {}
         }
     }
-    if resp.drag_started() && pressed_on == Some(Part::Ring) {
-        app.session.echo(NO_TWIST);
-    }
     let mut action = None;
     resp.context_menu(|ui| {
+        if ui.button("Top (Plan View)").clicked() {
+            action = Some(("plan", json!({"option": "world"})));
+            ui.close();
+        }
+        if ui.button("Front View").clicked() {
+            action = Some(("view.front", json!({})));
+            ui.close();
+        }
+        if ui.button("SW Isometric").clicked() {
+            action = Some(("view.swiso", json!({})));
+            ui.close();
+        }
+        if ui.button("SE Isometric").clicked() {
+            action = Some(("view.seiso", json!({})));
+            ui.close();
+        }
         if ui.button("Home").clicked() {
             action = Some(("zoom.extents", json!({})));
             ui.close();

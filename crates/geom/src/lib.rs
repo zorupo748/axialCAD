@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod bounds;
+mod camera;
 mod curve;
 mod fillet;
 mod intersect;
@@ -19,8 +20,10 @@ mod spline_fit;
 mod vec;
 
 pub use bounds::Bounds2;
+pub use camera::{MAX_ORBIT_ELEVATION, OrbitCamera};
 pub use curve::{
     Arc, Circle, Ellipse, Line, PolyVertex, Polyline, Segment, arc_to_bulge, bulge_to_arc, point_in_polygon, polygon_centroid, shoelace,
+    validate_simple_polygon,
 };
 pub use fillet::{CornerFit, TanCurve, tangent_circles};
 pub use intersect::{circle_circle, intersect_ext, intersect_segments, line_circle, line_line, line_line_infinite};

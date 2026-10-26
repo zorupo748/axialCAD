@@ -38,7 +38,7 @@ pub mod units;
 use std::sync::Arc;
 
 use cadcraft_doc::{Common, Drawing, Entity, EntityKind, Handle, Space};
-use cadcraft_geom::{Bounds2, Vec2};
+use cadcraft_geom::{Bounds2, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -147,6 +147,7 @@ pub struct DocState {
     /// The Block Editor (BEDIT), when it is open: `doc` is then the editor's drawing, and the
     /// drawing itself waits in it ([`DocState::drawing`]).
     pub block_edit: Option<blockedit::BlockEdit>,
+    pub camera: cadcraft_geom::OrbitCamera,
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -173,6 +174,7 @@ impl DocState {
             uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             binary_dxf: false,
             block_edit: None,
+            camera: cadcraft_geom::OrbitCamera::default(),
         }
     }
     /// The drawing has changes not saved to its file, or the Block Editor has changes not yet
@@ -275,6 +277,8 @@ impl DocState {
         true
     }
     fn put_paper_view(&mut self, v: View) {
+        self.camera.target = cadcraft_geom::Vec3::new(v.center.x, v.center.y, self.camera.target.z);
+        self.camera.height = v.height;
         match self.views.iter_mut().find(|(s, _)| *s == self.space) {
             Some((_, slot)) => *slot = v,
             None => self.views.push((self.space.clone(), v)),
@@ -658,6 +662,7 @@ pub struct Session {
     pub last_command: Option<String>,
     /// LASTPOINT.
     pub last_point: Vec2,
+    pub last_point3: Vec3,
     /// The last segment given at a point prompt (its base point and the point): polar angles
     /// relative to the last segment (POLARMODE bit 1) are measured from it.
     pub last_segment: Option<(Vec2, Vec2)>,
@@ -736,6 +741,7 @@ impl Session {
             log: Vec::new(),
             last_command: None,
             last_point: Vec2::ZERO,
+            last_point3: Vec3::ZERO,
             last_segment: None,
             last_polar: None,
             point_mods: Vec::new(),
@@ -813,6 +819,16 @@ impl Session {
     }
     pub fn state_mut(&mut self) -> Result<&mut DocState> {
         self.docs.get_mut(self.active).ok_or(EngineError::NoDocument)
+    }
+    pub fn camera(&self) -> cadcraft_geom::OrbitCamera {
+        self.state().map(|st| st.camera).unwrap_or_default()
+    }
+    pub fn set_camera(&mut self, camera: cadcraft_geom::OrbitCamera) {
+        if let Ok(st) = self.state_mut() {
+            st.camera = camera;
+            let center = cadcraft_geom::Vec2::new(camera.target.x, camera.target.y);
+            st.set_view_quiet(View { center, height: camera.height });
+        }
     }
     pub fn doc(&self) -> Result<&Drawing> {
         Ok(&self.state()?.doc)
@@ -1169,6 +1185,22 @@ impl Session {
                     }
                 }
             }
+            Input::Point3(p) => {
+                let p2 = p.xy();
+                let ap = self.pixel_size() * self.settings.pickbox.max(1.0) * 1.5;
+                if let Some(pw) = self.pending_window.take() {
+                    let crossing = p2.x < pw.corner.x;
+                    let hs = select::select_window(self.doc()?, &space, Bounds2::new(pw.corner, p2), crossing);
+                    return Ok(Some(Input::Pick(cmd::groups::expand(self, hs))));
+                }
+                match select::pick(self.doc()?, &space, p2, ap) {
+                    Some(h) => Ok(Some(Input::Pick(cmd::groups::expand(self, vec![h])))),
+                    None => {
+                        self.pending_window = Some(PendingWindow { corner: p2, during_command: true });
+                        Ok(None)
+                    }
+                }
+            }
             Input::Text(ref t) | Input::Keyword(ref t) => {
                 let tl = t.trim().to_ascii_lowercase();
                 let d = self.doc()?;
@@ -1221,6 +1253,11 @@ impl Session {
                     return Ok(mode.select(self.doc()?, &self.space()).map(Input::Pick));
                 }
             }
+            Input::Point3(p) => {
+                if mode.push(p.xy()) {
+                    return Ok(mode.select(self.doc()?, &self.space()).map(Input::Pick));
+                }
+            }
             Input::Keyword(k) if k == "Undo" => {
                 mode.pts.pop();
             }
@@ -1234,17 +1271,29 @@ impl Session {
     }
 
     fn feed(&mut self, input: Option<Input>) -> Result<()> {
-        let base = if matches!(input, Some(Input::Point(_))) { self.current_prompt().and_then(|p| p.base) } else { None };
+        let base = if matches!(input, Some(Input::Point(_) | Input::Point3(_))) { self.current_prompt().and_then(|p| p.base) } else { None };
         let Some(mut run) = self.running.take() else { return Ok(()) };
         let step = match input {
             Some(Input::Cancel) => Ok(Step::Cancel),
             Some(i) => {
+                let i = match i {
+                    Input::Point3(p3) if run.id != "line" => Input::Point(p3.xy()),
+                    other => other,
+                };
                 if let Input::Point(p) = &i {
                     self.last_point = *p;
+                    self.last_point3 = Vec3::new(p.x, p.y, self.last_point3.z);
                     if let Some(b) = base.filter(|b| b.is_finite() && p.is_finite() && b.dist(*p) > 1e-12) {
                         self.last_segment = Some((b, *p));
                     }
                     // A temporary tracking point (TT) serves one point.
+                    self.tracking.release_temporary();
+                } else if let Input::Point3(p) = &i {
+                    self.last_point = p.xy();
+                    self.last_point3 = *p;
+                    if let Some(b) = base.filter(|b| b.is_finite() && p.xy().is_finite() && b.dist(p.xy()) > 1e-12) {
+                        self.last_segment = Some((b, p.xy()));
+                    }
                     self.tracking.release_temporary();
                 }
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run.machine.input(self, i)));
@@ -1575,7 +1624,13 @@ impl Session {
                 lisp::value::Value::Real(r) => self.typed(&format!("{r}")),
                 lisp::value::Value::Str(s) => self.typed(&s),
                 other => match other.as_point() {
-                    Some(p) => self.input(Input::Point(Vec2::new(p[0], p[1]))),
+                    Some(p) => {
+                        if p[2] != 0.0 {
+                            self.input(Input::Point3(Vec3::new(p[0], p[1], p[2])))
+                        } else {
+                            self.input(Input::Point(Vec2::new(p[0], p[1])))
+                        }
+                    }
                     None => {
                         self.echo(format!("Invalid input: {}", lisp::value::to_text(&other, true)));
                         Ok(())
@@ -1597,9 +1652,13 @@ impl Session {
             return self.input(Input::Keyword(k));
         }
         if prompt.accept.point {
-            if let Some(p) = prompt::parse_point_with(tt, self.last_point, &self.angle_settings()) {
+            if let Some((p3, has_z)) = prompt::parse_point3_opt(tt, self.last_point3, &self.angle_settings()) {
                 self.last_polar = prompt::parse_polar_text(tt, &self.angle_settings());
-                return self.input(Input::Point(p));
+                if has_z || p3.z != 0.0 {
+                    return self.input(Input::Point3(p3));
+                } else {
+                    return self.input(Input::Point(p3.xy()));
+                }
             }
             // Direct distance entry along the tracking path the cursor is on, from the point it
             // comes from (an acquired or temporary tracking point needs no base point).

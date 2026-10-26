@@ -28,11 +28,7 @@ pub struct BrepSnapshot {
 impl BrepSnapshot {
     /// Create a new snapshot with current version and kernel metadata.
     pub fn new(payload: Vec<u8>) -> Self {
-        BrepSnapshot {
-            format_version: BREP_FORMAT_VERSION,
-            kernel_revision: KERNEL_REVISION.to_string(),
-            payload,
-        }
+        BrepSnapshot { format_version: BREP_FORMAT_VERSION, kernel_revision: KERNEL_REVISION.to_string(), payload }
     }
 
     /// Validate that this snapshot matches the expected format version and kernel revision.

@@ -12,32 +12,13 @@ use crate::theme::Tokens;
 #[derive(Clone, Copy, Debug)]
 pub enum RibbonItem {
     /// Large button with icon on top and label below (52x64).
-    Large {
-        icon: Icon,
-        id: &'static str,
-        label: &'static str,
-        tip: &'static str,
-    },
+    Large { icon: Icon, id: &'static str, label: &'static str, tip: &'static str },
     /// Split button: main button executes default command on click; dropdown arrow opens popup with variants.
-    SplitButton {
-        icon: Icon,
-        id: &'static str,
-        label: &'static str,
-        tip: &'static str,
-        menu: &'static [(&'static str, &'static str, Icon)],
-    },
+    SplitButton { icon: Icon, id: &'static str, label: &'static str, tip: &'static str, menu: &'static [(&'static str, &'static str, Icon)] },
     /// Large button with a dropdown of alternative/related commands.
-    LargeDropdown {
-        icon: Icon,
-        id: &'static str,
-        label: &'static str,
-        tip: &'static str,
-        menu: &'static [(&'static str, &'static str, Icon)],
-    },
+    LargeDropdown { icon: Icon, id: &'static str, label: &'static str, tip: &'static str, menu: &'static [(&'static str, &'static str, Icon)] },
     /// Medium button grid (e.g. 3 rows x N columns): icon left, label right.
-    MediumGrid {
-        cols: &'static [&'static [MediumItem]],
-    },
+    MediumGrid { cols: &'static [&'static [MediumItem]] },
     /// Column of up to 3 compact items stacked vertically.
     CompactColumn(&'static [CompactItem]),
     /// Column of up to 3 icon-only compact items stacked vertically.
@@ -50,19 +31,8 @@ pub enum RibbonItem {
 
 #[derive(Clone, Copy, Debug)]
 pub enum MediumItem {
-    Button {
-        icon: Icon,
-        id: &'static str,
-        label: &'static str,
-        tip: &'static str,
-    },
-    Dropdown {
-        icon: Icon,
-        id: &'static str,
-        label: &'static str,
-        tip: &'static str,
-        menu: &'static [(&'static str, &'static str, Icon)],
-    },
+    Button { icon: Icon, id: &'static str, label: &'static str, tip: &'static str },
+    Dropdown { icon: Icon, id: &'static str, label: &'static str, tip: &'static str, menu: &'static [(&'static str, &'static str, Icon)] },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,24 +44,9 @@ pub struct IconItem {
 
 #[derive(Clone, Copy, Debug)]
 pub enum CompactItem {
-    Button {
-        icon: Icon,
-        id: &'static str,
-        label: &'static str,
-        tip: &'static str,
-    },
-    Dropdown {
-        icon: Icon,
-        id: &'static str,
-        label: &'static str,
-        tip: &'static str,
-        menu: &'static [(&'static str, &'static str, Icon)],
-    },
-    IconOnly {
-        icon: Icon,
-        id: &'static str,
-        tip: &'static str,
-    },
+    Button { icon: Icon, id: &'static str, label: &'static str, tip: &'static str },
+    Dropdown { icon: Icon, id: &'static str, label: &'static str, tip: &'static str, menu: &'static [(&'static str, &'static str, Icon)] },
+    IconOnly { icon: Icon, id: &'static str, tip: &'static str },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -123,31 +78,29 @@ pub const TABS: &[RibbonTab] = &[
                         id: "circle",
                         label: "Circle",
                         tip: "Circle (C)",
-                        menu: &[("circle", "Circle", Icon::Circle), ("donut", "Donut", Icon::Donut)],
+                        menu: &[
+                            ("circle", "Center, Radius", Icon::Circle),
+                            ("circle.cd", "Center, Diameter", Icon::Circle),
+                            ("circle.2p", "2 Points", Icon::Circle),
+                            ("circle.3p", "3 Points", Icon::Circle),
+                            ("circle.ttr", "Tan, Tan, Radius", Icon::Circle),
+                            ("circle.ttt", "Tan, Tan, Tan", Icon::Circle),
+                        ],
                     },
-                    RibbonItem::SplitButton {
-                        icon: Icon::Arc,
-                        id: "arc",
-                        label: "Arc",
-                        tip: "Arc (A)",
-                        menu: &[("arc", "3-Point Arc", Icon::Arc)],
-                    },
+                    RibbonItem::SplitButton { icon: Icon::Arc, id: "arc", label: "Arc", tip: "Arc (A)", menu: &[("arc", "3-Point Arc", Icon::Arc)] },
                     RibbonItem::CompactColumn(&[
                         CompactItem::Dropdown {
                             icon: Icon::Rectangle,
                             id: "rectang",
-                            label: "Rectangle",
+                            label: "",
                             tip: "Rectangle (REC)",
-                            menu: &[
-                                ("rectang", "Rectangle", Icon::Rectangle),
-                                ("polygon", "Polygon", Icon::Polygon),
-                            ],
+                            menu: &[("rectang", "Rectangle", Icon::Rectangle), ("polygon", "Polygon", Icon::Polygon)],
                         },
-                        CompactItem::Button { icon: Icon::Ellipse, id: "ellipse", label: "Ellipse", tip: "Ellipse (EL)" },
+                        CompactItem::Button { icon: Icon::Ellipse, id: "ellipse", label: "", tip: "Center Ellipse (EL)" },
                         CompactItem::Dropdown {
                             icon: Icon::Hatch,
                             id: "hatch",
-                            label: "Hatch",
+                            label: "",
                             tip: "Hatch (H)",
                             menu: &[
                                 ("hatch", "Hatch", Icon::Hatch),
@@ -178,7 +131,15 @@ pub const TABS: &[RibbonTab] = &[
                         cols: &[
                             &[
                                 MediumItem::Button { icon: Icon::Move, id: "move", label: "Move", tip: "Move (M)" },
+                                MediumItem::Button { icon: Icon::Copy, id: "copy", label: "Copy", tip: "Copy (CO)" },
+                                MediumItem::Button { icon: Icon::Stretch, id: "stretch", label: "Stretch", tip: "Stretch (S)" },
+                            ],
+                            &[
                                 MediumItem::Button { icon: Icon::Rotate, id: "rotate", label: "Rotate", tip: "Rotate (RO)" },
+                                MediumItem::Button { icon: Icon::Mirror, id: "mirror", label: "Mirror", tip: "Mirror (MI)" },
+                                MediumItem::Button { icon: Icon::Scale, id: "scale", label: "Scale", tip: "Scale (SC)" },
+                            ],
+                            &[
                                 MediumItem::Dropdown {
                                     icon: Icon::Trim,
                                     id: "trim",
@@ -186,10 +147,6 @@ pub const TABS: &[RibbonTab] = &[
                                     tip: "Trim (TR)",
                                     menu: &[("trim", "Trim", Icon::Trim), ("extend", "Extend", Icon::Extend)],
                                 },
-                            ],
-                            &[
-                                MediumItem::Button { icon: Icon::Copy, id: "copy", label: "Copy", tip: "Copy (CO)" },
-                                MediumItem::Button { icon: Icon::Mirror, id: "mirror", label: "Mirror", tip: "Mirror (MI)" },
                                 MediumItem::Dropdown {
                                     icon: Icon::Fillet,
                                     id: "fillet",
@@ -197,19 +154,12 @@ pub const TABS: &[RibbonTab] = &[
                                     tip: "Fillet (F)",
                                     menu: &[("fillet", "Fillet", Icon::Fillet), ("chamfer", "Chamfer", Icon::Chamfer)],
                                 },
-                            ],
-                            &[
-                                MediumItem::Button { icon: Icon::Stretch, id: "stretch", label: "Stretch", tip: "Stretch (S)" },
-                                MediumItem::Button { icon: Icon::Scale, id: "scale", label: "Scale", tip: "Scale (SC)" },
                                 MediumItem::Dropdown {
                                     icon: Icon::ArrayRect,
                                     id: "arrayrect",
                                     label: "Array",
                                     tip: "Array",
-                                    menu: &[
-                                        ("arrayrect", "Rectangular Array", Icon::ArrayRect),
-                                        ("arraypolar", "Polar Array", Icon::ArrayPolar),
-                                    ],
+                                    menu: &[("arrayrect", "Rectangular Array", Icon::ArrayRect), ("arraypolar", "Polar Array", Icon::ArrayPolar)],
                                 },
                             ],
                         ],
@@ -238,10 +188,7 @@ pub const TABS: &[RibbonTab] = &[
                         id: "mtext",
                         label: "Text",
                         tip: "Multiline Text (MT)",
-                        menu: &[
-                            ("mtext", "Multiline Text", Icon::MText),
-                            ("text", "Single Line Text", Icon::Text),
-                        ],
+                        menu: &[("mtext", "Multiline Text", Icon::MText), ("text", "Single Line Text", Icon::Text)],
                     },
                     RibbonItem::Large { icon: Icon::DimLinear, id: "dimlinear", label: "Dimension", tip: "Linear Dimension (DLI)" },
                     RibbonItem::CompactColumn(&[
@@ -278,10 +225,7 @@ pub const TABS: &[RibbonTab] = &[
                         CompactItem::Button { icon: Icon::Table, id: "table", label: "Table", tip: "Table" },
                     ]),
                 ],
-                more: &[
-                    ("style", "Text Style", Icon::Text),
-                    ("tablestyle", "Table Style", Icon::Table),
-                ],
+                more: &[("style", "Text Style", Icon::Text), ("tablestyle", "Table Style", Icon::Table)],
             },
             RibbonPanel {
                 title: "Layers",
@@ -301,9 +245,7 @@ pub const TABS: &[RibbonTab] = &[
                         CompactItem::Button { icon: Icon::AttDef, id: "attdef", label: "Attributes", tip: "Define Attributes" },
                     ]),
                 ],
-                more: &[
-                    ("ui.dialog.blocks", "Blocks Palette", Icon::Blocks),
-                ],
+                more: &[("ui.dialog.blocks", "Blocks Palette", Icon::Blocks)],
             },
             RibbonPanel {
                 title: "Properties",
@@ -324,21 +266,20 @@ pub const TABS: &[RibbonTab] = &[
                         id: "dist",
                         label: "Measure",
                         tip: "Measure Distance",
-                        menu: &[
-                            ("dist", "Measure Distance", Icon::Measure),
-                            ("area", "Measure Area", Icon::Area),
-                        ],
+                        menu: &[("dist", "Measure Distance", Icon::Measure), ("area", "Measure Area", Icon::Area)],
                     },
                     RibbonItem::CompactColumn(&[
                         CompactItem::Button { icon: Icon::Area, id: "area", label: "Area", tip: "Measure Area" },
-                        CompactItem::Button { icon: Icon::QuickSelect, id: "ui.dialog.qselect", label: "Quick Select", tip: "Quick Select (QSELECT)" },
+                        CompactItem::Button {
+                            icon: Icon::QuickSelect,
+                            id: "ui.dialog.qselect",
+                            label: "Quick Select",
+                            tip: "Quick Select (QSELECT)",
+                        },
                         CompactItem::Button { icon: Icon::List, id: "list", label: "List", tip: "List Database Information (LI)" },
                     ]),
                 ],
-                more: &[
-                    ("id", "ID Point", Icon::Point),
-                    ("massprop", "Mass Properties", Icon::Properties),
-                ],
+                more: &[("id", "ID Point", Icon::Point), ("massprop", "Mass Properties", Icon::Properties)],
             },
         ],
     },
@@ -373,9 +314,7 @@ pub const TABS: &[RibbonTab] = &[
             },
             RibbonPanel {
                 title: "Import",
-                items: &[
-                    RibbonItem::Large { icon: Icon::Import, id: "import", label: "Import", tip: "Import Vector or Drawing" },
-                ],
+                items: &[RibbonItem::Large { icon: Icon::Import, id: "import", label: "Import", tip: "Import Vector or Drawing" }],
                 more: &[],
             },
         ],
@@ -434,9 +373,12 @@ pub const TABS: &[RibbonTab] = &[
                 title: "Tables",
                 items: &[
                     RibbonItem::Large { icon: Icon::Table, id: "table", label: "Table", tip: "Table" },
-                    RibbonItem::CompactColumn(&[
-                        CompactItem::Button { icon: Icon::Table, id: "tablestyle", label: "Table Style", tip: "Table Style Manager" },
-                    ]),
+                    RibbonItem::CompactColumn(&[CompactItem::Button {
+                        icon: Icon::Table,
+                        id: "tablestyle",
+                        label: "Table Style",
+                        tip: "Table Style Manager",
+                    }]),
                 ],
                 more: &[],
             },
@@ -444,9 +386,7 @@ pub const TABS: &[RibbonTab] = &[
                 title: "Markup",
                 items: &[
                     RibbonItem::Large { icon: Icon::RevCloud, id: "revcloud", label: "Rev Cloud", tip: "Revision Cloud" },
-                    RibbonItem::CompactColumn(&[
-                        CompactItem::Button { icon: Icon::Wipeout, id: "wipeout", label: "Wipeout", tip: "Wipeout" },
-                    ]),
+                    RibbonItem::CompactColumn(&[CompactItem::Button { icon: Icon::Wipeout, id: "wipeout", label: "Wipeout", tip: "Wipeout" }]),
                 ],
                 more: &[],
             },
@@ -487,9 +427,12 @@ pub const TABS: &[RibbonTab] = &[
                         CompactItem::Button { icon: Icon::DimRadius, id: "dcradius", label: "Radius", tip: "Radius Constraint" },
                         CompactItem::Button { icon: Icon::DimDiameter, id: "dcdiameter", label: "Diameter", tip: "Diameter Constraint" },
                     ]),
-                    RibbonItem::CompactColumn(&[
-                        CompactItem::Button { icon: Icon::DimAngular, id: "dcangular", label: "Angular", tip: "Angular Constraint" },
-                    ]),
+                    RibbonItem::CompactColumn(&[CompactItem::Button {
+                        icon: Icon::DimAngular,
+                        id: "dcangular",
+                        label: "Angular",
+                        tip: "Angular Constraint",
+                    }]),
                 ],
                 more: &[],
             },
@@ -556,9 +499,12 @@ pub const TABS: &[RibbonTab] = &[
                 title: "Customization",
                 items: &[
                     RibbonItem::Large { icon: Icon::Gear, id: "options", label: "Options", tip: "Options Dialog (OPTIONS)" },
-                    RibbonItem::CompactColumn(&[
-                        CompactItem::Button { icon: Icon::Gear, id: "dsettings", label: "Drafting Settings", tip: "Drafting Settings (DSETTINGS)" },
-                    ]),
+                    RibbonItem::CompactColumn(&[CompactItem::Button {
+                        icon: Icon::Gear,
+                        id: "dsettings",
+                        label: "Drafting Settings",
+                        tip: "Drafting Settings (DSETTINGS)",
+                    }]),
                 ],
                 more: &[],
             },
@@ -566,17 +512,18 @@ pub const TABS: &[RibbonTab] = &[
                 title: "Standards",
                 items: &[
                     RibbonItem::Large { icon: Icon::Help, id: "audit", label: "Audit", tip: "Audit Drawing (AUDIT)" },
-                    RibbonItem::CompactColumn(&[
-                        CompactItem::Button { icon: Icon::Erase, id: "purge", label: "Purge", tip: "Purge Unused Named Objects" },
-                    ]),
+                    RibbonItem::CompactColumn(&[CompactItem::Button {
+                        icon: Icon::Erase,
+                        id: "purge",
+                        label: "Purge",
+                        tip: "Purge Unused Named Objects",
+                    }]),
                 ],
                 more: &[],
             },
             RibbonPanel {
                 title: "Applications",
-                items: &[
-                    RibbonItem::Large { icon: Icon::Parameters, id: "appload", label: "Load App", tip: "Load AutoLISP Applications (APPLOAD)" },
-                ],
+                items: &[RibbonItem::Large { icon: Icon::Parameters, id: "appload", label: "Load App", tip: "Load AutoLISP Applications (APPLOAD)" }],
                 more: &[],
             },
         ],
@@ -601,9 +548,12 @@ pub const TABS: &[RibbonTab] = &[
                 title: "Export",
                 items: &[
                     RibbonItem::Large { icon: Icon::Export, id: "exportpdf", label: "Export PDF", tip: "Export to PDF" },
-                    RibbonItem::CompactColumn(&[
-                        CompactItem::Button { icon: Icon::Export, id: "export", label: "Export", tip: "Export Other Formats" },
-                    ]),
+                    RibbonItem::CompactColumn(&[CompactItem::Button {
+                        icon: Icon::Export,
+                        id: "export",
+                        label: "Export",
+                        tip: "Export Other Formats",
+                    }]),
                 ],
                 more: &[],
             },
@@ -615,11 +565,7 @@ pub fn is_command_available(session: &Session, cmd: &str) -> bool {
     if crate::menus::is_ui_command(cmd) {
         return true;
     }
-    if let Some(spec) = cadcraft_engine::find_command(cmd) {
-        (spec.enabled)(session).is_ok()
-    } else {
-        false
-    }
+    if let Some(spec) = cadcraft_engine::find_command(cmd) { (spec.enabled)(session).is_ok() } else { false }
 }
 
 const TAB_HEIGHT: f32 = 26.0;
@@ -632,126 +578,100 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     let total_h = TAB_HEIGHT + if collapsed { 0.0 } else { PANELS_HEIGHT };
     let mut clicked_cmd: Option<&str> = None;
 
-    egui::Panel::top("cc_ribbon")
-        .exact_size(total_h)
-        .frame(egui::Frame::NONE.fill(t.chrome))
-        .show(ui, |ui| {
-            let full_r = ui.max_rect();
+    egui::Panel::top("cc_ribbon").exact_size(total_h).frame(egui::Frame::NONE.fill(t.chrome)).show(ui, |ui| {
+        let full_r = ui.max_rect();
 
-            // 1. Tab header bar (height 26 px)
-            let tab_row_r = Rect::from_min_size(full_r.min, vec2(full_r.width(), TAB_HEIGHT));
-            ui.scope_builder(egui::UiBuilder::new().max_rect(tab_row_r), |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
-                    let active_tab_id = app.ui.ribbon_tab.clone();
+        // 1. Tab header bar (height 26 px)
+        let tab_row_r = Rect::from_min_size(full_r.min, vec2(full_r.width(), TAB_HEIGHT));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(tab_row_r), |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                let active_tab_id = app.ui.ribbon_tab.clone();
 
-                    for tab in TABS {
-                        let active = active_tab_id == tab.id;
-                        let translated = crate::i18n::t(tab.label);
-                        let galley = ui.painter().layout_no_wrap(
-                            translated.to_string(),
-                            egui::FontId::proportional(12.5),
-                            if active { t.text } else { t.text_dim },
-                        );
-                        let tab_w = (galley.size().x + 20.0).max(54.0);
-                        let (tr, resp) = ui.allocate_exact_size(vec2(tab_w, TAB_HEIGHT), Sense::click());
+                for tab in TABS {
+                    let active = active_tab_id == tab.id;
+                    let translated = crate::i18n::t(tab.label);
+                    let galley = ui.painter().layout_no_wrap(
+                        translated.to_string(),
+                        egui::FontId::proportional(12.5),
+                        if active { t.text } else { t.text_dim },
+                    );
+                    let tab_w = (galley.size().x + 20.0).max(54.0);
+                    let (tr, resp) = ui.allocate_exact_size(vec2(tab_w, TAB_HEIGHT), Sense::click());
 
-                        if active {
-                            ui.painter().rect_filled(tr, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, t.panel);
-                            ui.painter().vline(tr.left(), tr.y_range(), Stroke::new(1.0, t.border));
-                            ui.painter().vline(tr.right(), tr.y_range(), Stroke::new(1.0, t.border));
-                        } else if resp.hovered() {
-                            ui.painter().rect_filled(tr, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, t.control_hover.gamma_multiply(0.4));
-                        }
-
-                        let text_pos = pos2(
-                            tr.center().x - galley.size().x / 2.0,
-                            tr.center().y - galley.size().y / 2.0,
-                        );
-                        ui.painter().galley(text_pos, galley, if active { t.text } else { t.text_dim });
-
-                        icons::describe_control(ui, &resp, tab.label, Some(active), true);
-                        if resp.clicked() {
-                            app.ui.ribbon_tab = tab.id.to_string();
-                            if collapsed {
-                                app.ui.ribbon_collapsed = false;
-                            }
-                        }
+                    if active {
+                        ui.painter().rect_filled(tr, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, t.panel);
+                        ui.painter().vline(tr.left(), tr.y_range(), Stroke::new(1.0, t.border));
+                        ui.painter().vline(tr.right(), tr.y_range(), Stroke::new(1.0, t.border));
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(tr, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, t.control_hover.gamma_multiply(0.4));
                     }
 
-                    // Right side chevron to collapse / expand ribbon panels
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let btn_r = Rect::from_center_size(
-                            pos2(ui.available_rect_before_wrap().right() - 14.0, tab_row_r.center().y),
-                            vec2(18.0, 18.0),
-                        );
-                        let resp = ui.interact(btn_r, ui.id().with("ribbon_collapse_btn"), Sense::click());
-                        if resp.hovered() {
-                            ui.painter().rect_filled(btn_r, 3.0, t.control_hover.gamma_multiply(0.5));
+                    let text_pos = pos2(tr.center().x - galley.size().x / 2.0, tr.center().y - galley.size().y / 2.0);
+                    ui.painter().galley(text_pos, galley, if active { t.text } else { t.text_dim });
+
+                    icons::describe_control(ui, &resp, tab.label, Some(active), true);
+                    if resp.clicked() {
+                        app.ui.ribbon_tab = tab.id.to_string();
+                        if collapsed {
+                            app.ui.ribbon_collapsed = false;
                         }
-                        icons::paint(
-                            ui.painter(),
-                            btn_r.shrink(2.0),
-                            if collapsed { Icon::ChevronDown } else { Icon::ChevronUp },
-                            false,
-                        );
-                        let tip = if collapsed { crate::tl!("Expand the Ribbon") } else { crate::tl!("Minimize the Ribbon") };
-                        if resp.on_hover_text(tip).clicked() {
-                            app.ui.ribbon_collapsed = !app.ui.ribbon_collapsed;
+                    }
+                }
+
+                // Right side chevron to collapse / expand ribbon panels
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let btn_r = Rect::from_center_size(pos2(ui.available_rect_before_wrap().right() - 14.0, tab_row_r.center().y), vec2(18.0, 18.0));
+                    let resp = ui.interact(btn_r, ui.id().with("ribbon_collapse_btn"), Sense::click());
+                    if resp.hovered() {
+                        ui.painter().rect_filled(btn_r, 3.0, t.control_hover.gamma_multiply(0.5));
+                    }
+                    icons::paint(ui.painter(), btn_r.shrink(2.0), if collapsed { Icon::ChevronDown } else { Icon::ChevronUp }, false);
+                    let tip = if collapsed { crate::tl!("Expand the Ribbon") } else { crate::tl!("Minimize the Ribbon") };
+                    if resp.on_hover_text(tip).clicked() {
+                        app.ui.ribbon_collapsed = !app.ui.ribbon_collapsed;
+                    }
+                });
+            });
+        });
+
+        // 2. Ribbon Panels Body (height 90 px)
+        if !collapsed {
+            let panels_r = Rect::from_min_size(pos2(full_r.left(), full_r.top() + TAB_HEIGHT), vec2(full_r.width(), PANELS_HEIGHT));
+
+            ui.scope_builder(egui::UiBuilder::new().max_rect(panels_r), |ui| {
+                ui.painter().rect_filled(panels_r, 0.0, t.panel);
+                ui.painter().hline(panels_r.x_range(), panels_r.bottom() - 1.0, Stroke::new(1.0, t.border));
+
+                egui::ScrollArea::horizontal().id_salt("cc_ribbon_panels_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                    ui.horizontal(|ui| {
+                        let active_tab = TABS.iter().find(|tab| tab.id == app.ui.ribbon_tab).or_else(|| TABS.first());
+
+                        if let Some(active_tab) = active_tab {
+                            for panel in active_tab.panels {
+                                render_panel(ui, app, panel, &mut clicked_cmd);
+                            }
                         }
                     });
                 });
             });
-
-            // 2. Ribbon Panels Body (height 90 px)
-            if !collapsed {
-                let panels_r = Rect::from_min_size(
-                    pos2(full_r.left(), full_r.top() + TAB_HEIGHT),
-                    vec2(full_r.width(), PANELS_HEIGHT),
-                );
-
-                ui.scope_builder(egui::UiBuilder::new().max_rect(panels_r), |ui| {
-                    ui.painter().rect_filled(panels_r, 0.0, t.panel);
-                    ui.painter().hline(panels_r.x_range(), panels_r.bottom() - 1.0, Stroke::new(1.0, t.border));
-
-                    egui::ScrollArea::horizontal()
-                        .id_salt("cc_ribbon_panels_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                            ui.horizontal(|ui| {
-                                let active_tab = TABS.iter().find(|tab| tab.id == app.ui.ribbon_tab).or_else(|| TABS.first());
-
-                                if let Some(active_tab) = active_tab {
-                                    for panel in active_tab.panels {
-                                        render_panel(ui, app, panel, &mut clicked_cmd);
-                                    }
-                                }
-                            });
-                        });
-                });
-            }
-        });
+        }
+    });
 
     if let Some(cmd) = clicked_cmd {
         crate::menus::activate(app, cmd);
     }
 }
 
-fn render_panel(
-    ui: &mut egui::Ui,
-    app: &mut CadApp,
-    panel: &RibbonPanel,
-    clicked: &mut Option<&'static str>,
-) {
+fn render_panel(ui: &mut egui::Ui, app: &mut CadApp, panel: &RibbonPanel, clicked: &mut Option<&'static str>) {
     let t = Tokens::get();
-    let start_x = ui.cursor().min.x;
 
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
         // 1. Panel Tools Area (Height ~68px)
-        ui.allocate_ui(vec2(0.0, 68.0), |ui| {
+        let tools_resp = ui.allocate_ui(vec2(0.0, 68.0), |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
                 ui.add_space(3.0);
@@ -798,73 +718,47 @@ fn render_panel(
         });
 
         // 2. Panel Title (Height 18px)
-        let end_x = ui.cursor().min.x;
-        let panel_width = (end_x - start_x).max(36.0);
+        let panel_width = tools_resp.response.rect.width().max(36.0);
         let (title_r, resp) = ui.allocate_exact_size(vec2(panel_width, 18.0), Sense::click());
         let title_text = crate::i18n::t(panel.title);
-        let galley = ui.painter().layout_no_wrap(
-            title_text.to_string(),
-            egui::FontId::proportional(10.5),
-            t.text_dim,
-        );
+        let galley = ui.painter().layout_no_wrap(title_text.to_string(), egui::FontId::proportional(10.5), t.text_dim);
 
         let has_more = !panel.more.is_empty();
         let total_w = galley.size().x + if has_more { 10.0 } else { 0.0 };
-        let title_pos = pos2(
-            title_r.center().x - total_w / 2.0,
-            title_r.center().y - galley.size().y / 2.0,
-        );
+        let title_pos = pos2(title_r.center().x - total_w / 2.0, title_r.center().y - galley.size().y / 2.0);
         ui.painter().galley(title_pos, galley, t.text_dim);
 
         if has_more {
             let chev_pos = pos2(title_r.center().x + total_w / 2.0 - 3.0, title_r.center().y);
-            icons::paint(
-                ui.painter(),
-                Rect::from_center_size(chev_pos, vec2(7.0, 7.0)),
-                Icon::ChevronDown,
-                false,
-            );
+            icons::paint(ui.painter(), Rect::from_center_size(chev_pos, vec2(7.0, 7.0)), Icon::ChevronDown, false);
 
             if resp.hovered() {
                 ui.painter().rect_filled(title_r, 2.0, t.control_hover.gamma_multiply(0.4));
             }
 
-            egui::Popup::from_toggle_button_response(&resp)
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .show(|ui| {
-                    for (cmd, m_label, m_icon) in panel.more {
-                        ui.horizontal(|ui| {
-                            let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                            icons::paint(ui.painter(), ir, *m_icon, false);
-                            let m_btn = ui.button(crate::i18n::t(m_label));
-                            if m_btn.clicked() {
-                                *clicked = Some(*cmd);
-                                ui.close();
-                            }
-                        });
-                    }
-                });
+            egui::Popup::from_toggle_button_response(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                for (cmd, m_label, m_icon) in panel.more {
+                    ui.horizontal(|ui| {
+                        let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                        icons::paint(ui.painter(), ir, *m_icon, false);
+                        let m_btn = ui.button(crate::i18n::t(m_label));
+                        if m_btn.clicked() {
+                            *clicked = Some(*cmd);
+                            ui.close();
+                        }
+                    });
+                }
+            });
         }
     });
 
     // Panel vertical separator
     let (sep_r, _) = ui.allocate_exact_size(vec2(6.0, PANELS_HEIGHT), Sense::hover());
     let sep_x = sep_r.center().x;
-    ui.painter().vline(
-        sep_x,
-        (sep_r.top() + 8.0)..=(sep_r.bottom() - 8.0),
-        Stroke::new(1.0, t.border),
-    );
+    ui.painter().vline(sep_x, (sep_r.top() + 8.0)..=(sep_r.bottom() - 8.0), Stroke::new(1.0, t.border));
 }
 
-fn render_large_button(
-    ui: &mut egui::Ui,
-    icon: Icon,
-    id: &'static str,
-    label: &'static str,
-    tip: &'static str,
-    enabled: bool,
-) -> bool {
+fn render_large_button(ui: &mut egui::Ui, icon: Icon, id: &'static str, label: &'static str, tip: &'static str, enabled: bool) -> bool {
     let t = Tokens::get();
     let btn_size = vec2(52.0, 64.0);
     let (rect, resp) = ui.allocate_exact_size(btn_size, Sense::click());
@@ -882,15 +776,8 @@ fn render_large_button(
 
     // Paint Label
     let translated = crate::i18n::t(label);
-    let galley = ui.painter().layout_no_wrap(
-        translated.to_string(),
-        egui::FontId::proportional(11.0),
-        if enabled { t.text } else { t.text_dim },
-    );
-    let label_pos = pos2(
-        rect.center().x - galley.size().x / 2.0,
-        rect.top() + 42.0,
-    );
+    let galley = ui.painter().layout_no_wrap(translated.to_string(), egui::FontId::proportional(11.0), if enabled { t.text } else { t.text_dim });
+    let label_pos = pos2(rect.center().x - galley.size().x / 2.0, rect.top() + 42.0);
     ui.painter().galley(label_pos, galley, if enabled { t.text } else { t.text_dim });
 
     icons::describe_control(ui, &resp, tip, None, false);
@@ -898,6 +785,18 @@ fn render_large_button(
     let resp = resp.on_hover_text(full_tip);
 
     enabled && resp.clicked()
+}
+
+fn command_tooltip(cmd: &str) -> Option<&'static str> {
+    match cmd {
+        "circle" => Some("Creates a circle using a center point and a radius (CIRCLE)"),
+        "circle.cd" => Some("Creates a circle using a center point and a diameter (CIRCLE)"),
+        "circle.2p" => Some("Creates a circle using two endpoints of the diameter (CIRCLE)"),
+        "circle.3p" => Some("Creates a circle using three points on the circumference (CIRCLE)"),
+        "circle.ttr" => Some("Creates a circle tangent to two objects with a specified radius (CIRCLE)"),
+        "circle.ttt" => Some("Creates a circle tangent to three objects (CIRCLE)"),
+        _ => None,
+    }
 }
 
 fn render_split_button(
@@ -939,15 +838,8 @@ fn render_split_button(
 
     // Paint Label
     let translated = crate::i18n::t(label);
-    let galley = ui.painter().layout_no_wrap(
-        translated.to_string(),
-        egui::FontId::proportional(11.0),
-        if enabled { t.text } else { t.text_dim },
-    );
-    let label_pos = pos2(
-        top_rect.center().x - galley.size().x / 2.0,
-        top_rect.top() + 34.0,
-    );
+    let galley = ui.painter().layout_no_wrap(translated.to_string(), egui::FontId::proportional(11.0), if enabled { t.text } else { t.text_dim });
+    let label_pos = pos2(top_rect.center().x - galley.size().x / 2.0, top_rect.top() + 34.0);
     ui.painter().galley(label_pos, galley, if enabled { t.text } else { t.text_dim });
 
     // Paint small ChevronDown in bottom area
@@ -955,11 +847,7 @@ fn render_split_button(
     icons::paint(ui.painter(), chev_rect, Icon::ChevronDown, !enabled);
 
     // Subtle divider line between top and bottom
-    ui.painter().hline(
-        (rect.left() + 4.0)..=(rect.right() - 4.0),
-        top_rect.bottom(),
-        Stroke::new(1.0, t.border.gamma_multiply(0.5)),
-    );
+    ui.painter().hline((rect.left() + 4.0)..=(rect.right() - 4.0), top_rect.bottom(), Stroke::new(1.0, t.border.gamma_multiply(0.5)));
 
     icons::describe_control(ui, &top_resp, tip, None, false);
     let full_tip = format!("{} ({})", crate::i18n::t(tip), id);
@@ -973,21 +861,21 @@ fn render_split_button(
             selected_cmd = Some(id);
         }
 
-        egui::Popup::from_toggle_button_response(&bot_resp)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                for (cmd, m_label, m_icon) in menu {
-                    ui.horizontal(|ui| {
-                        let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                        icons::paint(ui.painter(), ir, *m_icon, false);
-                        let m_btn = ui.button(crate::i18n::t(m_label));
-                        if m_btn.clicked() {
-                            selected_cmd = Some(*cmd);
-                            ui.close();
-                        }
-                    });
-                }
-            });
+        egui::Popup::from_toggle_button_response(&bot_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            for (cmd, m_label, m_icon) in menu {
+                ui.horizontal(|ui| {
+                    let tip = command_tooltip(cmd).map(crate::i18n::t).unwrap_or_else(|| crate::i18n::t(m_label));
+                    let (ir, ir_resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+                    icons::paint(ui.painter(), ir, *m_icon, false);
+                    let ir_resp = ir_resp.on_hover_text(tip);
+                    let m_btn = ui.button(crate::i18n::t(m_label)).on_hover_text(tip);
+                    if m_btn.clicked() || ir_resp.clicked() {
+                        selected_cmd = Some(*cmd);
+                        ui.close();
+                    }
+                });
+            }
+        });
     }
 
     selected_cmd
@@ -1017,20 +905,13 @@ fn render_large_dropdown(
 
     // Paint Label + Chevron
     let translated = crate::i18n::t(label);
-    let galley = ui.painter().layout_no_wrap(
-        translated.to_string(),
-        egui::FontId::proportional(11.0),
-        if enabled { t.text } else { t.text_dim },
-    );
+    let galley = ui.painter().layout_no_wrap(translated.to_string(), egui::FontId::proportional(11.0), if enabled { t.text } else { t.text_dim });
     let total_w = galley.size().x + 9.0;
     let label_pos = pos2(rect.center().x - total_w / 2.0, rect.top() + 42.0);
     ui.painter().galley(label_pos, galley, if enabled { t.text } else { t.text_dim });
 
     // Tiny Chevron Down
-    let chev_rect = Rect::from_center_size(
-        pos2(rect.center().x + total_w / 2.0 - 3.0, rect.top() + 47.0),
-        vec2(7.0, 7.0),
-    );
+    let chev_rect = Rect::from_center_size(pos2(rect.center().x + total_w / 2.0 - 3.0, rect.top() + 47.0), vec2(7.0, 7.0));
     icons::paint(ui.painter(), chev_rect, Icon::ChevronDown, !enabled);
 
     icons::describe_control(ui, &resp, tip, None, false);
@@ -1038,21 +919,19 @@ fn render_large_dropdown(
     let resp = resp.on_hover_text(full_tip);
 
     if enabled {
-        egui::Popup::from_toggle_button_response(&resp)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                for (cmd, m_label, m_icon) in menu {
-                    ui.horizontal(|ui| {
-                        let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                        icons::paint(ui.painter(), ir, *m_icon, false);
-                        let m_btn = ui.button(crate::i18n::t(m_label));
-                        if m_btn.clicked() {
-                            selected_cmd = Some(*cmd);
-                            ui.close();
-                        }
-                    });
-                }
-            });
+        egui::Popup::from_toggle_button_response(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            for (cmd, m_label, m_icon) in menu {
+                ui.horizontal(|ui| {
+                    let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                    icons::paint(ui.painter(), ir, *m_icon, false);
+                    let m_btn = ui.button(crate::i18n::t(m_label));
+                    if m_btn.clicked() {
+                        selected_cmd = Some(*cmd);
+                        ui.close();
+                    }
+                });
+            }
+        });
 
         if resp.clicked() {
             selected_cmd = Some(id);
@@ -1062,12 +941,7 @@ fn render_large_dropdown(
     selected_cmd
 }
 
-fn render_medium_grid(
-    ui: &mut egui::Ui,
-    app: &CadApp,
-    cols: &'static [&'static [MediumItem]],
-    clicked: &mut Option<&'static str>,
-) {
+fn render_medium_grid(ui: &mut egui::Ui, app: &CadApp, cols: &'static [&'static [MediumItem]], clicked: &mut Option<&'static str>) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
         for col in cols {
@@ -1095,16 +969,9 @@ fn render_medium_grid(
     });
 }
 
-fn render_medium_button(
-    ui: &mut egui::Ui,
-    icon: Icon,
-    id: &'static str,
-    label: &'static str,
-    tip: &'static str,
-    enabled: bool,
-) -> bool {
+fn render_medium_button(ui: &mut egui::Ui, icon: Icon, id: &'static str, label: &'static str, tip: &'static str, enabled: bool) -> bool {
     let t = Tokens::get();
-    let btn_size = vec2(88.0, 20.0);
+    let btn_size = vec2(92.0, 20.0);
     let (rect, resp) = ui.allocate_exact_size(btn_size, Sense::click());
 
     if enabled && resp.hovered() {
@@ -1115,17 +982,13 @@ fn render_medium_button(
     }
 
     // Icon (16x16) on the left
-    let icon_rect = Rect::from_center_size(pos2(rect.left() + 11.0, rect.center().y), vec2(15.0, 15.0));
+    let icon_rect = Rect::from_center_size(pos2(rect.left() + 10.0, rect.center().y), vec2(15.0, 15.0));
     icons::paint(ui.painter(), icon_rect, icon, !enabled);
 
     // Label on the right
     let translated = crate::i18n::t(label);
-    let galley = ui.painter().layout_no_wrap(
-        translated.to_string(),
-        egui::FontId::proportional(11.0),
-        if enabled { t.text } else { t.text_dim },
-    );
-    let label_pos = pos2(rect.left() + 22.0, rect.center().y - galley.size().y / 2.0);
+    let galley = ui.painter().layout_no_wrap(translated.to_string(), egui::FontId::proportional(11.0), if enabled { t.text } else { t.text_dim });
+    let label_pos = pos2(rect.left() + 20.0, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(label_pos, galley, if enabled { t.text } else { t.text_dim });
 
     icons::describe_control(ui, &resp, tip, None, false);
@@ -1145,23 +1008,23 @@ fn render_medium_split_button(
     enabled: bool,
 ) -> Option<&'static str> {
     let t = Tokens::get();
-    let btn_size = vec2(88.0, 20.0);
+    let btn_size = vec2(92.0, 20.0);
     let (rect, _) = ui.allocate_exact_size(btn_size, Sense::hover());
     let mut selected_cmd = None;
 
     // Active command tracking: defaults to default_id, switches when a variant is selected from dropdown
-    let active_cmd: &'static str = ui
-        .data_mut(|d| d.get_temp(ui.id().with(("med_sb_active", default_id))))
-        .unwrap_or(default_id);
+    let active_cmd: &'static str = ui.data_mut(|d| d.get_temp(ui.id().with(("med_sb_active", default_id)))).unwrap_or(default_id);
 
-    let (cur_icon, cur_label, cur_tip) = if let Some((_, m_label, m_icon)) = menu.iter().find(|(cmd, _, _)| *cmd == active_cmd) {
-        (*m_icon, *m_label, default_tip)
+    let (cur_icon, cur_label, cur_tip) = if let Some((cmd, m_label, m_icon)) = menu.iter().find(|(cmd, _, _)| *cmd == active_cmd) {
+        let label = if *cmd == "arrayrect" { default_label } else { *m_label };
+        let tip = if *cmd == "arrayrect" { "Rectangular Array" } else { default_tip };
+        (*m_icon, label, tip)
     } else {
         (default_icon, default_label, default_tip)
     };
 
-    // Main action zone on left (72px), arrow zone on right (16px)
-    let arrow_width = 16.0;
+    // Main action zone on left (78px), arrow zone on right (14px)
+    let arrow_width = 14.0;
     let main_rect = Rect::from_min_max(rect.min, pos2(rect.max.x - arrow_width, rect.max.y));
     let arrow_rect = Rect::from_min_max(pos2(rect.max.x - arrow_width, rect.min.y), rect.max);
 
@@ -1184,25 +1047,17 @@ fn render_medium_split_button(
     }
 
     // Paint main icon (15x15)
-    let icon_rect = Rect::from_center_size(pos2(main_rect.left() + 11.0, main_rect.center().y), vec2(15.0, 15.0));
+    let icon_rect = Rect::from_center_size(pos2(main_rect.left() + 10.0, main_rect.center().y), vec2(15.0, 15.0));
     icons::paint(ui.painter(), icon_rect, cur_icon, !enabled);
 
     // Paint main label (within main_rect, never overlaps arrow)
     let translated = crate::i18n::t(cur_label);
-    let galley = ui.painter().layout_no_wrap(
-        translated.to_string(),
-        egui::FontId::proportional(11.0),
-        if enabled { t.text } else { t.text_dim },
-    );
-    let label_pos = pos2(main_rect.left() + 22.0, main_rect.center().y - galley.size().y / 2.0);
+    let galley = ui.painter().layout_no_wrap(translated.to_string(), egui::FontId::proportional(11.0), if enabled { t.text } else { t.text_dim });
+    let label_pos = pos2(main_rect.left() + 20.0, main_rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(label_pos, galley, if enabled { t.text } else { t.text_dim });
 
     // Subtle divider line between main and arrow
-    ui.painter().vline(
-        main_rect.right(),
-        (rect.top() + 2.0)..=(rect.bottom() - 2.0),
-        Stroke::new(1.0, t.border.gamma_multiply(0.5)),
-    );
+    ui.painter().vline(main_rect.right(), (rect.top() + 2.0)..=(rect.bottom() - 2.0), Stroke::new(1.0, t.border.gamma_multiply(0.5)));
 
     // Paint ChevronDown in arrow area
     let chev_rect = Rect::from_center_size(arrow_rect.center(), vec2(6.0, 6.0));
@@ -1220,36 +1075,28 @@ fn render_medium_split_button(
             selected_cmd = Some(active_cmd);
         }
 
-        egui::Popup::from_toggle_button_response(&arrow_resp)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                for (cmd, m_label, m_icon) in menu {
-                    ui.horizontal(|ui| {
-                        let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                        icons::paint(ui.painter(), ir, *m_icon, false);
-                        let m_btn = ui.button(crate::i18n::t(m_label));
-                        if m_btn.clicked() {
-                            ui.data_mut(|d| {
-                                d.insert_temp(ui.id().with(("med_sb_active", default_id)), *cmd);
-                            });
-                            selected_cmd = Some(*cmd);
-                            ui.close();
-                        }
-                    });
-                }
-            });
+        egui::Popup::from_toggle_button_response(&arrow_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            for (cmd, m_label, m_icon) in menu {
+                ui.horizontal(|ui| {
+                    let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                    icons::paint(ui.painter(), ir, *m_icon, false);
+                    let m_btn = ui.button(crate::i18n::t(m_label));
+                    if m_btn.clicked() {
+                        ui.data_mut(|d| {
+                            d.insert_temp(ui.id().with(("med_sb_active", default_id)), *cmd);
+                        });
+                        selected_cmd = Some(*cmd);
+                        ui.close();
+                    }
+                });
+            }
+        });
     }
 
     selected_cmd
 }
 
-
-fn render_icon_column(
-    ui: &mut egui::Ui,
-    app: &CadApp,
-    items: &'static [IconItem],
-    clicked: &mut Option<&'static str>,
-) {
+fn render_icon_column(ui: &mut egui::Ui, app: &CadApp, items: &'static [IconItem], clicked: &mut Option<&'static str>) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
         ui.add_space(2.0);
@@ -1262,13 +1109,7 @@ fn render_icon_column(
     });
 }
 
-fn render_compact_icon_button(
-    ui: &mut egui::Ui,
-    icon: Icon,
-    id: &'static str,
-    tip: &'static str,
-    enabled: bool,
-) -> bool {
+fn render_compact_icon_button(ui: &mut egui::Ui, icon: Icon, id: &'static str, tip: &'static str, enabled: bool) -> bool {
     let t = Tokens::get();
     let btn_size = vec2(22.0, 20.0);
     let (rect, resp) = ui.allocate_exact_size(btn_size, Sense::click());
@@ -1290,58 +1131,10 @@ fn render_compact_icon_button(
     enabled && resp.clicked()
 }
 
-fn render_compact_column(
-    ui: &mut egui::Ui,
-    app: &CadApp,
-    items: &'static [CompactItem],
-    clicked: &mut Option<&'static str>,
-) {
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
-        ui.add_space(2.0);
-
-        for item in items {
-            match item {
-                CompactItem::Button { icon, id, label, tip } => {
-                    let available = is_command_available(&app.session, id);
-                    if render_compact_button(ui, *icon, id, label, tip, available) {
-                        *clicked = Some(*id);
-                    }
-                }
-                CompactItem::Dropdown { icon, id, label, tip, menu } => {
-                    let available = is_command_available(&app.session, id);
-                    if let Some(selected) = render_compact_dropdown(ui, *icon, id, label, tip, menu, available) {
-                        *clicked = Some(selected);
-                    }
-                }
-                CompactItem::IconOnly { icon, id, tip } => {
-                    let available = is_command_available(&app.session, id);
-                    if render_compact_icon_button(ui, *icon, id, tip, available) {
-                        *clicked = Some(*id);
-                    }
-                }
-            }
-        }
-    });
-}
-
-fn render_compact_button(
-    ui: &mut egui::Ui,
-    icon: Icon,
-    id: &'static str,
-    label: &'static str,
-    tip: &'static str,
-    enabled: bool,
-) -> bool {
+fn render_compact_icon_button_sized(ui: &mut egui::Ui, icon: Icon, id: &'static str, tip: &'static str, enabled: bool, width: f32) -> bool {
     let t = Tokens::get();
-    let translated = crate::i18n::t(label);
-    let galley = ui.painter().layout_no_wrap(
-        translated.to_string(),
-        egui::FontId::proportional(11.0),
-        if enabled { t.text } else { t.text_dim },
-    );
-    let w = (galley.size().x + 28.0).max(64.0);
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 20.0), Sense::click());
+    let btn_size = vec2(width, 20.0);
+    let (rect, resp) = ui.allocate_exact_size(btn_size, Sense::click());
 
     if enabled && resp.hovered() {
         ui.painter().rect_filled(rect, 3.0, t.control_hover.gamma_multiply(0.6));
@@ -1350,13 +1143,100 @@ fn render_compact_button(
         ui.painter().rect_filled(rect, 3.0, t.control_hover);
     }
 
-    // Icon (16x16)
-    let icon_rect = Rect::from_center_size(pos2(rect.left() + 11.0, rect.center().y), vec2(15.0, 15.0));
+    let icon_rect = Rect::from_center_size(rect.center(), vec2(15.0, 15.0));
     icons::paint(ui.painter(), icon_rect, icon, !enabled);
 
-    // Label
-    let label_pos = pos2(rect.left() + 22.0, rect.center().y - galley.size().y / 2.0);
-    ui.painter().galley(label_pos, galley, if enabled { t.text } else { t.text_dim });
+    icons::describe_control(ui, &resp, tip, None, false);
+    let full_tip = format!("{} ({})", crate::i18n::t(tip), id);
+    let resp = resp.on_hover_text(full_tip);
+
+    enabled && resp.clicked()
+}
+
+fn render_compact_column(ui: &mut egui::Ui, app: &CadApp, items: &'static [CompactItem], clicked: &mut Option<&'static str>) {
+    let all_icon_only = items.iter().all(|item| match item {
+        CompactItem::Button { label, .. } | CompactItem::Dropdown { label, .. } => label.is_empty(),
+        CompactItem::IconOnly { .. } => true,
+    });
+
+    let col_w = if all_icon_only {
+        34.0
+    } else {
+        let mut max_w: f32 = 68.0;
+        for item in items {
+            match item {
+                CompactItem::Button { label, .. } if !label.is_empty() => {
+                    let translated = crate::i18n::t(label);
+                    let galley = ui.painter().layout_no_wrap(translated.to_string(), egui::FontId::proportional(11.0), egui::Color32::WHITE);
+                    max_w = max_w.max(galley.size().x + 28.0);
+                }
+                CompactItem::Dropdown { label, .. } if !label.is_empty() => {
+                    let translated = crate::i18n::t(label);
+                    let galley = ui.painter().layout_no_wrap(translated.to_string(), egui::FontId::proportional(11.0), egui::Color32::WHITE);
+                    max_w = max_w.max(galley.size().x + 36.0);
+                }
+                _ => {}
+            }
+        }
+        max_w
+    };
+
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+        ui.add_space(2.0);
+
+        for item in items {
+            match item {
+                CompactItem::Button { icon, id, label, tip } => {
+                    let available = is_command_available(&app.session, id);
+                    if render_compact_button(ui, *icon, id, label, tip, available, col_w) {
+                        *clicked = Some(*id);
+                    }
+                }
+                CompactItem::Dropdown { icon, id, label, tip, menu } => {
+                    let available = is_command_available(&app.session, id);
+                    if let Some(selected) = render_compact_dropdown(ui, *icon, id, label, tip, menu, available, col_w) {
+                        *clicked = Some(selected);
+                    }
+                }
+                CompactItem::IconOnly { icon, id, tip } => {
+                    let available = is_command_available(&app.session, id);
+                    if render_compact_icon_button_sized(ui, *icon, id, tip, available, col_w) {
+                        *clicked = Some(*id);
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn render_compact_button(ui: &mut egui::Ui, icon: Icon, id: &'static str, label: &'static str, tip: &'static str, enabled: bool, width: f32) -> bool {
+    let t = Tokens::get();
+    let btn_size = vec2(width, 20.0);
+    let (rect, resp) = ui.allocate_exact_size(btn_size, Sense::click());
+
+    if enabled && resp.hovered() {
+        ui.painter().rect_filled(rect, 3.0, t.control_hover.gamma_multiply(0.6));
+    }
+    if enabled && resp.is_pointer_button_down_on() {
+        ui.painter().rect_filled(rect, 3.0, t.control_hover);
+    }
+
+    if label.is_empty() {
+        // Icon only, centered
+        let icon_rect = Rect::from_center_size(rect.center(), vec2(15.0, 15.0));
+        icons::paint(ui.painter(), icon_rect, icon, !enabled);
+    } else {
+        // Icon (15x15) on the left
+        let icon_rect = Rect::from_center_size(pos2(rect.left() + 11.0, rect.center().y), vec2(15.0, 15.0));
+        icons::paint(ui.painter(), icon_rect, icon, !enabled);
+
+        // Label on the right
+        let translated = crate::i18n::t(label);
+        let galley = ui.painter().layout_no_wrap(translated.to_string(), egui::FontId::proportional(11.0), if enabled { t.text } else { t.text_dim });
+        let label_pos = pos2(rect.left() + 22.0, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(label_pos, galley, if enabled { t.text } else { t.text_dim });
+    }
 
     icons::describe_control(ui, &resp, tip, None, false);
     let full_tip = format!("{} ({})", crate::i18n::t(tip), id);
@@ -1373,42 +1253,100 @@ fn render_compact_dropdown(
     tip: &'static str,
     menu: &'static [(&'static str, &'static str, Icon)],
     enabled: bool,
+    width: f32,
 ) -> Option<&'static str> {
     let t = Tokens::get();
-    let translated = crate::i18n::t(label);
-    let galley = ui.painter().layout_no_wrap(
-        translated.to_string(),
-        egui::FontId::proportional(11.0),
-        if enabled { t.text } else { t.text_dim },
-    );
-    let w = (galley.size().x + 36.0).max(72.0);
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 20.0), Sense::click());
+    let btn_size = vec2(width, 20.0);
     let mut selected_cmd = None;
 
-    if enabled && resp.hovered() {
-        ui.painter().rect_filled(rect, 3.0, t.control_hover.gamma_multiply(0.6));
-    }
+    if label.is_empty() {
+        // Compact icon + arrow split dropdown (AutoCAD style for Draw panel: Rectangle, Hatch)
+        let (rect, _) = ui.allocate_exact_size(btn_size, Sense::hover());
+        let icon_rect = Rect::from_min_max(rect.min, pos2(rect.max.x - 12.0, rect.max.y));
+        let arrow_rect = Rect::from_min_max(pos2(rect.max.x - 12.0, rect.min.y), rect.max);
 
-    // Icon (16x16)
-    let icon_rect = Rect::from_center_size(pos2(rect.left() + 11.0, rect.center().y), vec2(15.0, 15.0));
-    icons::paint(ui.painter(), icon_rect, icon, !enabled);
+        let icon_resp = ui.interact(icon_rect, ui.id().with(("cd_icon", id)), Sense::click());
+        let arrow_resp = ui.interact(arrow_rect, ui.id().with(("cd_arr", id)), Sense::click());
 
-    // Label
-    let label_pos = pos2(rect.left() + 22.0, rect.center().y - galley.size().y / 2.0);
-    ui.painter().galley(label_pos, galley, if enabled { t.text } else { t.text_dim });
+        if enabled {
+            if icon_resp.hovered() {
+                ui.painter().rect_filled(icon_rect, egui::CornerRadius { nw: 3, ne: 0, sw: 3, se: 0 }, t.control_hover.gamma_multiply(0.6));
+            }
+            if icon_resp.is_pointer_button_down_on() {
+                ui.painter().rect_filled(icon_rect, egui::CornerRadius { nw: 3, ne: 0, sw: 3, se: 0 }, t.control_hover);
+            }
+            if arrow_resp.hovered() {
+                ui.painter().rect_filled(arrow_rect, egui::CornerRadius { nw: 0, ne: 3, sw: 0, se: 3 }, t.control_hover.gamma_multiply(0.6));
+            }
+            if arrow_resp.is_pointer_button_down_on() {
+                ui.painter().rect_filled(arrow_rect, egui::CornerRadius { nw: 0, ne: 3, sw: 0, se: 3 }, t.control_hover);
+            }
+        }
 
-    // Chevron
-    let chev_rect = Rect::from_center_size(pos2(rect.right() - 8.0, rect.center().y), vec2(6.0, 6.0));
-    icons::paint(ui.painter(), chev_rect, Icon::ChevronDown, !enabled);
+        let ir = Rect::from_center_size(icon_rect.center(), vec2(15.0, 15.0));
+        icons::paint(ui.painter(), ir, icon, !enabled);
 
-    icons::describe_control(ui, &resp, tip, None, false);
-    let full_tip = format!("{} ({})", crate::i18n::t(tip), id);
-    let resp = resp.on_hover_text(full_tip);
+        ui.painter().vline(icon_rect.right(), (rect.top() + 2.0)..=(rect.bottom() - 2.0), Stroke::new(1.0, t.border.gamma_multiply(0.5)));
 
-    if enabled {
-        egui::Popup::from_toggle_button_response(&resp)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
+        let chev_rect = Rect::from_center_size(arrow_rect.center(), vec2(6.0, 6.0));
+        icons::paint(ui.painter(), chev_rect, Icon::ChevronDown, !enabled);
+
+        icons::describe_control(ui, &icon_resp, tip, None, false);
+        let full_tip = format!("{} ({})", crate::i18n::t(tip), id);
+        let icon_resp = icon_resp.on_hover_text(full_tip);
+
+        icons::describe_control(ui, &arrow_resp, &format!("{tip} options"), None, false);
+        let arrow_resp = arrow_resp.on_hover_text(format!("{} options", crate::i18n::t(tip)));
+
+        if enabled {
+            if icon_resp.clicked() {
+                selected_cmd = Some(id);
+            }
+
+            egui::Popup::from_toggle_button_response(&arrow_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                for (cmd, m_label, m_icon) in menu {
+                    ui.horizontal(|ui| {
+                        let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+                        icons::paint(ui.painter(), ir, *m_icon, false);
+                        let m_btn = ui.button(crate::i18n::t(m_label));
+                        if m_btn.clicked() {
+                            selected_cmd = Some(*cmd);
+                            ui.close();
+                        }
+                    });
+                }
+            });
+        }
+    } else {
+        let (rect, resp) = ui.allocate_exact_size(btn_size, Sense::click());
+
+        if enabled && resp.hovered() {
+            ui.painter().rect_filled(rect, 3.0, t.control_hover.gamma_multiply(0.6));
+        }
+        if enabled && resp.is_pointer_button_down_on() {
+            ui.painter().rect_filled(rect, 3.0, t.control_hover);
+        }
+
+        // Icon (15x15)
+        let icon_rect = Rect::from_center_size(pos2(rect.left() + 11.0, rect.center().y), vec2(15.0, 15.0));
+        icons::paint(ui.painter(), icon_rect, icon, !enabled);
+
+        // Label
+        let translated = crate::i18n::t(label);
+        let galley = ui.painter().layout_no_wrap(translated.to_string(), egui::FontId::proportional(11.0), if enabled { t.text } else { t.text_dim });
+        let label_pos = pos2(rect.left() + 22.0, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(label_pos, galley, if enabled { t.text } else { t.text_dim });
+
+        // Chevron
+        let chev_rect = Rect::from_center_size(pos2(rect.right() - 8.0, rect.center().y), vec2(6.0, 6.0));
+        icons::paint(ui.painter(), chev_rect, Icon::ChevronDown, !enabled);
+
+        icons::describe_control(ui, &resp, tip, None, false);
+        let full_tip = format!("{} ({})", crate::i18n::t(tip), id);
+        let resp = resp.on_hover_text(full_tip);
+
+        if enabled {
+            egui::Popup::from_toggle_button_response(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                 for (cmd, m_label, m_icon) in menu {
                     ui.horizontal(|ui| {
                         let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
@@ -1422,24 +1360,20 @@ fn render_compact_dropdown(
                 }
             });
 
-        if resp.clicked() {
-            selected_cmd = Some(id);
+            if resp.clicked() {
+                selected_cmd = Some(id);
+            }
         }
     }
 
     selected_cmd
 }
 
-fn render_layers_control(
-    ui: &mut egui::Ui,
-    app: &mut CadApp,
-    clicked: &mut Option<&'static str>,
-) {
+fn render_layers_control(ui: &mut egui::Ui, app: &mut CadApp, clicked: &mut Option<&'static str>) {
     let t = Tokens::get();
     let Ok(d) = app.session.doc() else { return };
     let cur = d.header.str("CLAYER", "0");
-    let layers: Vec<(String, bool, bool, bool, Color)> =
-        d.layers.iter().map(|l| (l.name.clone(), l.on, l.frozen, l.locked, l.color)).collect();
+    let layers: Vec<(String, bool, bool, bool, Color)> = d.layers.iter().map(|l| (l.name.clone(), l.on, l.frozen, l.locked, l.color)).collect();
 
     let sel = app.session.selection();
     let has_sel = !sel.is_empty();
@@ -1466,12 +1400,12 @@ fn render_layers_control(
     let mut toggle_layer_prop: Option<(String, &'static str, bool)> = None;
 
     ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing = vec2(0.0, 4.0);
+        ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
         ui.add_space(2.0);
 
-        // Top: Layer ComboBox (~175px wide, 24px high)
-        let combo_w = 175.0;
-        let (rect, resp) = ui.allocate_exact_size(vec2(combo_w, 24.0), Sense::click());
+        // Top: Layer ComboBox (~160px wide, 22px high)
+        let combo_w = 160.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(combo_w, 22.0), Sense::click());
         if resp.hovered() {
             ui.painter().rect_filled(rect, 3.0, t.control_hover.gamma_multiply(0.6));
         } else {
@@ -1485,48 +1419,32 @@ fn render_layers_control(
             if is_frozen { Icon::Snowflake } else { Icon::Sun },
             if is_locked { Icon::Lock } else { Icon::Unlock },
         ] {
-            icons::paint(ui.painter(), Rect::from_min_size(pos2(x, rect.top() + 4.0), vec2(15.0, 15.0)), icon, false);
+            icons::paint(ui.painter(), Rect::from_min_size(pos2(x, rect.top() + 3.0), vec2(15.0, 15.0)), icon, false);
             x += 16.0;
         }
 
         // Swatch (10x10)
-        let sr = Rect::from_min_size(pos2(x + 2.0, rect.top() + 7.0), vec2(10.0, 10.0));
+        let sr = Rect::from_min_size(pos2(x + 2.0, rect.top() + 6.0), vec2(10.0, 10.0));
         crate::palettes::swatch(ui.painter(), sr, color);
         x += 16.0;
 
         // Layer Name
         let name_w = (rect.right() - 16.0 - x).max(20.0);
-        let mut job = egui::text::LayoutJob::simple_singleline(
-            displayed_layer_name.clone(),
-            egui::FontId::proportional(11.0),
-            t.text,
-        );
-        job.wrap = egui::text::TextWrapping {
-            max_width: name_w,
-            max_rows: 1,
-            break_anywhere: true,
-            overflow_character: Some('…'),
-        };
+        let mut job = egui::text::LayoutJob::simple_singleline(displayed_layer_name.clone(), egui::FontId::proportional(11.0), t.text);
+        job.wrap = egui::text::TextWrapping { max_width: name_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
         let galley = ui.painter().layout_job(job);
         let text_pos = pos2(x, rect.center().y - galley.size().y / 2.0);
         ui.painter().galley(text_pos, galley, t.text);
 
         // Dropdown Chevron
-        icons::paint(
-            ui.painter(),
-            Rect::from_center_size(pos2(rect.right() - 9.0, rect.center().y), vec2(8.0, 8.0)),
-            Icon::ChevronDown,
-            false,
-        );
+        icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.right() - 9.0, rect.center().y), vec2(8.0, 8.0)), Icon::ChevronDown, false);
 
         icons::describe_control(ui, &resp, &format!("Layer: {displayed_layer_name}"), None, false);
         let resp = resp.on_hover_text(format!("{}: {displayed_layer_name}", crate::tl!("Current Layer")));
 
         // Layer picker popup
-        egui::Popup::from_toggle_button_response(&resp)
-            .width(combo_w + 30.0)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
+        egui::Popup::from_toggle_button_response(&resp).width(combo_w + 30.0).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(
+            |ui| {
                 egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                     for (name, on, frozen, locked, l_color) in &layers {
                         ui.horizontal(|ui| {
@@ -1549,23 +1467,38 @@ fn render_layers_control(
                         });
                     }
                 });
-            });
+            },
+        );
 
-        // Bottom row: 6 compact buttons (Isolate, Freeze, Lock, Turn Off, Make Current, Previous)
+        // Compact Layer Tools: Row 1 (Turn Off, Freeze, Lock)
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
-            let sub_tools: &[(Icon, &'static str, &'static str)] = &[
-                (Icon::LayerIso, "layiso", "Isolate Layer"),
+            let row1: &[(Icon, &'static str, &'static str)] = &[
+                (Icon::LayerOff, "layoff", "Turn Layer Off"),
                 (Icon::LayerFreeze, "layfrz", "Freeze Layer"),
                 (Icon::LayerLock, "laylck", "Lock Layer"),
-                (Icon::LayerOff, "layoff", "Turn Layer Off"),
-                (Icon::MakeCurrent, "laymcur", "Make Layer Current"),
+            ];
+
+            for (icon, id, tip) in row1 {
+                let available = is_command_available(&app.session, id);
+                if render_compact_icon_button_sized(ui, *icon, id, tip, available, 26.0) {
+                    *clicked = Some(*id);
+                }
+            }
+        });
+
+        // Compact Layer Tools: Row 2 (Isolate, Unisolate, Previous State)
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
+            let row2: &[(Icon, &'static str, &'static str)] = &[
+                (Icon::LayerIso, "layiso", "Isolate Layer"),
+                (Icon::LayerIso, "layuniso", "Unisolate Layer"),
                 (Icon::LayerPrev, "layerp", "Previous Layer State"),
             ];
 
-            for (icon, id, tip) in sub_tools {
+            for (icon, id, tip) in row2 {
                 let available = is_command_available(&app.session, id);
-                if render_compact_icon_button(ui, *icon, id, tip, available) {
+                if render_compact_icon_button_sized(ui, *icon, id, tip, available, 26.0) {
                     *clicked = Some(*id);
                 }
             }
@@ -1585,10 +1518,7 @@ fn render_layers_control(
     }
 }
 
-fn render_properties_control(
-    ui: &mut egui::Ui,
-    app: &mut CadApp,
-) {
+fn render_properties_control(ui: &mut egui::Ui, app: &mut CadApp) {
     let t = Tokens::get();
     let Ok(d) = app.session.doc() else { return };
     let h = &d.header;
@@ -1654,35 +1584,34 @@ fn render_properties_control(
         } else {
             ui.painter().rect_filled(rect1, 3.0, t.control);
         }
-        icons::paint(ui.painter(), Rect::from_min_size(pos2(rect1.left() + 4.0, rect1.top() + 2.0), vec2(16.0, 16.0)), Icon::Properties, false);
+        let cur_color = if color_str.eq_ignore_ascii_case("ByLayer") {
+            Color::ByLayer
+        } else if color_str.eq_ignore_ascii_case("ByBlock") {
+            Color::ByBlock
+        } else if let Ok(n) = color_str.parse::<i16>() {
+            Color::from_aci(n)
+        } else {
+            Color::ByLayer
+        };
+        let swatch_rect = Rect::from_center_size(pos2(rect1.left() + 11.0, rect1.center().y), vec2(11.0, 11.0));
+        crate::palettes::swatch(ui.painter(), swatch_rect, cur_color);
         let translated_color = crate::i18n::t(&color_str);
         let galley1 = ui.painter().layout_no_wrap(translated_color.to_string(), egui::FontId::proportional(10.5), t.text);
-        ui.painter().galley(pos2(rect1.left() + 24.0, rect1.center().y - galley1.size().y / 2.0), galley1, t.text);
+        ui.painter().galley(pos2(rect1.left() + 22.0, rect1.center().y - galley1.size().y / 2.0), galley1, t.text);
         icons::paint(ui.painter(), Rect::from_center_size(pos2(rect1.right() - 8.0, rect1.center().y), vec2(7.0, 7.0)), Icon::ChevronDown, false);
         icons::describe_control(ui, &resp1, &format!("Color: {color_str}"), None, false);
         let resp1 = resp1.on_hover_text(format!("{}: {translated_color}", crate::tl!("Color")));
 
-        egui::Popup::from_toggle_button_response(&resp1)
-            .width(prop_w)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                for (name, aci) in [
-                    ("ByLayer", 256),
-                    ("ByBlock", 0),
-                    ("Red", 1),
-                    ("Yellow", 2),
-                    ("Green", 3),
-                    ("Cyan", 4),
-                    ("Blue", 5),
-                    ("Magenta", 6),
-                    ("White", 7),
-                ] {
-                    if ui.button(crate::i18n::t(name)).clicked() {
-                        change_color = Some(aci.to_string());
-                        ui.close();
-                    }
+        egui::Popup::from_toggle_button_response(&resp1).width(prop_w).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            for (name, aci) in
+                [("ByLayer", 256), ("ByBlock", 0), ("Red", 1), ("Yellow", 2), ("Green", 3), ("Cyan", 4), ("Blue", 5), ("Magenta", 6), ("White", 7)]
+            {
+                if ui.button(crate::i18n::t(name)).clicked() {
+                    change_color = Some(aci.to_string());
+                    ui.close();
                 }
-            });
+            }
+        });
 
         // Row 2: Lineweight
         let (rect2, resp2) = ui.allocate_exact_size(vec2(prop_w, 20.0), Sense::click());
@@ -1699,24 +1628,21 @@ fn render_properties_control(
         icons::describe_control(ui, &resp2, &format!("Lineweight: {lw_str}"), None, false);
         let resp2 = resp2.on_hover_text(format!("{}: {translated_lw}", crate::tl!("Lineweight")));
 
-        egui::Popup::from_toggle_button_response(&resp2)
-            .width(prop_w)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                for n in ["ByLayer", "ByBlock", "Default"] {
-                    if ui.button(crate::i18n::t(n)).clicked() {
-                        change_lw = Some(serde_json::Value::String(n.to_string()));
-                        ui.close();
-                    }
+        egui::Popup::from_toggle_button_response(&resp2).width(prop_w).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            for n in ["ByLayer", "ByBlock", "Default"] {
+                if ui.button(crate::i18n::t(n)).clicked() {
+                    change_lw = Some(serde_json::Value::String(n.to_string()));
+                    ui.close();
                 }
-                for v in cadcraft_doc::Lineweight::STANDARD {
-                    let label = format!("{:.2} mm", f64::from(v) / 100.0);
-                    if ui.button(label).clicked() {
-                        change_lw = Some(serde_json::json!(f64::from(v) / 100.0));
-                        ui.close();
-                    }
+            }
+            for v in cadcraft_doc::Lineweight::STANDARD {
+                let label = format!("{:.2} mm", f64::from(v) / 100.0);
+                if ui.button(label).clicked() {
+                    change_lw = Some(serde_json::json!(f64::from(v) / 100.0));
+                    ui.close();
                 }
-            });
+            }
+        });
 
         // Row 3: Linetype
         let (rect3, resp3) = ui.allocate_exact_size(vec2(prop_w, 20.0), Sense::click());
@@ -1733,23 +1659,20 @@ fn render_properties_control(
         icons::describe_control(ui, &resp3, &format!("Linetype: {lt_str}"), None, false);
         let resp3 = resp3.on_hover_text(format!("{}: {translated_lt}", crate::tl!("Linetype")));
 
-        egui::Popup::from_toggle_button_response(&resp3)
-            .width(prop_w)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                for n in ["ByLayer", "ByBlock"] {
-                    if ui.button(crate::i18n::t(n)).clicked() {
-                        change_lt = Some(n.to_string());
-                        ui.close();
-                    }
+        egui::Popup::from_toggle_button_response(&resp3).width(prop_w).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            for n in ["ByLayer", "ByBlock"] {
+                if ui.button(crate::i18n::t(n)).clicked() {
+                    change_lt = Some(n.to_string());
+                    ui.close();
                 }
-                for lt in &d.linetypes {
-                    if !["ByLayer", "ByBlock"].contains(&lt.name.as_str()) && ui.button(&lt.name).clicked() {
-                        change_lt = Some(lt.name.clone());
-                        ui.close();
-                    }
+            }
+            for lt in &d.linetypes {
+                if !["ByLayer", "ByBlock"].contains(&lt.name.as_str()) && ui.button(&lt.name).clicked() {
+                    change_lt = Some(lt.name.clone());
+                    ui.close();
                 }
-            });
+            }
+        });
     });
 
     if let Some(val) = change_color {

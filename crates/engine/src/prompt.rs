@@ -1,7 +1,7 @@
 //! Interactive commands: prompts, inputs and the command-line coordinate grammar.
 
 use cadcraft_doc::{EntityKind, Handle};
-use cadcraft_geom::{Mat3, Vec2};
+use cadcraft_geom::{Mat3, Vec2, Vec3};
 use serde::Serialize;
 
 use crate::{Result, Session};
@@ -193,6 +193,7 @@ impl Prompt {
 #[serde(tag = "kind", content = "value", rename_all = "camelCase")]
 pub enum Input {
     Point(Vec2),
+    Point3(Vec3),
     /// A deferred tangent/perpendicular snap, only sent to prompts that accept it
     /// (`Prompt.deferred`).
     Deferred(crate::snap::Deferred),
@@ -203,6 +204,24 @@ pub enum Input {
     Pick(Vec<Handle>),
     Enter,
     Cancel,
+}
+
+impl Input {
+    pub fn point2(&self) -> Option<Vec2> {
+        match self {
+            Input::Point(p) => Some(*p),
+            Input::Point3(p) => Some(p.xy()),
+            _ => None,
+        }
+    }
+
+    pub fn point3(&self) -> Option<Vec3> {
+        match self {
+            Input::Point(p) => Some(Vec3::new(p.x, p.y, 0.0)),
+            Input::Point3(p) => Some(*p),
+            _ => None,
+        }
+    }
 }
 
 /// What happens after an input.
@@ -257,18 +276,11 @@ pub struct Drag {
     pub clipboard: bool,
 }
 
-/// Parse a typed point: `x,y[,z]`, `@dx,dy`, `@dist<angle`, `dist<angle`, `#x,y` (absolute),
-/// `*x,y` and `*@dx,dy`/`@*dx,dy` (world coordinates: the same as the plain forms, as there is no
-/// UCS yet).
-/// Relative forms use `last`. Polar angles read the default angle settings (degrees from +X,
-/// counterclockwise); `parse_point_with` reads a drawing's.
-pub fn parse_point(text: &str, last: Vec2) -> Option<Vec2> {
-    parse_point_with(text, last, &crate::units::AngleSettings::default())
-}
-
-/// `parse_point` with polar angles read per `angles` (AUNITS, ANGBASE, ANGDIR); `d<<a` and
-/// `d<<<a` measure from +X counterclockwise (in degrees and in AUNITS).
-pub fn parse_point_with(text: &str, last: Vec2, angles: &crate::units::AngleSettings) -> Option<Vec2> {
+/// Parse a typed 3D point: `x,y[,z]`, `@dx,dy[,dz]`, `@dist<angle`, `dist<angle`, `#x,y[,z]` (absolute),
+/// `*x,y[,z]` and `*@dx,dy[,dz]` (world coordinates).
+/// Relative forms use `last`. Polar angles read the drawing's angle settings.
+/// Returns `Some((point, has_z))` where `has_z` is true if an explicit Z coordinate was given.
+pub fn parse_point3_opt(text: &str, last: Vec3, angles: &crate::units::AngleSettings) -> Option<(Vec3, bool)> {
     let t = text.trim();
     if t.is_empty() {
         return None;
@@ -283,13 +295,14 @@ pub fn parse_point_with(text: &str, last: Vec2, angles: &crate::units::AngleSett
         (false, t)
     };
     if rel && body.is_empty() {
-        return Some(last);
+        return Some((last, false));
     }
-    let p = if let Some((d, a)) = body.split_once('<') {
+    let (p, has_z) = if let Some((d, a)) = body.split_once('<') {
         let dist = crate::units::parse_distance(d)?;
         // `d<<a` / `d<<<a`: the override prefixes keep their `<<` / `<<<`.
         let ang = if a.starts_with('<') { angles.direction(&format!("<{a}"))? } else { angles.direction(a)? };
-        Vec2::from_angle(ang) * dist
+        let p2 = Vec2::from_angle(ang) * dist;
+        (Vec3::new(p2.x, p2.y, 0.0), false)
     } else {
         let parts: Vec<&str> = body.split(',').collect();
         if parts.len() < 2 || parts.len() > 3 {
@@ -297,13 +310,43 @@ pub fn parse_point_with(text: &str, last: Vec2, angles: &crate::units::AngleSett
         }
         let x = crate::units::parse_distance(parts.first()?)?;
         let y = crate::units::parse_distance(parts.get(1)?)?;
-        if let Some(z) = parts.get(2) {
-            crate::units::parse_distance(z)?;
-        }
-        Vec2::new(x, y)
+        let (z, has_z) = if let Some(zs) = parts.get(2) { (crate::units::parse_distance(zs)?, true) } else { (0.0, false) };
+        (Vec3::new(x, y, z), has_z)
     };
-    let r = if rel { last + p } else { p };
-    r.is_finite().then_some(r)
+    let r = if rel {
+        if has_z {
+            last + p
+        } else {
+            // Relative in XY keeps the elevation from `last`
+            Vec3::new(last.x + p.x, last.y + p.y, last.z)
+        }
+    } else {
+        p
+    };
+    r.is_finite().then_some((r, has_z))
+}
+
+pub fn parse_point3_with(text: &str, last: Vec3, angles: &crate::units::AngleSettings) -> Option<Vec3> {
+    parse_point3_opt(text, last, angles).map(|(p, _)| p)
+}
+
+pub fn parse_point3(text: &str, last: Vec3) -> Option<Vec3> {
+    parse_point3_with(text, last, &crate::units::AngleSettings::default())
+}
+
+/// Parse a typed point: `x,y[,z]`, `@dx,dy`, `@dist<angle`, `dist<angle`, `#x,y` (absolute),
+/// `*x,y` and `*@dx,dy`/`@*dx,dy` (world coordinates: the same as the plain forms, as there is no
+/// UCS yet).
+/// Relative forms use `last`. Polar angles read the default angle settings (degrees from +X,
+/// counterclockwise); `parse_point_with` reads a drawing's.
+pub fn parse_point(text: &str, last: Vec2) -> Option<Vec2> {
+    parse_point_with(text, last, &crate::units::AngleSettings::default())
+}
+
+/// `parse_point` with polar angles read per `angles` (AUNITS, ANGBASE, ANGDIR); `d<<a` and
+/// `d<<<a` measure from +X counterclockwise (in degrees and in AUNITS).
+pub fn parse_point_with(text: &str, last: Vec2, angles: &crate::units::AngleSettings) -> Option<Vec2> {
+    parse_point3_with(text, Vec3::new(last.x, last.y, 0.0), angles).map(|p| p.xy())
 }
 
 #[cfg(test)]
@@ -327,6 +370,17 @@ mod tests {
         assert_eq!(parse_point("1", last), None);
         assert_eq!(parse_point("a,b", last), None);
         assert_eq!(parse_point("1,2,3,4", last), None);
+
+        // 3D coordinates tests
+        let last3 = Vec3::new(10.0, 20.0, 30.0);
+        assert_eq!(parse_point3("10,20,30", Vec3::ZERO), Some(Vec3::new(10.0, 20.0, 30.0)));
+        assert_eq!(parse_point3("10,20", Vec3::ZERO), Some(Vec3::new(10.0, 20.0, 0.0)));
+        assert_eq!(parse_point3("0,0,0", Vec3::ZERO), Some(Vec3::new(0.0, 0.0, 0.0)));
+        assert_eq!(parse_point3("100,50,75", Vec3::ZERO), Some(Vec3::new(100.0, 50.0, 75.0)));
+        assert_eq!(parse_point3("@1,2", last3), Some(Vec3::new(11.0, 22.0, 30.0)));
+        assert_eq!(parse_point3("@1,2,3", last3), Some(Vec3::new(11.0, 22.0, 33.0)));
+        assert_eq!(parse_point3("@", last3), Some(last3));
+        assert_eq!(parse_point3("#5,6,7", last3), Some(Vec3::new(5.0, 6.0, 7.0)));
     }
 
     #[test]

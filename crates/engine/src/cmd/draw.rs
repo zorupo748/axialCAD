@@ -102,19 +102,19 @@ fn added(h: cadcraft_doc::Handle) -> Result<Value> {
 // ---------------- JSON forms ----------------
 
 fn run_line(s: &mut Session, p: &Value) -> Result<Value> {
-    let pts = points_param(p, "points").ok_or_else(|| bad("line", "`points` [[x,y],...] (2 or more) is required"))?;
+    let pts = points3_param(p, "points").ok_or_else(|| bad("line", "`points` [[x,y[,z]],...] (2 or more) is required"))?;
     if pts.len() < 2 {
         return Err(bad("line", "need at least 2 points"));
     }
     // A repeated point would make a zero-length line.
-    let pts = distinct_points(&pts);
+    let pts = distinct_points3(&pts);
     if pts.len() < 2 {
         return Err(bad("line", "need at least 2 different points"));
     }
     let mut hs = Vec::new();
     for w in pts.windows(2) {
         if let [a, b] = w {
-            hs.push(s.add_entity(line(*a, *b))?.hex());
+            hs.push(s.add_entity(line3(*a, *b))?.hex());
         }
     }
     if bool_or(p, "closed", false)
@@ -122,7 +122,7 @@ fn run_line(s: &mut Session, p: &Value) -> Result<Value> {
         && let (Some(a), Some(b)) = (pts.last(), pts.first())
         && !a.near(*b, 1e-12)
     {
-        hs.push(s.add_entity(line(*a, *b))?.hex());
+        hs.push(s.add_entity(line3(*a, *b))?.hex());
     }
     Ok(json!({ "handles": hs }))
 }
@@ -392,7 +392,7 @@ fn run_mtext(s: &mut Session, p: &Value) -> Result<Value> {
 
 #[derive(Default)]
 struct LineM {
-    pts: Vec<Vec2>,
+    pts: Vec<Vec3>,
     handles: Vec<cadcraft_doc::Handle>,
     /// A first point picked as a deferred tangent/perpendicular, resolved by the next point.
     first: Option<snap::Deferred>,
@@ -406,9 +406,25 @@ impl LineM {
             return Err(crate::EngineError::Other(format!("No {what} line through that point; pick another point.")));
         };
         self.handles.push(s.add_entity(line(a, b))?);
-        self.pts = vec![a, b];
+        let a3 = v3(a);
+        let b3 = v3(b);
+        self.pts = vec![a3, b3];
         self.first = None;
         s.last_point = b;
+        s.last_point3 = b3;
+        Ok(Step::Continue)
+    }
+
+    fn push_point(&mut self, s: &mut Session, p: Vec3) -> Result<Step> {
+        if let Some(last) = self.pts.last().copied() {
+            if last.near(p, 1e-12) {
+                return Ok(Step::Continue);
+            }
+            self.handles.push(s.add_entity(line3(last, p))?);
+        }
+        self.pts.push(p);
+        s.last_point = p.xy();
+        s.last_point3 = p;
         Ok(Step::Continue)
     }
 }
@@ -418,11 +434,12 @@ impl Interactive for LineM {
         "LINE"
     }
     fn prompt(&self, _s: &Session) -> Prompt {
+        let base = self.pts.last().map(|p| p.xy());
         match self.pts.len() {
             0 if self.first.is_some() => Prompt::new("Specify next point", Accept::POINT).kw(&["Undo"]).deferred(),
             0 => Prompt::new("Specify first point", Accept::POINT).deferred(),
-            1 | 2 => Prompt::new("Specify next point", Accept::POINT).kw(&["Undo"]).base_opt(self.pts.last().copied()),
-            _ => Prompt::new("Specify next point", Accept::POINT).kw(&["Close", "Undo"]).base_opt(self.pts.last().copied()),
+            1 | 2 => Prompt::new("Specify next point", Accept::POINT).kw(&["Undo"]).base_opt(base),
+            _ => Prompt::new("Specify next point", Accept::POINT).kw(&["Close", "Undo"]).base_opt(base),
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
@@ -438,12 +455,16 @@ impl Interactive for LineM {
                     {
                         let e = t + Vec2::new(ang.cos(), ang.sin()) * dist;
                         self.handles.push(s.add_entity(line(t, e))?);
-                        self.pts = vec![t, e];
+                        self.pts = vec![v3(t), v3(e)];
                         s.last_point = e;
+                        s.last_point3 = v3(e);
                         self.first = None;
                         return Ok(Step::Continue);
                     }
                     return self.resolve_first(s, first, snap::LineEnd::Point(p));
+                }
+                Input::Point3(p3) => {
+                    return self.resolve_first(s, first, snap::LineEnd::Point(p3.xy()));
                 }
                 Input::Deferred(d) => return self.resolve_first(s, first, snap::LineEnd::Deferred(d)),
                 _ => {}
@@ -456,22 +477,17 @@ impl Interactive for LineM {
             }
             // A deferred pick with a known last point (not offered by the prompt, but harmless).
             Input::Deferred(d) => match self.pts.last().copied() {
-                Some(last) => match snap::resolve_deferred(snap::LineEnd::Point(last), snap::LineEnd::Deferred(d)) {
+                Some(last) => match snap::resolve_deferred(snap::LineEnd::Point(last.xy()), snap::LineEnd::Deferred(d)) {
                     Some((_, p)) => self.input(s, Input::Point(p)),
                     None => Err(crate::EngineError::Other("No tangent or perpendicular from the last point.".into())),
                 },
                 None => Ok(Step::Continue),
             },
             Input::Point(p) => {
-                if let Some(last) = self.pts.last().copied() {
-                    if last.near(p, 1e-12) {
-                        return Ok(Step::Continue);
-                    }
-                    self.handles.push(s.add_entity(line(last, p))?);
-                }
-                self.pts.push(p);
-                Ok(Step::Continue)
+                let z = self.pts.last().map_or(s.last_point3.z, |pt| pt.z);
+                self.push_point(s, Vec3::new(p.x, p.y, z))
             }
+            Input::Point3(p3) => self.push_point(s, p3),
             Input::Keyword(k) if k == "Undo" => {
                 if self.first.take().is_some() {
                     return Ok(Step::Continue);
@@ -480,11 +496,15 @@ impl Interactive for LineM {
                     s.doc_mut()?.remove_entity(h);
                 }
                 self.pts.pop();
+                if let Some(last) = self.pts.last() {
+                    s.last_point = last.xy();
+                    s.last_point3 = *last;
+                }
                 Ok(Step::Continue)
             }
             Input::Keyword(k) if k == "Close" => {
                 if let (Some(a), Some(b)) = (self.pts.last().copied(), self.pts.first().copied()) {
-                    s.add_entity(line(a, b))?;
+                    s.add_entity(line3(a, b))?;
                 }
                 Ok(Step::Done)
             }
@@ -498,7 +518,7 @@ impl Interactive for LineM {
             let end = s.cursor_deferred.map_or(snap::LineEnd::Point(c), snap::LineEnd::Deferred);
             return snap::resolve_deferred(snap::LineEnd::Deferred(first), end).map(|(a, b)| vec![line(a, b)]).unwrap_or_default();
         }
-        self.pts.last().map(|l| vec![line(*l, c)]).unwrap_or_default()
+        self.pts.last().map(|l| vec![line3(*l, Vec3::new(c.x, c.y, l.z))]).unwrap_or_default()
     }
 }
 

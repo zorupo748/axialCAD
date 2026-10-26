@@ -206,7 +206,14 @@ fn audit_all_ribbon_commands() {
     let mut non_interactive_ok = Vec::new();
     let mut errored = Vec::new();
 
-    let check_cmd = |app: &mut CadApp, cmd: &str, tab: &str, panel: &str, int_list: &mut Vec<String>, ui_list: &mut Vec<String>, ok_list: &mut Vec<String>, err_list: &mut Vec<String>| {
+    let check_cmd = |app: &mut CadApp,
+                     cmd: &str,
+                     tab: &str,
+                     panel: &str,
+                     int_list: &mut Vec<String>,
+                     ui_list: &mut Vec<String>,
+                     ok_list: &mut Vec<String>,
+                     err_list: &mut Vec<String>| {
         let before_log_len = app.session.log.len();
         let running_before = app.session.running.is_some();
         if running_before {
@@ -239,13 +246,31 @@ fn audit_all_ribbon_commands() {
                     ribbon::RibbonItem::SplitButton { id, menu, .. } => {
                         check_cmd(&mut app, id, tab.id, panel.title, &mut interactive, &mut ui_commands, &mut non_interactive_ok, &mut errored);
                         for (m_cmd, _, _) in *menu {
-                            check_cmd(&mut app, m_cmd, tab.id, panel.title, &mut interactive, &mut ui_commands, &mut non_interactive_ok, &mut errored);
+                            check_cmd(
+                                &mut app,
+                                m_cmd,
+                                tab.id,
+                                panel.title,
+                                &mut interactive,
+                                &mut ui_commands,
+                                &mut non_interactive_ok,
+                                &mut errored,
+                            );
                         }
                     }
                     ribbon::RibbonItem::LargeDropdown { id, menu, .. } => {
                         check_cmd(&mut app, id, tab.id, panel.title, &mut interactive, &mut ui_commands, &mut non_interactive_ok, &mut errored);
                         for (m_cmd, _, _) in *menu {
-                            check_cmd(&mut app, m_cmd, tab.id, panel.title, &mut interactive, &mut ui_commands, &mut non_interactive_ok, &mut errored);
+                            check_cmd(
+                                &mut app,
+                                m_cmd,
+                                tab.id,
+                                panel.title,
+                                &mut interactive,
+                                &mut ui_commands,
+                                &mut non_interactive_ok,
+                                &mut errored,
+                            );
                         }
                     }
                     ribbon::RibbonItem::MediumGrid { cols } => {
@@ -253,12 +278,39 @@ fn audit_all_ribbon_commands() {
                             for mi in *col {
                                 match mi {
                                     ribbon::MediumItem::Button { id, .. } => {
-                                        check_cmd(&mut app, id, tab.id, panel.title, &mut interactive, &mut ui_commands, &mut non_interactive_ok, &mut errored);
+                                        check_cmd(
+                                            &mut app,
+                                            id,
+                                            tab.id,
+                                            panel.title,
+                                            &mut interactive,
+                                            &mut ui_commands,
+                                            &mut non_interactive_ok,
+                                            &mut errored,
+                                        );
                                     }
                                     ribbon::MediumItem::Dropdown { id, menu, .. } => {
-                                        check_cmd(&mut app, id, tab.id, panel.title, &mut interactive, &mut ui_commands, &mut non_interactive_ok, &mut errored);
+                                        check_cmd(
+                                            &mut app,
+                                            id,
+                                            tab.id,
+                                            panel.title,
+                                            &mut interactive,
+                                            &mut ui_commands,
+                                            &mut non_interactive_ok,
+                                            &mut errored,
+                                        );
                                         for (m_cmd, _, _) in *menu {
-                                            check_cmd(&mut app, m_cmd, tab.id, panel.title, &mut interactive, &mut ui_commands, &mut non_interactive_ok, &mut errored);
+                                            check_cmd(
+                                                &mut app,
+                                                m_cmd,
+                                                tab.id,
+                                                panel.title,
+                                                &mut interactive,
+                                                &mut ui_commands,
+                                                &mut non_interactive_ok,
+                                                &mut errored,
+                                            );
                                         }
                                     }
                                 }
@@ -269,12 +321,39 @@ fn audit_all_ribbon_commands() {
                         for ci in *compact_items {
                             match ci {
                                 ribbon::CompactItem::Button { id, .. } | ribbon::CompactItem::IconOnly { id, .. } => {
-                                    check_cmd(&mut app, id, tab.id, panel.title, &mut interactive, &mut ui_commands, &mut non_interactive_ok, &mut errored);
+                                    check_cmd(
+                                        &mut app,
+                                        id,
+                                        tab.id,
+                                        panel.title,
+                                        &mut interactive,
+                                        &mut ui_commands,
+                                        &mut non_interactive_ok,
+                                        &mut errored,
+                                    );
                                 }
                                 ribbon::CompactItem::Dropdown { id, menu, .. } => {
-                                    check_cmd(&mut app, id, tab.id, panel.title, &mut interactive, &mut ui_commands, &mut non_interactive_ok, &mut errored);
+                                    check_cmd(
+                                        &mut app,
+                                        id,
+                                        tab.id,
+                                        panel.title,
+                                        &mut interactive,
+                                        &mut ui_commands,
+                                        &mut non_interactive_ok,
+                                        &mut errored,
+                                    );
                                     for (m_cmd, _, _) in *menu {
-                                        check_cmd(&mut app, m_cmd, tab.id, panel.title, &mut interactive, &mut ui_commands, &mut non_interactive_ok, &mut errored);
+                                        check_cmd(
+                                            &mut app,
+                                            m_cmd,
+                                            tab.id,
+                                            panel.title,
+                                            &mut interactive,
+                                            &mut ui_commands,
+                                            &mut non_interactive_ok,
+                                            &mut errored,
+                                        );
                                     }
                                 }
                             }
@@ -282,7 +361,16 @@ fn audit_all_ribbon_commands() {
                     }
                     ribbon::RibbonItem::IconColumn(icon_items) => {
                         for ii in *icon_items {
-                            check_cmd(&mut app, ii.id, tab.id, panel.title, &mut interactive, &mut ui_commands, &mut non_interactive_ok, &mut errored);
+                            check_cmd(
+                                &mut app,
+                                ii.id,
+                                tab.id,
+                                panel.title,
+                                &mut interactive,
+                                &mut ui_commands,
+                                &mut non_interactive_ok,
+                                &mut errored,
+                            );
                         }
                     }
                     ribbon::RibbonItem::LayersControl | ribbon::RibbonItem::PropertiesControl => {}
@@ -295,13 +383,21 @@ fn audit_all_ribbon_commands() {
     }
 
     println!("=== INTERACTIVE COMMANDS ({}) ===", interactive.len());
-    for s in &interactive { println!("  {s}"); }
+    for s in &interactive {
+        println!("  {s}");
+    }
     println!("=== UI COMMANDS ({}) ===", ui_commands.len());
-    for s in &ui_commands { println!("  {s}"); }
+    for s in &ui_commands {
+        println!("  {s}");
+    }
     println!("=== NON-INTERACTIVE OK ({}) ===", non_interactive_ok.len());
-    for s in &non_interactive_ok { println!("  {s}"); }
+    for s in &non_interactive_ok {
+        println!("  {s}");
+    }
     println!("=== ERRORED / NOT INTERACTIVE ({}) ===", errored.len());
-    for s in &errored { println!("  {s}"); }
+    for s in &errored {
+        println!("  {s}");
+    }
 }
 
 #[test]
@@ -348,11 +444,11 @@ fn leader_panel_associations() {
     for item in leaders_panel.items {
         if let ribbon::RibbonItem::CompactColumn(cols) = item {
             for col in *cols {
-                if let ribbon::CompactItem::Button { id, label, .. } = col {
-                    if *label == "Add Leader" {
-                        assert_eq!(*id, "mleaderedit.add");
-                        found_add = true;
-                    }
+                if let ribbon::CompactItem::Button { id, label, .. } = col
+                    && *label == "Add Leader"
+                {
+                    assert_eq!(*id, "mleaderedit.add");
+                    found_add = true;
                 }
             }
         }
@@ -512,7 +608,9 @@ fn ribbon_panels_layout_and_grouping_match_autocad_specification() {
         ribbon::RibbonItem::SplitButton { id, label, menu, .. } => {
             assert_eq!(*id, "circle");
             assert_eq!(*label, "Circle");
-            assert!(menu.iter().any(|(cmd, _, _)| *cmd == "donut"));
+            let cmds: Vec<&str> = menu.iter().map(|(cmd, _, _)| *cmd).collect();
+            assert_eq!(cmds, vec!["circle", "circle.cd", "circle.2p", "circle.3p", "circle.ttr", "circle.ttt"]);
+            assert!(!cmds.contains(&"donut"), "Donut must not be presented as a circle variant");
         }
         _ => panic!("Expected split button Circle"),
     }
@@ -606,30 +704,30 @@ fn fillet_chamfer_split_button_options_and_command_routing() {
     if let ribbon::RibbonItem::MediumGrid { cols } = &modify.items[0] {
         for col in *cols {
             for item in *col {
-                if let ribbon::MediumItem::Dropdown { id, label, menu, .. } = item {
-                    if *id == "fillet" {
-                        found_fillet_split = true;
-                        assert_eq!(*label, "Fillet");
-                        cadcraft_ui_egui::i18n::with_language("es", || {
-                            assert_eq!(cadcraft_ui_egui::i18n::t(label), "Empalme");
-                        });
+                if let ribbon::MediumItem::Dropdown { id, label, menu, .. } = item
+                    && *id == "fillet"
+                {
+                    found_fillet_split = true;
+                    assert_eq!(*label, "Fillet");
+                    cadcraft_ui_egui::i18n::with_language("es", || {
+                        assert_eq!(cadcraft_ui_egui::i18n::t(label), "Empalme");
+                    });
 
-                        let menu_cmds: Vec<&str> = menu.iter().map(|(cmd, _, _)| *cmd).collect();
-                        assert!(menu_cmds.contains(&"fillet"), "Dropdown must contain fillet option");
-                        assert!(menu_cmds.contains(&"chamfer"), "Dropdown must contain chamfer option");
+                    let menu_cmds: Vec<&str> = menu.iter().map(|(cmd, _, _)| *cmd).collect();
+                    assert!(menu_cmds.contains(&"fillet"), "Dropdown must contain fillet option");
+                    assert!(menu_cmds.contains(&"chamfer"), "Dropdown must contain chamfer option");
 
-                        let fillet_entry = menu.iter().find(|(cmd, _, _)| *cmd == "fillet").unwrap();
-                        assert_eq!(fillet_entry.1, "Fillet");
-                        cadcraft_ui_egui::i18n::with_language("es", || {
-                            assert_eq!(cadcraft_ui_egui::i18n::t(fillet_entry.1), "Empalme");
-                        });
+                    let fillet_entry = menu.iter().find(|(cmd, _, _)| *cmd == "fillet").unwrap();
+                    assert_eq!(fillet_entry.1, "Fillet");
+                    cadcraft_ui_egui::i18n::with_language("es", || {
+                        assert_eq!(cadcraft_ui_egui::i18n::t(fillet_entry.1), "Empalme");
+                    });
 
-                        let chamfer_entry = menu.iter().find(|(cmd, _, _)| *cmd == "chamfer").unwrap();
-                        assert_eq!(chamfer_entry.1, "Chamfer");
-                        cadcraft_ui_egui::i18n::with_language("es", || {
-                            assert_eq!(cadcraft_ui_egui::i18n::t(chamfer_entry.1), "Chaflán");
-                        });
-                    }
+                    let chamfer_entry = menu.iter().find(|(cmd, _, _)| *cmd == "chamfer").unwrap();
+                    assert_eq!(chamfer_entry.1, "Chamfer");
+                    cadcraft_ui_egui::i18n::with_language("es", || {
+                        assert_eq!(cadcraft_ui_egui::i18n::t(chamfer_entry.1), "Chaflán");
+                    });
                 }
             }
         }
@@ -728,18 +826,18 @@ fn user_defined_hatch_ribbon_access_and_dialog_integration() {
     for item in draw_panel.items {
         if let ribbon::RibbonItem::CompactColumn(col) = item {
             for compact in *col {
-                if let ribbon::CompactItem::Dropdown { id, menu, .. } = compact {
-                    if *id == "hatch" {
-                        found_hatch_dropdown = true;
-                        let menu_ids: Vec<&str> = menu.iter().map(|(id, _, _)| *id).collect();
-                        assert!(menu_ids.contains(&"hatch"), "Hatch dropdown contains 'hatch'");
-                        assert!(menu_ids.contains(&"hatch.user"), "Hatch dropdown contains 'hatch.user'");
-                        assert!(menu_ids.contains(&"gradient"), "Hatch dropdown contains 'gradient'");
-                        assert!(menu_ids.contains(&"boundary"), "Hatch dropdown contains 'boundary'");
+                if let ribbon::CompactItem::Dropdown { id, menu, .. } = compact
+                    && *id == "hatch"
+                {
+                    found_hatch_dropdown = true;
+                    let menu_ids: Vec<&str> = menu.iter().map(|(id, _, _)| *id).collect();
+                    assert!(menu_ids.contains(&"hatch"), "Hatch dropdown contains 'hatch'");
+                    assert!(menu_ids.contains(&"hatch.user"), "Hatch dropdown contains 'hatch.user'");
+                    assert!(menu_ids.contains(&"gradient"), "Hatch dropdown contains 'gradient'");
+                    assert!(menu_ids.contains(&"boundary"), "Hatch dropdown contains 'boundary'");
 
-                        let user_opt = menu.iter().find(|(id, _, _)| *id == "hatch.user").unwrap();
-                        assert_eq!(user_opt.1, "User-Defined Hatch");
-                    }
+                    let user_opt = menu.iter().find(|(id, _, _)| *id == "hatch.user").unwrap();
+                    assert_eq!(user_opt.1, "User-Defined Hatch");
                 }
             }
         }
@@ -792,4 +890,86 @@ fn user_defined_hatch_ribbon_access_and_dialog_integration() {
     assert!((hatches[0].pattern_lines[0].delta.1 - 2.5).abs() < 1e-4);
     assert!((hatches[0].pattern_lines[1].delta.1 - 2.5).abs() < 1e-4);
     assert!((hatches[0].angle - 45.0f64.to_radians()).abs() < 1e-4);
+}
+
+#[test]
+fn circle_variants_ribbon_integration_and_interactive_flows() {
+    let mut app = CadApp::new(Session::default(), Services::default());
+
+    // 1. Verify all 6 circle variants are registered commands and can be activated
+    let circle_cmds = ["circle", "circle.cd", "circle.2p", "circle.3p", "circle.ttr", "circle.ttt"];
+    for cmd in circle_cmds {
+        assert!(cadcraft_engine::find_command(cmd).is_some(), "Command {cmd} must be registered");
+    }
+
+    // 2. Test Center, Diameter (circle.cd) via interactive activation
+    cadcraft_ui_egui::menus::activate(&mut app, "circle.cd");
+    assert!(app.session.running.is_some(), "circle.cd must be active");
+    assert!(app.cmdline("0,0").is_none());
+    assert!(app.cmdline("10").is_none()); // Diameter 10 -> radius 5
+    assert!(app.session.running.is_none(), "circle.cd must complete");
+    let doc = app.session.doc().unwrap();
+    let circles: Vec<_> = doc.model.iter().filter_map(|e| if let cadcraft_doc::EntityKind::Circle(c) = &e.kind { Some(c) } else { None }).collect();
+    assert_eq!(circles.len(), 1);
+    assert!((circles[0].radius - 5.0).abs() < 1e-9);
+    assert!((circles[0].center.x - 0.0).abs() < 1e-9);
+
+    // 3. Test 2-Point (circle.2p) via interactive activation
+    cadcraft_ui_egui::menus::activate(&mut app, "circle.2p");
+    assert!(app.session.running.is_some());
+    assert!(app.cmdline("10,0").is_none());
+    assert!(app.cmdline("20,0").is_none()); // Midpoint 15,0, radius 5
+    assert!(app.session.running.is_none());
+    let doc = app.session.doc().unwrap();
+    let circles: Vec<_> = doc.model.iter().filter_map(|e| if let cadcraft_doc::EntityKind::Circle(c) = &e.kind { Some(c) } else { None }).collect();
+    assert_eq!(circles.len(), 2);
+    assert!((circles[1].radius - 5.0).abs() < 1e-9);
+    assert!((circles[1].center.x - 15.0).abs() < 1e-9);
+
+    // 4. Test 3-Point (circle.3p) via interactive activation
+    cadcraft_ui_egui::menus::activate(&mut app, "circle.3p");
+    assert!(app.session.running.is_some());
+    assert!(app.cmdline("1,0 0,1 -1,0").is_none());
+    assert!(app.session.running.is_none());
+    let doc = app.session.doc().unwrap();
+    let circles: Vec<_> = doc.model.iter().filter_map(|e| if let cadcraft_doc::EntityKind::Circle(c) = &e.kind { Some(c) } else { None }).collect();
+    assert_eq!(circles.len(), 3);
+    assert!((circles[2].radius - 1.0).abs() < 1e-9);
+    assert!((circles[2].center.x - 0.0).abs() < 1e-9);
+
+    // 5. Test 3-Point collinear failure (rejects collinear points)
+    assert!(app.session.execute("circle.3p", &serde_json::json!({"p1": [0, 0], "p2": [5, 0], "p3": [10, 0]})).is_err());
+    let doc = app.session.doc().unwrap();
+    assert_eq!(
+        doc.model.iter().filter(|e| matches!(&e.kind, cadcraft_doc::EntityKind::Circle(_))).count(),
+        3,
+        "No residual circle on collinear error"
+    );
+
+    // 6. Test cancellation during interactive circle creation (no residual geometry)
+    cadcraft_ui_egui::menus::activate(&mut app, "circle.2p");
+    assert!(app.session.running.is_some());
+    assert!(app.cmdline("50,50").is_none());
+    // Cancel command
+    app.session.cancel();
+    assert!(app.session.running.is_none());
+    let doc = app.session.doc().unwrap();
+    assert_eq!(doc.model.iter().filter(|e| matches!(&e.kind, cadcraft_doc::EntityKind::Circle(_))).count(), 3, "No residual circle on cancel");
+
+    // 7. Test TTR (circle.ttr) with line-line geometry
+    app.session.execute("line", &serde_json::json!({ "points": [[100, 0], [100, 100]] })).unwrap();
+    app.session.execute("line", &serde_json::json!({ "points": [[0, 100], [100, 100]] })).unwrap();
+    cadcraft_ui_egui::menus::activate(&mut app, "circle.ttr");
+    assert!(app.session.running.is_some());
+    assert!(app.cmdline("100,50 50,100 10").is_none()); // picks on lines, radius 10
+    assert!(app.session.running.is_none());
+    let doc = app.session.doc().unwrap();
+    let circles: Vec<_> = doc.model.iter().filter_map(|e| if let cadcraft_doc::EntityKind::Circle(c) = &e.kind { Some(c) } else { None }).collect();
+    assert_eq!(circles.len(), 4, "TTR circle added");
+    assert!((circles[3].radius - 10.0).abs() < 1e-6);
+
+    // 8. Test Donut is accessible via command and not broken
+    cadcraft_ui_egui::menus::activate(&mut app, "donut");
+    assert!(app.session.running.is_some());
+    app.session.cancel();
 }

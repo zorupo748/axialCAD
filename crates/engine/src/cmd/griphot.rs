@@ -275,6 +275,11 @@ impl GripEdit {
                 let m = self.matrix(p);
                 self.edit(s, p, m)
             }
+            Input::Point3(p) => {
+                let p = p.xy();
+                let m = self.matrix(p);
+                self.edit(s, p, m)
+            }
             Input::Deferred(d) => {
                 let m = self.matrix(d.at);
                 self.edit(s, d.at, m)
@@ -297,6 +302,10 @@ impl GripEdit {
     /// Reference (ROTATE: angles, SCALE: lengths): the reference value typed or from two points,
     /// then the new value typed or measured from the base point to a picked point.
     fn reference_input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
+        let i = match i {
+            Input::Point3(p) => Input::Point(p.xy()),
+            other => other,
+        };
         let rotate = self.mode == GripMode::Rotate;
         let au = s.angle_settings();
         let value = |t: &str| -> Result<f64> {

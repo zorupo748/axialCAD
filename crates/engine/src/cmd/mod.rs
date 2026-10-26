@@ -43,9 +43,9 @@ mod tolerance;
 mod trimextend;
 mod txt2mtxt;
 pub use txt2mtxt::Txt2MtxtOptions;
+pub mod solids;
 mod utility;
 mod view;
-pub mod solids;
 
 pub mod curves;
 pub mod helpers;
@@ -53,7 +53,7 @@ pub mod machines;
 pub mod options;
 
 use cadcraft_doc::Handle;
-use cadcraft_geom::Vec2;
+use cadcraft_geom::{Vec2, Vec3};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -265,6 +265,15 @@ pub(crate) fn distinct_points(pts: &[Vec2]) -> Vec<Vec2> {
     }
     out
 }
+pub(crate) fn distinct_points3(pts: &[Vec3]) -> Vec<Vec3> {
+    let mut out: Vec<Vec3> = Vec::with_capacity(pts.len());
+    for p in pts {
+        if !out.last().is_some_and(|l| l.near(*p, 1e-12)) {
+            out.push(*p);
+        }
+    }
+    out
+}
 pub(crate) fn bool_or(p: &Value, key: &str, default: bool) -> bool {
     p.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
@@ -294,6 +303,30 @@ pub(crate) fn point_req(cmd: &str, p: &Value, key: &str) -> Result<Vec2> {
 }
 pub(crate) fn points_param(p: &Value, key: &str) -> Option<Vec<Vec2>> {
     p.get(key)?.as_array()?.iter().map(point_value).collect()
+}
+pub fn point3_value(v: &Value) -> Option<Vec3> {
+    if let Some(a) = v.as_array() {
+        let x = a.first()?.as_f64()?;
+        let y = a.get(1)?.as_f64()?;
+        let z = a.get(2).and_then(Value::as_f64).unwrap_or(0.0);
+        let p = Vec3::new(x, y, z);
+        return p.is_finite().then_some(p);
+    }
+    if let Some(s) = v.as_str() {
+        return crate::prompt::parse_point3(s, Vec3::ZERO);
+    }
+    let x = v.get("x")?.as_f64()?;
+    let y = v.get("y")?.as_f64()?;
+    let z = v.get("z").and_then(Value::as_f64).unwrap_or(0.0);
+    let p = Vec3::new(x, y, z);
+    p.is_finite().then_some(p)
+}
+#[allow(dead_code)]
+pub(crate) fn point3_param(p: &Value, key: &str) -> Option<Vec3> {
+    p.get(key).and_then(point3_value)
+}
+pub(crate) fn points3_param(p: &Value, key: &str) -> Option<Vec<Vec3>> {
+    p.get(key)?.as_array()?.iter().map(point3_value).collect()
 }
 /// Handles from `handles` (hex strings or numbers), `handle`, or else the current selection. A
 /// `handle`/`handles` that can't be read is an error, never a silent fall back to the selection.

@@ -101,6 +101,75 @@ pub fn specs() -> Vec<CommandSpec> {
         })
         .noundo(),
         CommandSpec::new("layout.set", "Switch Layout", run_layout_set).params("{name: \"Model\" | layout name}").noundo(),
+        CommandSpec::new("plan", "Plan View", run_plan)
+            .menu(&["View", "3D Views", "Plan View", "Current UCS"])
+            .alias(&["planview"])
+            .params("{option?: current|world|ucs, name?: string} (zooms to extents of current/world/named UCS)")
+            .noundo()
+            .transparent()
+            .interactive(|_| Ok(Box::new(PlanM::default()))),
+        CommandSpec::new("plan.world", "World UCS", |s, _| run_plan(s, &json!({"option":"world"})))
+            .menu(&["View", "3D Views", "Plan View", "World UCS"])
+            .noundo()
+            .transparent(),
+        CommandSpec::new("plan.current", "Current UCS", |s, _| run_plan(s, &json!({"option":"current"})))
+            .menu(&["View", "3D Views", "Plan View", "Current UCS"])
+            .noundo()
+            .transparent(),
+        CommandSpec::new("vpoint", "Viewpoint", run_vpoint)
+            .menu(&["View", "3D Views", "Viewpoint"])
+            .alias(&["viewpoint"])
+            .params("{direction?: [x,y,z]}")
+            .noundo()
+            .transparent()
+            .interactive(|_| Ok(Box::new(VpointM))),
+        CommandSpec::new("view.top", "Top", |s, _| run_plan(s, &json!({"option":"world"})))
+            .menu(&["View", "3D Views", "Top"])
+            .noundo()
+            .transparent(),
+        CommandSpec::new("view.bottom", "Bottom", |s, _| run_view_preset(s, "bottom"))
+            .menu(&["View", "3D Views", "Bottom"])
+            .noundo()
+            .transparent(),
+        CommandSpec::new("view.left", "Left", |s, _| run_view_preset(s, "left"))
+            .menu(&["View", "3D Views", "Left"])
+            .noundo()
+            .transparent(),
+        CommandSpec::new("view.right", "Right", |s, _| run_view_preset(s, "right"))
+            .menu(&["View", "3D Views", "Right"])
+            .noundo()
+            .transparent(),
+        CommandSpec::new("view.front", "Front", |s, _| run_view_preset(s, "front"))
+            .menu(&["View", "3D Views", "Front"])
+            .noundo()
+            .transparent(),
+        CommandSpec::new("view.back", "Back", |s, _| run_view_preset(s, "back"))
+            .menu(&["View", "3D Views", "Back"])
+            .noundo()
+            .transparent(),
+        CommandSpec::new("view.swiso", "SW Isometric", |s, _| run_view_preset(s, "swiso"))
+            .menu(&["View", "3D Views", "SW Isometric"])
+            .noundo()
+            .transparent(),
+        CommandSpec::new("view.seiso", "SE Isometric", |s, _| run_view_preset(s, "seiso"))
+            .menu(&["View", "3D Views", "SE Isometric"])
+            .noundo()
+            .transparent(),
+        CommandSpec::new("view.neiso", "NE Isometric", |s, _| run_view_preset(s, "neiso"))
+            .menu(&["View", "3D Views", "NE Isometric"])
+            .noundo()
+            .transparent(),
+        CommandSpec::new("view.nwiso", "NW Isometric", |s, _| run_view_preset(s, "nwiso"))
+            .menu(&["View", "3D Views", "NW Isometric"])
+            .noundo()
+            .transparent(),
+        CommandSpec::new("3dorbit", "Orbit", run_3dorbit)
+            .menu(&["View", "3D Views", "3D Orbit"])
+            .alias(&["3do", "orbit"])
+            .params("{direction?: [x,y,z], azimuth?: deg, elevation?: deg}")
+            .noundo()
+            .transparent()
+            .interactive(|_| Ok(Box::new(OrbitM))),
     ];
     v.extend(named_views::specs());
     v.extend(vports::specs());
@@ -568,6 +637,30 @@ impl Session {
         self.touch();
         Ok(())
     }
+    /// True while 3DORBIT command is active.
+    pub fn orbit_active(&self) -> bool {
+        self.running.as_ref().is_some_and(|r| r.id == "3dorbit")
+    }
+    /// One step of 3D orbit drag of (dx, dy) pixels.
+    pub fn orbit_step(&mut self, dx: f64, dy: f64) -> Result<()> {
+        let (w, h) = self.viewport_px;
+        let mut cam = self.camera();
+        if cam.target == cadcraft_geom::Vec3::ZERO
+            && let Ok(st) = self.state()
+        {
+            let ext = st.doc.extents(&st.space);
+            if !ext.is_empty() {
+                cam.target = cadcraft_geom::Vec3::new(ext.center().x, ext.center().y, 0.0);
+            } else {
+                let v = st.view();
+                cam.target = cadcraft_geom::Vec3::new(v.center.x, v.center.y, 0.0);
+            }
+        }
+        cam.orbit(dx, dy, (w, h));
+        self.set_camera(cam);
+        self.touch();
+        Ok(())
+    }
     /// The zoom of a mouse wheel scroll by `delta` points (up zooms in): ZOOMFACTOR scales it
     /// (60, the default, zooms about 18% per wheel step).
     pub fn wheel_zoom_factor(&self, delta: f64) -> f64 {
@@ -605,6 +698,245 @@ impl Interactive for PanM {
                 Ok(Step::Done)
             }
             (_, Input::Enter) => Ok(Step::Done),
+            _ => Ok(Step::Continue),
+        }
+    }
+}
+
+fn run_plan(s: &mut Session, p: &Value) -> Result<Value> {
+    let mut cam = s.camera();
+    cam.set_preset("top");
+    s.set_camera(cam);
+    let opt = str_param(p, "option").unwrap_or("current").to_ascii_lowercase();
+    match opt.as_str() {
+        "world" | "w" => {
+            s.zoom_extents()?;
+            s.echo("Regenerating model.");
+            Ok(json!({ "status": "ok", "view": "world_plan" }))
+        }
+        "ucs" | "u" => {
+            let name = str_param(p, "name");
+            if let Some(n) = name {
+                s.zoom_extents()?;
+                s.echo(format!("Restored plan view of UCS \"{n}\"."));
+                Ok(json!({ "status": "ok", "view": "ucs_plan", "ucs": n }))
+            } else {
+                Err(bad("plan", "`name` of UCS is required"))
+            }
+        }
+        "current" | "c" | "" => {
+            s.zoom_extents()?;
+            s.echo("Regenerating model.");
+            Ok(json!({ "status": "ok", "view": "current_plan" }))
+        }
+        _ => Err(bad("plan", "option must be Current, World, or Ucs")),
+    }
+}
+
+fn run_vpoint(s: &mut Session, p: &Value) -> Result<Value> {
+    if let Some(arr) = p.get("direction").and_then(Value::as_array)
+        && arr.len() == 3
+    {
+        let x = arr.first().and_then(Value::as_f64).unwrap_or(0.0);
+        let y = arr.get(1).and_then(Value::as_f64).unwrap_or(0.0);
+        let z = arr.get(2).and_then(Value::as_f64).unwrap_or(1.0);
+        let mut cam = s.camera();
+        cam.set_view_dir(cadcraft_geom::Vec3::new(x, y, z));
+        s.set_camera(cam);
+        s.zoom_extents()?;
+        s.echo(format!("View direction set to {x:.4},{y:.4},{z:.4}."));
+        return Ok(json!({ "status": "ok", "direction": [x, y, z] }));
+    }
+    let mut cam = s.camera();
+    cam.set_view_dir(cadcraft_geom::Vec3::new(0.0, 0.0, 1.0));
+    s.set_camera(cam);
+    s.zoom_extents()?;
+    s.echo("Regenerating model.");
+    Ok(json!({ "status": "ok", "direction": [0.0, 0.0, 1.0] }))
+}
+
+fn run_view_preset(s: &mut Session, name: &str) -> Result<Value> {
+    let mut cam = s.camera();
+    cam.set_preset(name);
+    s.set_camera(cam);
+    s.zoom_extents()?;
+    s.echo(format!("View orientation set to {name}."));
+    Ok(json!({ "status": "ok", "preset": name }))
+}
+
+#[derive(Default)]
+enum PlanStage {
+    #[default]
+    Option,
+    UcsName,
+}
+
+#[derive(Default)]
+struct PlanM {
+    stage: PlanStage,
+}
+
+impl Interactive for PlanM {
+    fn name(&self) -> &'static str {
+        "PLAN"
+    }
+
+    fn prompt(&self, _s: &Session) -> Prompt {
+        match self.stage {
+            PlanStage::Option => {
+                let mut p =
+                    Prompt::new("Enter an option [Current ucs/Ucs/World] <Current>:", Accept { enter: true, text: true, ..Accept::default() });
+                p.keywords = vec!["Current".into(), "Ucs".into(), "World".into()];
+                p.default = Some("Current".into());
+                p
+            }
+            PlanStage::UcsName => Prompt::new("Enter name of UCS:", Accept { enter: true, text: true, ..Accept::default() }),
+        }
+    }
+
+    fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
+        match self.stage {
+            PlanStage::Option => match i {
+                Input::Enter => {
+                    let _ = run_plan(s, &json!({"option": "current"}))?;
+                    Ok(Step::Done)
+                }
+                Input::Keyword(k) | Input::Text(k) => {
+                    let kl = k.trim().to_ascii_lowercase();
+                    if kl.starts_with('w') {
+                        let _ = run_plan(s, &json!({"option": "world"}))?;
+                        Ok(Step::Done)
+                    } else if kl.starts_with('u') {
+                        self.stage = PlanStage::UcsName;
+                        Ok(Step::Continue)
+                    } else if kl.starts_with('c') || kl.is_empty() {
+                        let _ = run_plan(s, &json!({"option": "current"}))?;
+                        Ok(Step::Done)
+                    } else {
+                        s.echo("Invalid option keyword.");
+                        Ok(Step::Continue)
+                    }
+                }
+                _ => Ok(Step::Continue),
+            },
+            PlanStage::UcsName => match i {
+                Input::Text(name) => {
+                    let _ = run_plan(s, &json!({"option": "ucs", "name": name}))?;
+                    Ok(Step::Done)
+                }
+                Input::Enter => Ok(Step::Done),
+                _ => Ok(Step::Continue),
+            },
+        }
+    }
+}
+
+#[derive(Default)]
+struct VpointM;
+
+impl Interactive for VpointM {
+    fn name(&self) -> &'static str {
+        "VPOINT"
+    }
+
+    fn prompt(&self, s: &Session) -> Prompt {
+        let v = s.camera().view_dir();
+        Prompt::new(
+            format!(
+                "Current view direction: VIEWDIR={:.4},{:.4},{:.4}\nSpecify a view point or [Rotate] <display compass and tripod>:",
+                v.x, v.y, v.z
+            ),
+            Accept { enter: true, text: true, ..Accept::default() },
+        )
+    }
+
+    fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
+        match i {
+            Input::Enter => {
+                s.zoom_extents()?;
+                s.echo("Regenerating model.");
+                Ok(Step::Done)
+            }
+            Input::Text(t) => {
+                let parts: Vec<&str> = t.split(',').collect();
+                if parts.len() == 3 {
+                    let x = parts.first().and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0);
+                    let y = parts.get(1).and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0);
+                    let z = parts.get(2).and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(1.0);
+                    let mut cam = s.camera();
+                    cam.set_view_dir(cadcraft_geom::Vec3::new(x, y, z));
+                    s.set_camera(cam);
+                    s.zoom_extents()?;
+                    s.echo(format!("View direction set to {t}."));
+                    Ok(Step::Done)
+                } else if t.trim().eq_ignore_ascii_case("r") || t.trim().eq_ignore_ascii_case("rotate") {
+                    s.echo("Viewpoint rotation: 0 degrees in XY plane from X axis, 90 degrees from XY plane.");
+                    Ok(Step::Done)
+                } else {
+                    s.echo("Point or option keyword required.");
+                    Ok(Step::Continue)
+                }
+            }
+            _ => Ok(Step::Continue),
+        }
+    }
+}
+
+pub(crate) fn run_3dorbit(s: &mut Session, p: &Value) -> Result<Value> {
+    let mut cam = s.camera();
+    if let Some(arr) = p.get("direction").and_then(Value::as_array) {
+        if arr.len() == 3 {
+            let x = arr.first().and_then(Value::as_f64).unwrap_or(0.0);
+            let y = arr.get(1).and_then(Value::as_f64).unwrap_or(0.0);
+            let z = arr.get(2).and_then(Value::as_f64).unwrap_or(1.0);
+            cam.set_view_dir(cadcraft_geom::Vec3::new(x, y, z));
+            s.set_camera(cam);
+        }
+    } else if let (Some(az), Some(el)) = (p.get("azimuth").and_then(Value::as_f64), p.get("elevation").and_then(Value::as_f64)) {
+        cam.azimuth = az.to_radians();
+        cam.elevation = el.to_radians().clamp(-cadcraft_geom::MAX_ORBIT_ELEVATION, cadcraft_geom::MAX_ORBIT_ELEVATION);
+        s.set_camera(cam);
+    }
+    s.echo("3D Orbit active. Press ESC or ENTER to exit.");
+    Ok(json!({ "status": "ok", "azimuth": cam.azimuth.to_degrees(), "elevation": cam.elevation.to_degrees() }))
+}
+
+#[derive(Default)]
+pub struct OrbitM;
+
+impl Interactive for OrbitM {
+    fn name(&self) -> &'static str {
+        "3DORBIT"
+    }
+
+    fn prompt(&self, _s: &Session) -> Prompt {
+        Prompt::new("Press ESC or ENTER to exit, or drag with mouse to orbit view:", Accept { enter: true, text: true, ..Accept::default() })
+    }
+
+    fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
+        match i {
+            Input::Enter | Input::Cancel => Ok(Step::Done),
+            Input::Text(t) => {
+                let tl = t.trim().to_ascii_lowercase();
+                if tl == "top" || tl == "plan" {
+                    let _ = run_view_preset(s, "top")?;
+                    Ok(Step::Done)
+                } else if tl == "front"
+                    || tl == "back"
+                    || tl == "left"
+                    || tl == "right"
+                    || tl == "swiso"
+                    || tl == "seiso"
+                    || tl == "neiso"
+                    || tl == "nwiso"
+                    || tl == "bottom"
+                {
+                    let _ = run_view_preset(s, &tl)?;
+                    Ok(Step::Done)
+                } else {
+                    Ok(Step::Continue)
+                }
+            }
             _ => Ok(Step::Continue),
         }
     }

@@ -424,12 +424,8 @@ fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
                     if h.pattern == "_U" || h.pattern == "USER" {
                         if let Some(sp) = p.get("spacing").and_then(Value::as_f64).filter(|x| x.is_finite() && *x > 0.0) {
                             let double = bool_or(p, "double", h.pattern_lines.len() > 1);
-                            let mut lines = vec![cadcraft_doc::library::PatternLine {
-                                angle: 0.0,
-                                origin: (0.0, 0.0),
-                                delta: (0.0, sp),
-                                dashes: Vec::new(),
-                            }];
+                            let mut lines =
+                                vec![cadcraft_doc::library::PatternLine { angle: 0.0, origin: (0.0, 0.0), delta: (0.0, sp), dashes: Vec::new() }];
                             if double {
                                 lines.push(cadcraft_doc::library::PatternLine {
                                     angle: 90.0,
@@ -441,12 +437,8 @@ fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
                             h.pattern_lines = lines;
                         } else if let Some(dbl) = p.get("double").and_then(Value::as_bool) {
                             let sp = h.pattern_lines.first().map(|pl| pl.delta.1.abs()).filter(|x| *x > 0.0).unwrap_or(1.0);
-                            let mut lines = vec![cadcraft_doc::library::PatternLine {
-                                angle: 0.0,
-                                origin: (0.0, 0.0),
-                                delta: (0.0, sp),
-                                dashes: Vec::new(),
-                            }];
+                            let mut lines =
+                                vec![cadcraft_doc::library::PatternLine { angle: 0.0, origin: (0.0, 0.0), delta: (0.0, sp), dashes: Vec::new() }];
                             if dbl {
                                 lines.push(cadcraft_doc::library::PatternLine {
                                     angle: 90.0,

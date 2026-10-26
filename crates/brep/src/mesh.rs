@@ -64,10 +64,7 @@ impl TriangleMesh {
                 let p0 = *self.positions.get(tri[0])?;
                 let p1 = *self.positions.get(tri[1])?;
                 let p2 = *self.positions.get(tri[2])?;
-                Some(cadcraft_doc::Face3d {
-                    corners: [p0, p1, p2, p2],
-                    hidden_edges: 0,
-                })
+                Some(cadcraft_doc::Face3d { corners: [p0, p1, p2, p2], hidden_edges: 0 })
             })
             .collect()
     }
@@ -92,9 +89,7 @@ impl TriangleMesh {
             };
 
             // 1/6 * det([p0, p1, p2])
-            let det = p0.x * (p1.y * p2.z - p1.z * p2.y)
-                    - p0.y * (p1.x * p2.z - p1.z * p2.x)
-                    + p0.z * (p1.x * p2.y - p1.y * p2.x);
+            let det = p0.x * (p1.y * p2.z - p1.z * p2.y) - p0.y * (p1.x * p2.z - p1.z * p2.x) + p0.z * (p1.x * p2.y - p1.y * p2.x);
             total += det / 6.0;
         }
         total
@@ -102,19 +97,9 @@ impl TriangleMesh {
 
     /// Analyze topology and manifoldness by quantizing and unifying vertices within `merge_tol`.
     pub fn analyze_topology(&self, merge_tol: f64) -> TopologyReport {
-        let tol = if merge_tol.is_finite() && merge_tol > 1e-12 {
-            merge_tol
-        } else {
-            1e-4
-        };
+        let tol = if merge_tol.is_finite() && merge_tol > 1e-12 { merge_tol } else { 1e-4 };
 
-        let quant = |p: Vec3| -> (i64, i64, i64) {
-            (
-                (p.x / tol).round() as i64,
-                (p.y / tol).round() as i64,
-                (p.z / tol).round() as i64,
-            )
-        };
+        let quant = |p: Vec3| -> (i64, i64, i64) { ((p.x / tol).round() as i64, (p.y / tol).round() as i64, (p.z / tol).round() as i64) };
 
         let mut vertex_lut: HashMap<(i64, i64, i64), usize> = HashMap::new();
         let mut unified_indices: Vec<[usize; 3]> = Vec::with_capacity(self.triangles.len());
@@ -181,10 +166,8 @@ impl TriangleMesh {
         header[..title.len()].copy_from_slice(title);
         w.write_all(&header).map_err(|e| BrepError::IoError(e.to_string()))?;
 
-        let tri_count = u32::try_from(self.triangles.len())
-            .map_err(|_| BrepError::InvalidGeometry("triangle count exceeds u32 limit".into()))?;
-        w.write_all(&tri_count.to_le_bytes())
-            .map_err(|e| BrepError::IoError(e.to_string()))?;
+        let tri_count = u32::try_from(self.triangles.len()).map_err(|_| BrepError::InvalidGeometry("triangle count exceeds u32 limit".into()))?;
+        w.write_all(&tri_count.to_le_bytes()).map_err(|e| BrepError::IoError(e.to_string()))?;
 
         for (idx, tri) in self.triangles.iter().enumerate() {
             let normal = self.normals.get(idx).copied().unwrap_or(Vec3::ZERO);

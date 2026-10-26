@@ -9,10 +9,10 @@
 //! 6. Verify that the solid entity, its dimensions, and recipe are preserved.
 //! 7. Export it to STL (`export.stl`) and verify the STL file exists and contains a valid mesh.
 
-use std::fs;
 use cadcraft_engine::Session;
 use cadcraft_engine::cmd::file::{IoHooks, set_io};
 use serde_json::json;
+use std::fs;
 
 #[test]
 fn test_solid3d_jarvis_e2e_lifecycle() {
@@ -31,13 +31,15 @@ fn test_solid3d_jarvis_e2e_lifecycle() {
     let mut session = Session::new();
 
     // 1. Create box of dimensions 100 x 50 x 25 at origin (10, 20, 30)
-    let box_res = session.execute(
-        "solid.box",
-        &json!({
-            "origin": [10.0, 20.0, 30.0],
-            "size": [100.0, 50.0, 25.0]
-        }),
-    ).expect("execute solid.box");
+    let box_res = session
+        .execute(
+            "solid.box",
+            &json!({
+                "origin": [10.0, 20.0, 30.0],
+                "size": [100.0, 50.0, 25.0]
+            }),
+        )
+        .expect("execute solid.box");
 
     assert_eq!(box_res["status"], "ok");
     let handle = box_res["handle"].as_str().expect("handle string").to_string();
@@ -45,10 +47,7 @@ fn test_solid3d_jarvis_e2e_lifecycle() {
     assert_eq!(box_res["bbox"]["max"], json!([110.0, 70.0, 55.0]));
 
     // 2. Query handle and bounding box
-    let q1 = session.execute(
-        "query.solid",
-        &json!({ "handle": handle.clone() }),
-    ).expect("execute query.solid");
+    let q1 = session.execute("query.solid", &json!({ "handle": handle.clone() })).expect("execute query.solid");
 
     assert_eq!(q1["status"], "ok");
     assert_eq!(q1["handle"], handle);
@@ -59,56 +58,43 @@ fn test_solid3d_jarvis_e2e_lifecycle() {
     assert_eq!(q1["features_count"], 1);
 
     // Also query metrics
-    let m1 = session.execute(
-        "query.metrics",
-        &json!({ "handle": handle.clone() }),
-    ).expect("execute query.metrics");
+    let m1 = session.execute("query.metrics", &json!({ "handle": handle.clone() })).expect("execute query.metrics");
     assert_eq!(m1["status"], "ok");
     let volume = m1["volume"].as_f64().expect("volume f64");
     assert!((volume - 125000.0).abs() < 1e-2, "volume expected 125000, got {volume}");
     assert_eq!(m1["boundaries"], 1);
 
     // 3. Translate solid by (15, -10, 20)
-    let trans_res = session.execute(
-        "solid.translate",
-        &json!({
-            "handle": handle.clone(),
-            "delta": [15.0, -10.0, 20.0]
-        }),
-    ).expect("execute solid.translate");
+    let trans_res = session
+        .execute(
+            "solid.translate",
+            &json!({
+                "handle": handle.clone(),
+                "delta": [15.0, -10.0, 20.0]
+            }),
+        )
+        .expect("execute solid.translate");
     assert_eq!(trans_res["status"], "ok");
     assert_eq!(trans_res["bbox"]["min"], json!([25.0, 10.0, 50.0]));
     assert_eq!(trans_res["bbox"]["max"], json!([125.0, 60.0, 75.0]));
 
     // 4. Query position again
-    let q2 = session.execute(
-        "query.solid",
-        &json!({ "handle": handle.clone() }),
-    ).expect("execute query.solid after translate");
+    let q2 = session.execute("query.solid", &json!({ "handle": handle.clone() })).expect("execute query.solid after translate");
     assert_eq!(q2["bbox"]["min"], json!([25.0, 10.0, 50.0]));
     assert_eq!(q2["bbox"]["max"], json!([125.0, 60.0, 75.0]));
     assert_eq!(q2["features_count"], 2);
 
     // 5. Save the drawing to DXF, close it, and reopen it
-    session.execute(
-        "saveas",
-        &json!({ "path": dxf_path.to_string_lossy() }),
-    ).expect("execute saveas");
+    session.execute("saveas", &json!({ "path": dxf_path.to_string_lossy() })).expect("execute saveas");
     assert!(dxf_path.exists(), "dxf file must exist on disk");
 
     session.execute("close", &json!({})).expect("execute close");
 
-    let open_res = session.execute(
-        "open",
-        &json!({ "path": dxf_path.to_string_lossy() }),
-    ).expect("execute open");
+    let open_res = session.execute("open", &json!({ "path": dxf_path.to_string_lossy() })).expect("execute open");
     assert_eq!(open_res["entities"].as_u64().unwrap_or(0), 1);
 
     // 6. Verify entity and dimensions are preserved
-    let q3 = session.execute(
-        "query.solid",
-        &json!({ "handle": handle.clone() }),
-    ).expect("execute query.solid after reopen");
+    let q3 = session.execute("query.solid", &json!({ "handle": handle.clone() })).expect("execute query.solid after reopen");
     assert_eq!(q3["status"], "ok");
     assert_eq!(q3["handle"], handle);
     assert_eq!(q3["type"], "Solid3d");
@@ -116,23 +102,22 @@ fn test_solid3d_jarvis_e2e_lifecycle() {
     assert_eq!(q3["bbox"]["max"], json!([125.0, 60.0, 75.0]));
     assert_eq!(q3["features_count"], 2);
 
-    let m2 = session.execute(
-        "query.metrics",
-        &json!({ "handle": handle.clone() }),
-    ).expect("execute query.metrics after reopen");
+    let m2 = session.execute("query.metrics", &json!({ "handle": handle.clone() })).expect("execute query.metrics after reopen");
     let reopened_volume = m2["volume"].as_f64().expect("volume f64");
     assert!((reopened_volume - 125000.0).abs() < 1e-2);
     assert_eq!(m2["boundaries"], 1);
 
     // 7. Export to STL and verify file exists and contains valid binary mesh
-    let stl_res = session.execute(
-        "export.stl",
-        &json!({
-            "handles": [handle],
-            "path": stl_path.to_string_lossy(),
-            "tolerance": 0.05
-        }),
-    ).expect("execute export.stl");
+    let stl_res = session
+        .execute(
+            "export.stl",
+            &json!({
+                "handles": [handle],
+                "path": stl_path.to_string_lossy(),
+                "tolerance": 0.05
+            }),
+        )
+        .expect("execute export.stl");
     assert_eq!(stl_res["status"], "ok");
     assert_eq!(stl_res["solids_count"], 1);
     let triangles_count = stl_res["triangles_count"].as_u64().expect("triangles_count");
@@ -153,15 +138,17 @@ fn test_solid3d_cylinder_and_validation() {
     let mut session = Session::new();
 
     // 1. Valid cylinder: radius 10, height 50
-    let cyl_res = session.execute(
-        "solid.cylinder",
-        &json!({
-            "center": [0.0, 0.0, 0.0],
-            "radius": 10.0,
-            "height": 50.0,
-            "axis": [0.0, 0.0, 1.0]
-        }),
-    ).expect("execute solid.cylinder");
+    let cyl_res = session
+        .execute(
+            "solid.cylinder",
+            &json!({
+                "center": [0.0, 0.0, 0.0],
+                "radius": 10.0,
+                "height": 50.0,
+                "axis": [0.0, 0.0, 1.0]
+            }),
+        )
+        .expect("execute solid.cylinder");
     assert_eq!(cyl_res["status"], "ok");
     let handle = cyl_res["handle"].as_str().expect("handle").to_string();
 
@@ -189,10 +176,7 @@ fn test_solid3d_cylinder_and_validation() {
     );
     assert!(bad_cyl.is_err(), "negative cylinder radius must be rejected");
 
-    let missing_handle = session.execute(
-        "query.solid",
-        &json!({ "handle": "DEADBEEF" }),
-    );
+    let missing_handle = session.execute("query.solid", &json!({ "handle": "DEADBEEF" }));
     assert!(missing_handle.is_err(), "non-existent handle must return structured error");
 }
 
@@ -201,23 +185,27 @@ fn test_solid3d_undo_redo() {
     let mut session = Session::new();
 
     // Create box
-    let box_res = session.execute(
-        "solid.box",
-        &json!({
-            "origin": [0.0, 0.0, 0.0],
-            "size": [10.0, 10.0, 10.0]
-        }),
-    ).expect("execute solid.box");
+    let box_res = session
+        .execute(
+            "solid.box",
+            &json!({
+                "origin": [0.0, 0.0, 0.0],
+                "size": [10.0, 10.0, 10.0]
+            }),
+        )
+        .expect("execute solid.box");
     let handle = box_res["handle"].as_str().expect("handle").to_string();
 
     // Translate box
-    session.execute(
-        "solid.translate",
-        &json!({
-            "handle": handle.clone(),
-            "delta": [50.0, 0.0, 0.0]
-        }),
-    ).expect("execute solid.translate");
+    session
+        .execute(
+            "solid.translate",
+            &json!({
+                "handle": handle.clone(),
+                "delta": [50.0, 0.0, 0.0]
+            }),
+        )
+        .expect("execute solid.translate");
 
     let q_after = session.execute("query.solid", &json!({ "handle": handle.clone() })).expect("query.solid");
     assert_eq!(q_after["bbox"]["min"], json!([50.0, 0.0, 0.0]));
@@ -272,13 +260,15 @@ fn test_solid_extrude_e2e() {
     let poly_handle = session.add_entity(EntityKind::LwPolyline(poly)).expect("add polyline");
 
     // 2. Extrude by height 25
-    let ext_res = session.execute(
-        "solid.extrude",
-        &json!({
-            "profile": poly_handle.hex(),
-            "height": 25.0
-        }),
-    ).expect("execute solid.extrude");
+    let ext_res = session
+        .execute(
+            "solid.extrude",
+            &json!({
+                "profile": poly_handle.hex(),
+                "height": 25.0
+            }),
+        )
+        .expect("execute solid.extrude");
 
     assert_eq!(ext_res["status"], "ok");
     let solid_handle = ext_res["handle"].as_str().expect("solid handle").to_string();
@@ -286,19 +276,13 @@ fn test_solid_extrude_e2e() {
     assert_eq!(ext_res["bbox"]["max"], json!([30.0, 20.0, 25.0]));
 
     // 3. Check query.metrics: expected volume = 30 * 20 * 25 = 15,000
-    let m = session.execute(
-        "query.metrics",
-        &json!({ "handle": solid_handle.clone() }),
-    ).expect("execute query.metrics");
+    let m = session.execute("query.metrics", &json!({ "handle": solid_handle.clone() })).expect("execute query.metrics");
     assert_eq!(m["status"], "ok");
     let volume = m["volume"].as_f64().expect("volume f64");
     assert!((volume - 15000.0).abs() < 1e-1, "volume expected 15000, got {volume}");
 
     // 4. Verify recipe contains FeatureOp::Extrusion
-    let q = session.execute(
-        "query.solid",
-        &json!({ "handle": solid_handle.clone() }),
-    ).expect("execute query.solid");
+    let q = session.execute("query.solid", &json!({ "handle": solid_handle.clone() })).expect("execute query.solid");
     assert_eq!(q["features_count"], 1);
 
     let doc = session.doc().expect("session doc");
@@ -307,17 +291,11 @@ fn test_solid_extrude_e2e() {
     assert!(matches!(s.recipe.features[0].op, FeatureOp::Extrusion { .. }));
 
     // 5. Save and reopen DXF, preserving the entity
-    session.execute(
-        "saveas",
-        &json!({ "path": dxf_path.to_string_lossy() }),
-    ).expect("execute saveas");
+    session.execute("saveas", &json!({ "path": dxf_path.to_string_lossy() })).expect("execute saveas");
     assert!(dxf_path.exists());
 
     session.execute("close", &json!({})).expect("execute close");
-    session.execute(
-        "open",
-        &json!({ "path": dxf_path.to_string_lossy() }),
-    ).expect("execute open");
+    session.execute("open", &json!({ "path": dxf_path.to_string_lossy() })).expect("execute open");
 
     let reopened_q = session.execute("query.solid", &json!({ "handle": solid_handle.clone() })).expect("query after reopen");
     assert_eq!(reopened_q["status"], "ok");
@@ -325,23 +303,21 @@ fn test_solid_extrude_e2e() {
     assert_eq!(reopened_q["bbox"]["max"], json!([30.0, 20.0, 25.0]));
 
     // 6. Test export.stl compatibility
-    let stl_res = session.execute(
-        "export.stl",
-        &json!({
-            "handles": [solid_handle.clone()],
-            "path": stl_path.to_string_lossy()
-        }),
-    ).expect("execute export.stl");
+    let stl_res = session
+        .execute(
+            "export.stl",
+            &json!({
+                "handles": [solid_handle.clone()],
+                "path": stl_path.to_string_lossy()
+            }),
+        )
+        .expect("execute export.stl");
     assert_eq!(stl_res["status"], "ok");
     assert!(stl_path.exists());
 
     // 7. Verify rejection of an open polyline
     let open_poly = LwPolyline {
-        vertices: vec![
-            PolyVertex::new(Vec2::new(0.0, 0.0)),
-            PolyVertex::new(Vec2::new(10.0, 0.0)),
-            PolyVertex::new(Vec2::new(10.0, 10.0)),
-        ],
+        vertices: vec![PolyVertex::new(Vec2::new(0.0, 0.0)), PolyVertex::new(Vec2::new(10.0, 0.0)), PolyVertex::new(Vec2::new(10.0, 10.0))],
         closed: false,
         const_width: 0.0,
         elevation: 0.0,
@@ -358,4 +334,141 @@ fn test_solid_extrude_e2e() {
     assert!(err_res.is_err(), "open polyline must be rejected");
     let err_msg = err_res.unwrap_err().to_string();
     assert!(err_msg.contains("closed"), "error must mention closed: {err_msg}");
+}
+
+#[test]
+fn test_solid_extrude_validation_negative_height_and_direction() {
+    use cadcraft_doc::{EntityKind, LwPolyline};
+    use cadcraft_geom::{PolyVertex, Vec2};
+
+    set_io(IoHooks {
+        read: |bytes, name| cadcraft_io::read(bytes, name).map_err(|e| e.to_string()),
+        write: |doc, name| cadcraft_io::write(doc, name).map_err(|e| e.to_string()),
+        plot: None,
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!("cadcraft-extrude-val-{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).expect("create temp dir");
+    let dxf_path = temp_dir.join("extrude_neg.dxf");
+    let stl_path = temp_dir.join("extrude_neg.stl");
+
+    let mut session = Session::new();
+
+    // 1. Create a valid rectangular polyline at elevation 10.0
+    let valid_poly = LwPolyline {
+        vertices: vec![
+            PolyVertex::new(Vec2::new(0.0, 0.0)),
+            PolyVertex::new(Vec2::new(30.0, 0.0)),
+            PolyVertex::new(Vec2::new(30.0, 20.0)),
+            PolyVertex::new(Vec2::new(0.0, 20.0)),
+        ],
+        closed: true,
+        const_width: 0.0,
+        elevation: 10.0,
+        plinegen: false,
+    };
+    let valid_handle = session.add_entity(EntityKind::LwPolyline(valid_poly)).expect("add valid poly");
+
+    // 2. Reject self-intersecting bowtie polyline
+    let bowtie_poly = LwPolyline {
+        vertices: vec![
+            PolyVertex::new(Vec2::new(0.0, 0.0)),
+            PolyVertex::new(Vec2::new(30.0, 20.0)),
+            PolyVertex::new(Vec2::new(0.0, 20.0)),
+            PolyVertex::new(Vec2::new(20.0, 0.0)),
+        ],
+        closed: true,
+        const_width: 0.0,
+        elevation: 0.0,
+        plinegen: false,
+    };
+    let bowtie_handle = session.add_entity(EntityKind::LwPolyline(bowtie_poly)).expect("add bowtie poly");
+    let bowtie_err = session
+        .execute(
+            "solid.extrude",
+            &json!({
+                "profile": bowtie_handle.hex(),
+                "height": 20.0
+            }),
+        )
+        .unwrap_err();
+    let err_str = bowtie_err.to_string();
+    assert!(err_str.contains("self-intersecting"), "must reject bowtie: {err_str}");
+
+    // 3. Reject coplanar direction vector
+    let coplanar_err = session
+        .execute(
+            "solid.extrude",
+            &json!({
+                "profile": valid_handle.hex(),
+                "direction": [10.0, 0.0, 0.0]
+            }),
+        )
+        .unwrap_err();
+    assert!(coplanar_err.to_string().contains("coplanar"), "must reject coplanar direction: {coplanar_err}");
+
+    // 4. Extrude with negative height (-25.0) from elevation 10.0
+    // Expected Z bounds: min = 10.0 + (-25.0) = -15.0, max = 10.0
+    let neg_res = session
+        .execute(
+            "solid.extrude",
+            &json!({
+                "profile": valid_handle.hex(),
+                "height": -25.0
+            }),
+        )
+        .expect("execute negative solid.extrude");
+    assert_eq!(neg_res["status"], "ok");
+    let neg_handle = neg_res["handle"].as_str().expect("handle").to_string();
+    assert_eq!(neg_res["bbox"]["min"], json!([0.0, 0.0, -15.0]));
+    assert_eq!(neg_res["bbox"]["max"], json!([30.0, 20.0, 10.0]));
+
+    // Query metrics: volume must be strictly positive 30 * 20 * 25 = 15,000
+    let m = session.execute("query.metrics", &json!({ "handle": neg_handle.clone() })).expect("execute query.metrics");
+    let volume = m["volume"].as_f64().expect("volume f64");
+    assert!((volume - 15000.0).abs() < 1e-1, "volume must be 15,000, got {volume}");
+
+    // 5. Test vector direction parameter: direction [0.0, 0.0, 15.0]
+    let dir_res = session
+        .execute(
+            "solid.extrude",
+            &json!({
+                "profile": valid_handle.hex(),
+                "direction": [0.0, 0.0, 15.0]
+            }),
+        )
+        .expect("execute direction solid.extrude");
+    assert_eq!(dir_res["status"], "ok");
+    assert_eq!(dir_res["bbox"]["min"], json!([0.0, 0.0, 10.0]));
+    assert_eq!(dir_res["bbox"]["max"], json!([30.0, 20.0, 25.0]));
+
+    // 6. Test DXF save and reopen for negative extrusion solid
+    session.execute("saveas", &json!({ "path": dxf_path.to_string_lossy() })).expect("saveas");
+    assert!(dxf_path.exists());
+    session.execute("close", &json!({})).expect("close");
+    session.execute("open", &json!({ "path": dxf_path.to_string_lossy() })).expect("open");
+
+    let reopened_q = session.execute("query.solid", &json!({ "handle": neg_handle.clone() })).expect("query after reopen");
+    assert_eq!(reopened_q["status"], "ok");
+    assert_eq!(reopened_q["bbox"]["min"], json!([0.0, 0.0, -15.0]));
+    assert_eq!(reopened_q["bbox"]["max"], json!([30.0, 20.0, 10.0]));
+
+    // 7. Test STL export and verify exported mesh is closed and manifold
+    let stl_res = session
+        .execute(
+            "export.stl",
+            &json!({
+                "handles": [neg_handle],
+                "path": stl_path.to_string_lossy()
+            }),
+        )
+        .expect("export.stl");
+    assert_eq!(stl_res["status"], "ok");
+    assert!(stl_path.exists());
+
+    // Read back exported STL and verify manifoldness
+    let stl_bytes = fs::read(&stl_path).expect("read stl bytes");
+    assert!(stl_bytes.len() >= 84, "valid stl has at least 84 bytes");
+    let tri_count = u32::from_le_bytes(stl_bytes[80..84].try_into().expect("u32 tri count"));
+    assert_eq!(tri_count as usize, stl_res["triangles_count"].as_u64().unwrap() as usize);
 }

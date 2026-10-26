@@ -108,7 +108,7 @@
 	Bulleted list	Lista con viñetas
 	ByBlock	PorBloque
 	ByColor	PorColor
-	ByLayer	PorCapa
+	ByLayer	Por capa
 	CADCraft	CADCraft
 	CADCraft Help	Ayuda de CADCraft
 	CADCraft keeps these preferences, object snap modes and drafting toggles for your user account and restores them when it starts.	CADCraft guarda estas preferencias, los modos de referencia a objetos y los ajustes de dibujo para tu cuenta de usuario y los restaura al iniciarse.
@@ -188,6 +188,12 @@
 	Count Table	Tabla de recuento
 	Create	Crear
 	Create Block	Crear bloque
+	Creates a circle tangent to three objects (CIRCLE)	Crea un círculo tangente a tres objetos (CÍRCULO)
+	Creates a circle tangent to two objects with a specified radius (CIRCLE)	Crea un círculo tangente a dos objetos con el radio indicado (CÍRCULO)
+	Creates a circle using a center point and a diameter (CIRCLE)	Crea un círculo mediante un centro y un diámetro (CÍRCULO)
+	Creates a circle using a center point and a radius (CIRCLE)	Crea un círculo mediante un centro y un radio (CÍRCULO)
+	Creates a circle using three points on the circumference (CIRCLE)	Crea un círculo mediante tres puntos de la circunferencia (CÍRCULO)
+	Creates a circle using two endpoints of the diameter (CIRCLE)	Crea un círculo mediante los dos extremos del diámetro (CÍRCULO)
 	Creates a user parameter	Crea un parámetro de usuario
 	Crosshair size	Tamaño del cursor en cruz
 	Ctrl+Enter to finish	Ctrl+Intro para terminar
@@ -200,6 +206,7 @@
 	Cut	Cortar
 	Cyan	Cian
 	Cylinder	Cilindro
+	Customize Quick Access Toolbar	Personalizar barra de acceso rápido
 	DWG	DWG
 	DWG Reference...	Referencia DWG...
 	DXF	DXF
@@ -415,6 +422,7 @@
 	Hide All Constraint Bars	Ocultar todas las barras de restricciones
 	Hide All Dynamic Dimensions	Ocultar todas las cotas dinámicas
 	Hide Layer List	Ocultar lista de capas
+	Hide Menu Bar	Ocultar barra de menús
 	Hide Objects	Ocultar objetos
 	Hide Palette	Ocultar paleta
 	Hide Palettes	Ocultar paletas
@@ -541,7 +549,7 @@
 	Make it a block of this drawing; its layers become NAME$0$LAYER	Convertirla en un bloque de este dibujo; sus capas pasan a ser NAME$0$LAYER
 	Make...	Crear...
 	Match Layer	Igualar capa
-	Match Prop	Igualar propiedades
+	Match Prop	Igualar
 	Match Properties	Igualar propiedades
 	Measure	Medir
 	Measure Distance	Medir distancia
@@ -946,6 +954,7 @@
 	Show All Constraint Bars	Mostrar todas las barras de restricciones
 	Show All Dynamic Dimensions	Mostrar todas las cotas dinámicas
 	Show Layer List	Mostrar lista de capas
+	Show Menu Bar	Mostrar barra de menús
 	Show/Hide Lineweight	Mostrar/ocultar grosor de línea
 	Show/Hide Transparency	Mostrar/ocultar transparencia
 	Single Line Text	Texto de una línea

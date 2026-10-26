@@ -7,11 +7,7 @@ use serde_json::json;
 
 fn first_hatch(s: &Session) -> Hatch {
     let d = s.doc().unwrap();
-    let hatches: Vec<Hatch> = d
-        .model
-        .iter()
-        .filter_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None })
-        .collect();
+    let hatches: Vec<Hatch> = d.model.iter().filter_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None }).collect();
     assert!(!hatches.is_empty(), "expected at least one hatch in document");
     hatches[0].clone()
 }
@@ -169,19 +165,12 @@ fn dxf_save_and_reopen_preserves_user_defined_hatch() {
     let dxf_text = cadcraft_io::write_dxf(doc);
 
     // Verify group 76 is 0 (User-defined in DXF standard)
-    assert!(
-        dxf_text.replace("\r\n", "\n").contains(" 76\n0\n"),
-        "DXF must specify group 76 = 0 for user-defined hatch: {}",
-        dxf_text
-    );
+    assert!(dxf_text.replace("\r\n", "\n").contains(" 76\n0\n"), "DXF must specify group 76 = 0 for user-defined hatch: {}", dxf_text);
 
     // Reopen from DXF
     let reloaded = cadcraft_io::read_dxf(dxf_text.as_bytes()).unwrap();
-    let reloaded_hatches: Vec<Hatch> = reloaded
-        .model
-        .iter()
-        .filter_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None })
-        .collect();
+    let reloaded_hatches: Vec<Hatch> =
+        reloaded.model.iter().filter_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None }).collect();
 
     assert_eq!(reloaded_hatches.len(), 1, "Hatch preserved across DXF roundtrip");
     let rh = &reloaded_hatches[0];
@@ -204,11 +193,7 @@ fn predefined_patterns_remain_intact_and_compatible() {
     s.execute("hatch.user", &json!({ "points": [[25, 5]], "spacing": 1.25, "angle": 0.0 })).unwrap();
 
     let doc = s.doc().unwrap();
-    let hatches: Vec<Hatch> = doc
-        .model
-        .iter()
-        .filter_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None })
-        .collect();
+    let hatches: Vec<Hatch> = doc.model.iter().filter_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None }).collect();
 
     assert_eq!(hatches.len(), 2);
     assert!(hatches.iter().any(|h| h.pattern == "ANSI31"));
@@ -217,11 +202,8 @@ fn predefined_patterns_remain_intact_and_compatible() {
     // DXF roundtrip preserves both
     let dxf_text = cadcraft_io::write_dxf(doc);
     let reloaded = cadcraft_io::read_dxf(dxf_text.as_bytes()).unwrap();
-    let reloaded_hatches: Vec<Hatch> = reloaded
-        .model
-        .iter()
-        .filter_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None })
-        .collect();
+    let reloaded_hatches: Vec<Hatch> =
+        reloaded.model.iter().filter_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None }).collect();
 
     assert_eq!(reloaded_hatches.len(), 2);
     assert!(reloaded_hatches.iter().any(|h| h.pattern == "ANSI31"));
@@ -443,11 +425,7 @@ ENDSEC
 EOF
 "#;
     let doc = cadcraft_io::read_dxf(dxf_content.as_bytes()).unwrap();
-    let hatches: Vec<Hatch> = doc
-        .model
-        .iter()
-        .filter_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None })
-        .collect();
+    let hatches: Vec<Hatch> = doc.model.iter().filter_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None }).collect();
 
     assert_eq!(hatches.len(), 1, "Must read hatch without group 78");
     let h = &hatches[0];

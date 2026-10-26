@@ -13,8 +13,7 @@ fn unknown(kind: &str) -> EntityKind {
 
 fn init_io() {
     cadcraft_engine::cmd::file::set_write_as(|d, name, opts| {
-        cadcraft_io::write_with(d, name, &cadcraft_io::SaveOptions { version: opts.version, binary: opts.binary })
-            .map_err(|e| e.to_string())
+        cadcraft_io::write_with(d, name, &cadcraft_io::SaveOptions { version: opts.version, binary: opts.binary }).map_err(|e| e.to_string())
     });
     set_io(IoHooks {
         read: |b, n| cadcraft_io::read(b, n).map_err(|e| e.to_string()),

@@ -91,7 +91,7 @@ impl Default for Workspace {
                         tabs(Panel::Canvas),
                         Node::Stack {
                             entries: vec![
-                                craft_ui::docking::StackEntry { panel: Panel::Layers, open: true, height: Some(280.0) },
+                                craft_ui::docking::StackEntry { panel: Panel::Layers, open: true, height: Some(135.0) },
                                 craft_ui::docking::StackEntry { panel: Panel::Properties, open: true, height: None },
                             ],
                         },

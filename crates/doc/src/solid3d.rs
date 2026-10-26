@@ -143,24 +143,13 @@ impl Default for Bounds3 {
 impl Bounds3 {
     /// An empty bounding box where `min > max`.
     pub const EMPTY: Bounds3 = Bounds3 {
-        min: Vec3 {
-            x: f64::INFINITY,
-            y: f64::INFINITY,
-            z: f64::INFINITY,
-        },
-        max: Vec3 {
-            x: f64::NEG_INFINITY,
-            y: f64::NEG_INFINITY,
-            z: f64::NEG_INFINITY,
-        },
+        min: Vec3 { x: f64::INFINITY, y: f64::INFINITY, z: f64::INFINITY },
+        max: Vec3 { x: f64::NEG_INFINITY, y: f64::NEG_INFINITY, z: f64::NEG_INFINITY },
     };
 
     /// Create from two opposite corners.
     pub fn new(a: Vec3, b: Vec3) -> Self {
-        Bounds3 {
-            min: Vec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)),
-            max: Vec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)),
-        }
+        Bounds3 { min: Vec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)), max: Vec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)) }
     }
 
     /// True if the bounding box has non-negative volume.
@@ -196,20 +185,12 @@ impl Bounds3 {
 
     /// Size extents (dx, dy, dz).
     pub fn size(&self) -> Vec3 {
-        if self.is_empty() {
-            Vec3::ZERO
-        } else {
-            self.max - self.min
-        }
+        if self.is_empty() { Vec3::ZERO } else { self.max - self.min }
     }
 
     /// Center of the bounding box.
     pub fn center(&self) -> Vec3 {
-        if self.is_empty() {
-            Vec3::ZERO
-        } else {
-            (self.min + self.max) * 0.5
-        }
+        if self.is_empty() { Vec3::ZERO } else { (self.min + self.max) * 0.5 }
     }
 }
 
@@ -244,35 +225,17 @@ pub struct Solid3d {
 impl Solid3d {
     /// Create a new 3D solid entity from a parametric recipe.
     pub fn new(recipe: Recipe) -> Self {
-        Solid3d {
-            schema_version: SOLID3D_SCHEMA_VERSION,
-            recipe,
-            bbox: Bounds3::EMPTY,
-            status: Solid3dStatus::Pending,
-            faces: Vec::new(),
-        }
+        Solid3d { schema_version: SOLID3D_SCHEMA_VERSION, recipe, bbox: Bounds3::EMPTY, status: Solid3dStatus::Pending, faces: Vec::new() }
     }
 
     /// Create with an evaluated bounding box.
     pub fn with_bbox(recipe: Recipe, bbox: Bounds3) -> Self {
-        Solid3d {
-            schema_version: SOLID3D_SCHEMA_VERSION,
-            recipe,
-            bbox,
-            status: Solid3dStatus::Evaluated,
-            faces: Vec::new(),
-        }
+        Solid3d { schema_version: SOLID3D_SCHEMA_VERSION, recipe, bbox, status: Solid3dStatus::Evaluated, faces: Vec::new() }
     }
 
     /// Create with an evaluated bounding box and pre-computed mesh faces.
     pub fn with_faces(recipe: Recipe, bbox: Bounds3, faces: Vec<crate::Face3d>) -> Self {
-        Solid3d {
-            schema_version: SOLID3D_SCHEMA_VERSION,
-            recipe,
-            bbox,
-            status: Solid3dStatus::Evaluated,
-            faces,
-        }
+        Solid3d { schema_version: SOLID3D_SCHEMA_VERSION, recipe, bbox, status: Solid3dStatus::Evaluated, faces }
     }
 
     /// Append a translation operation to the solid recipe and update the bounding box and faces.

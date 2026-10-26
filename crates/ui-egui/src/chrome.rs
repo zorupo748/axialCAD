@@ -19,12 +19,7 @@ pub const QUICK_ACCESS: &[(Icon, &str, &str, Option<&str>)] = &[
 ];
 
 /// Render the compact Quick Access Toolbar buttons. Returns the clicked command and the total width consumed.
-pub fn render_quick_access(
-    ui: &mut egui::Ui,
-    rect: Rect,
-    mut start_x: f32,
-    btn_size: f32,
-) -> (Option<&'static str>, f32) {
+pub fn render_quick_access(ui: &mut egui::Ui, rect: Rect, mut start_x: f32, btn_size: f32) -> (Option<&'static str>, f32) {
     let t = Tokens::get();
     let mac = ui.ctx().os().is_mac();
     let mut clicked = None;
@@ -86,62 +81,96 @@ pub fn title_left(left: f32, width: f32, text_w: f32) -> f32 {
 pub fn title_and_toolbar(app: &mut CadApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
     let mac_title = app.integrated_titlebar;
-    let standalone_bar = !mac_title && !app.ui.in_window_menu && app.ui.show_toolbar;
+    let h = if mac_title { MAC_TITLE_BAR } else { 28.0 };
 
-    if !mac_title && !standalone_bar {
-        // On Linux/Windows with in-window menu, QAT is integrated directly inside menus::menu_bar
-        // to recover the entire toolbar row.
-        return;
-    }
-
-    let h = if mac_title { MAC_TITLE_BAR } else { 24.0 };
-    egui::Panel::top("cc_title_toolbar").exact_size(h).frame(egui::Frame::NONE.fill(t.chrome)).show(ui, |ui| {
+    egui::Panel::top("cc_title_toolbar").exact_size(h).frame(egui::Frame::NONE.fill(t.chrome_dark)).show(ui, |ui| {
         let r = ui.max_rect();
-        let mut clicked = None;
+        let mut clicked: Option<String> = None;
 
-        if mac_title {
-            let mut qat_w = 0.0;
-            if app.ui.show_toolbar {
-                let (cmd, w) = render_quick_access(ui, r, r.left() + MAC_CONTENT_LEFT + 4.0, 20.0);
-                if let Some(c) = cmd {
-                    clicked = Some(c);
-                }
-                qat_w = w;
-            }
+        let start_x = if mac_title { r.left() + MAC_CONTENT_LEFT + 4.0 } else { r.left() + 8.0 };
 
-            let title = match app.session.state() {
-                Ok(st) if !app.ui.start_tab => format!("CADCraft      {}{}", st.title, if st.title.contains('.') { "" } else { ".dwg" }),
-                _ => format!("CADCraft      {}", crate::tl!("Start")),
-            };
-            let galley = ui.painter().layout_no_wrap(title, egui::FontId::proportional(13.0), t.text_dim);
-            let min_title_x = r.left() + MAC_CONTENT_LEFT + if app.ui.show_toolbar { qat_w + 12.0 } else { 0.0 };
-            let x = (r.left() + (r.width() - galley.size().x) / 2.0).max(min_title_x);
-            ui.painter().galley(pos2(x, r.top() + (MAC_TITLE_BAR - galley.size().y) / 2.0), galley, t.text_dim);
-
-            // Allow dragging the window by the title row outside the QAT controls.
-            let drag_left = min_title_x;
-            let tr = Rect::from_min_max(pos2(drag_left, r.top()), r.max);
-            let resp = ui.interact(tr, ui.id().with("titledrag"), Sense::CLICK | Sense::DRAG);
-            if resp.drag_started() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            }
-            if resp.double_clicked() {
-                let max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
-            }
-        } else {
-            // Standalone QAT bar (Linux when in_window_menu is disabled)
-            let (cmd, _) = render_quick_access(ui, r, r.left() + 8.0, 20.0);
+        // 1. Quick Access Toolbar buttons (New, Open, Save, Print, Undo, Redo)
+        let mut qat_w = 0.0;
+        if app.ui.show_toolbar {
+            let (cmd, w) = render_quick_access(ui, r, start_x, 20.0);
             if let Some(c) = cmd {
-                clicked = Some(c);
+                clicked = Some(c.to_string());
             }
+            qat_w = w;
+
+            // 2. Dropdown button (Customize Quick Access Toolbar / Classic menus)
+            let drop_x = start_x + qat_w;
+            let drop_r = Rect::from_min_size(pos2(drop_x, r.center().y - 10.0), vec2(14.0, 20.0));
+            let drop_resp = ui.interact(drop_r, ui.id().with("qat_more"), Sense::click());
+            if drop_resp.hovered() {
+                ui.painter().rect_filled(drop_r, 3.0, t.control_hover.gamma_multiply(0.6));
+            }
+            icons::paint(ui.painter(), Rect::from_center_size(drop_r.center(), vec2(7.0, 7.0)), Icon::ChevronDown, false);
+            let drop_tip = crate::tl!("Customize Quick Access Toolbar");
+            icons::describe_control(ui, &drop_resp, drop_tip, None, false);
+            let drop_resp = drop_resp.on_hover_text(drop_tip);
+
+            egui::Popup::from_toggle_button_response(&drop_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClick).show(|ui| {
+                let label = if app.ui.in_window_menu { crate::tl!("Hide Menu Bar") } else { crate::tl!("Show Menu Bar") };
+                if ui.button(label).clicked() {
+                    app.ui.in_window_menu = !app.ui.in_window_menu;
+                    ui.close();
+                }
+                ui.separator();
+                for (name, entries) in crate::menus::tree(app) {
+                    ui.menu_button(crate::i18n::menu(&name), |ui| {
+                        for e in &entries {
+                            crate::menus::entry_ui(ui, e, &mut clicked);
+                        }
+                    });
+                }
+            });
+            qat_w += 16.0;
+        }
+
+        // 3. Centered Title: CADCraft - [DocumentName][*]
+        let (title_text, dirty) = match app.session.state() {
+            Ok(st) if !app.ui.start_tab => {
+                let name = if st.title.contains('.') { st.title.clone() } else { format!("{}.dwg", st.title) };
+                (format!("CADCraft - {name}"), st.is_dirty())
+            }
+            _ => (format!("CADCraft - {}", crate::tl!("Start")), false),
+        };
+        let mark = if dirty { "*" } else { "" };
+        let full_title = format!("{title_text}{mark}");
+
+        let min_title_x = if app.ui.show_toolbar { start_x + qat_w + 12.0 } else { start_x };
+        let max_title_x = r.right() - 12.0;
+        let font_id = egui::FontId::proportional(12.5);
+        let galley = ui.painter().layout_no_wrap(full_title.clone(), font_id.clone(), t.text_dim);
+        let text_w = galley.size().x;
+
+        let x = (r.left() + (r.width() - text_w) / 2.0).max(min_title_x);
+        let available_w = (max_title_x - x).max(0.0);
+        let (galley, cut) = elided(ui.painter(), &full_title, font_id, t.text_dim, available_w);
+        let title_pos = pos2(x, r.top() + (h - galley.size().y) / 2.0);
+        ui.painter().galley(title_pos, galley, t.text_dim);
+        if cut {
+            let title_rect = Rect::from_min_size(title_pos, vec2(available_w, h));
+            ui.interact(title_rect, ui.id().with("title_hover"), Sense::hover()).on_hover_text(&full_title);
+        }
+
+        // Allow dragging the window outside QAT buttons
+        let drag_rect = Rect::from_min_max(pos2(min_title_x, r.top()), pos2(max_title_x, r.bottom()));
+        let resp = ui.interact(drag_rect, ui.id().with("titledrag"), Sense::CLICK | Sense::DRAG);
+        if resp.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if resp.double_clicked() {
+            let max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
         }
 
         if let Some(c) = clicked {
             if c == "new" {
                 app.ui.start_tab = false;
             }
-            app.start(c);
+            crate::menus::activate(app, &c);
         }
     });
 }

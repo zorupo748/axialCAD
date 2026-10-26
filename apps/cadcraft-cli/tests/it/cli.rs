@@ -60,17 +60,16 @@ fn cli_export_dwg_rejects_unexportable_entities_and_preserves_file() {
     let target_dwg = dir.join("output.dwg");
 
     // Create a DXF containing an unexportable entity
-    let dxf_content = "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1032\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\n3DSOLID\n5\n100\n8\n0\n0\nENDSEC\n0\nEOF\n";
+    let dxf_content =
+        "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1032\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\n3DSOLID\n5\n100\n8\n0\n0\nENDSEC\n0\nEOF\n";
     std::fs::write(&src_dxf, dxf_content).unwrap();
 
     // Pre-create the target DWG with existing data
     let original_bytes = b"precious pre-existing dwg bytes";
     std::fs::write(&target_dwg, original_bytes).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_cadcraft-cli"))
-        .args(&["convert", src_dxf.to_str().unwrap(), target_dwg.to_str().unwrap()])
-        .output()
-        .unwrap();
+    let output =
+        Command::new(env!("CARGO_BIN_EXE_cadcraft-cli")).args(["convert", src_dxf.to_str().unwrap(), target_dwg.to_str().unwrap()]).output().unwrap();
 
     assert!(!output.status.success(), "CLI convert must fail on unexportable data");
     let err = String::from_utf8_lossy(&output.stderr);
