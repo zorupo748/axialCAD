@@ -361,24 +361,31 @@ pub fn handle(app: &mut CadApp, ctx: &egui::Context, req: &ControlRequest) -> Ou
             let (Some(x), Some(y)) = (f("x"), f("y")) else { return err("missing x/y") };
             let world = s("space").unwrap_or("world") == "world";
             let action = s("action").unwrap_or("click");
-            let wp =
-                if world { Vec2::new(x, y) } else { app.canvas.xf.map(|xf| xf.to_world(egui::pos2(x as f32, y as f32))).unwrap_or(Vec2::new(x, y)) };
+            let plane = app.session.drawing_plane();
+            let wp3 = if world {
+                cadcraft_geom::Vec3::new(x, y, f("z").unwrap_or(0.0))
+            } else {
+                app.canvas.xf.map(|xf| xf.to_world3(egui::pos2(x as f32, y as f32), plane)).unwrap_or_else(|| cadcraft_geom::Vec3::new(x, y, 0.0))
+            };
+            let wp = wp3.xy();
             app.session.cursor = wp;
+            app.session.cursor3 = wp3;
             app.session.cursor_deferred = None;
             app.canvas.cursor = Some(wp);
+            app.canvas.cursor3 = Some(wp3);
             if action == "move" {
                 if let Some(sp) = app.canvas.xf.map(|xf| xf.to_screen(wp)) {
                     app.synthetic.push(egui::Event::PointerMoved(sp));
                 }
-                return ok(json!({"world": [wp.x, wp.y]}));
+                return ok(json!({"world": [wp3.x, wp3.y, wp3.z]}));
             }
             let r = match s("button").unwrap_or("left") {
                 "right" => app.session.input(Input::Enter),
-                _ if app.session.prompting() => app.session.input(Input::Point(wp)),
+                _ if app.session.prompting() => app.session.input(Input::Point3(wp3)),
                 _ => app.session.idle_click(wp, p.get("shift").and_then(Value::as_bool).unwrap_or(false)),
             };
             match r {
-                Ok(()) => ok(json!({"world": [wp.x, wp.y], "state": cmdline_state(app)})),
+                Ok(()) => ok(json!({"world": [wp3.x, wp3.y, wp3.z], "state": cmdline_state(app)})),
                 Err(e) => err(e),
             }
         }

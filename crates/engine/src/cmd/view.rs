@@ -661,6 +661,17 @@ impl Session {
         self.touch();
         Ok(())
     }
+    /// One step of 2D/3D pan drag of (dx, dy) pixels.
+    pub fn pan_step(&mut self, dx: f64, dy: f64, scale: f64) -> Result<()> {
+        if !scale.is_finite() || scale <= 1e-12 {
+            return Ok(());
+        }
+        let mut cam = self.camera();
+        cam.pan(dx, dy, scale);
+        self.set_camera(cam);
+        self.touch();
+        Ok(())
+    }
     /// The zoom of a mouse wheel scroll by `delta` points (up zooms in): ZOOMFACTOR scales it
     /// (60, the default, zooms about 18% per wheel step).
     pub fn wheel_zoom_factor(&self, delta: f64) -> f64 {

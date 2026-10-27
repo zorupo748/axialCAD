@@ -20,7 +20,7 @@ mod spline_fit;
 mod vec;
 
 pub use bounds::Bounds2;
-pub use camera::{MAX_ORBIT_ELEVATION, OrbitCamera};
+pub use camera::{DrawingPlane, MAX_ORBIT_ELEVATION, OrbitCamera};
 pub use curve::{
     Arc, Circle, Ellipse, Line, PolyVertex, Polyline, Segment, arc_to_bulge, bulge_to_arc, point_in_polygon, polygon_centroid, shoelace,
     validate_simple_polygon,

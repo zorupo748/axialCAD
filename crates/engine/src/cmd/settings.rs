@@ -23,6 +23,12 @@ pub fn specs() -> Vec<CommandSpec> {
             .enabled(always)
             .noundo()
             .transparent(),
+        CommandSpec::new("zlock", "Z-Axis Vertical Lock", |s, p| toggle(s, p, |st| &mut st.zlock, "Z-Axis Lock"))
+            .alias(&["zaxis", "vertlock"])
+            .params("{on?: bool}")
+            .enabled(always)
+            .noundo()
+            .transparent(),
         CommandSpec::new("grid", "Grid Display", |s, p| toggle(s, p, |st| &mut st.gridmode, "Grid"))
             .key("F7")
             .params("{on?: bool}")

@@ -148,6 +148,7 @@ pub struct DocState {
     /// drawing itself waits in it ([`DocState::drawing`]).
     pub block_edit: Option<blockedit::BlockEdit>,
     pub camera: cadcraft_geom::OrbitCamera,
+    pub drawing_plane: cadcraft_geom::DrawingPlane,
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -175,6 +176,7 @@ impl DocState {
             binary_dxf: false,
             block_edit: None,
             camera: cadcraft_geom::OrbitCamera::default(),
+            drawing_plane: cadcraft_geom::DrawingPlane::XY,
         }
     }
     /// The drawing has changes not saved to its file, or the Block Editor has changes not yet
@@ -277,7 +279,9 @@ impl DocState {
         true
     }
     fn put_paper_view(&mut self, v: View) {
-        self.camera.target = cadcraft_geom::Vec3::new(v.center.x, v.center.y, self.camera.target.z);
+        if self.camera.is_plan() {
+            self.camera.target = cadcraft_geom::Vec3::new(v.center.x, v.center.y, self.camera.target.z);
+        }
         self.camera.height = v.height;
         match self.views.iter_mut().find(|(s, _)| *s == self.space) {
             Some((_, slot)) => *slot = v,
@@ -468,6 +472,9 @@ pub struct Settings {
     pub polardist: f64,
     /// AUDITCTL: 1 creates an audit report (.adt) file when AUDIT is run (default: 0).
     pub auditctl: bool,
+    pub drawing_plane: cadcraft_geom::DrawingPlane,
+    /// Explicit Z-Axis vertical constraint (locks next point to vertical axis through base point).
+    pub zlock: bool,
 }
 
 impl Default for Settings {
@@ -475,6 +482,7 @@ impl Default for Settings {
         Settings {
             osmode: 4133,
             orthomode: false,
+            zlock: false,
             polarmode: true,
             polarang: std::f64::consts::FRAC_PI_2,
             gridmode: true,
@@ -532,6 +540,7 @@ impl Default for Settings {
             polarsnap: false,
             polardist: 0.0,
             auditctl: false,
+            drawing_plane: cadcraft_geom::DrawingPlane::XY,
         }
     }
 }
@@ -675,6 +684,7 @@ pub struct Session {
     pub point_mods: Vec<pointmod::Frame>,
     /// Cursor position in world coordinates (from the UI; used for direct distance entry).
     pub cursor: Vec2,
+    pub cursor3: Vec3,
     /// The deferred tangent/perpendicular snap under the cursor, if any (from the UI; lets the
     /// rubber band show the line it resolves to).
     pub cursor_deferred: Option<snap::Deferred>,
@@ -746,6 +756,7 @@ impl Session {
             last_polar: None,
             point_mods: Vec::new(),
             cursor: Vec2::ZERO,
+            cursor3: Vec3::ZERO,
             cursor_deferred: None,
             ctrl_down: false,
             picked_viewport: None,
@@ -829,6 +840,21 @@ impl Session {
             let center = cadcraft_geom::Vec2::new(camera.target.x, camera.target.y);
             st.set_view_quiet(View { center, height: camera.height });
         }
+    }
+    pub fn drawing_plane(&self) -> cadcraft_geom::DrawingPlane {
+        self.state().map(|st| st.drawing_plane).unwrap_or(self.settings.drawing_plane)
+    }
+    pub fn set_drawing_plane(&mut self, plane: cadcraft_geom::DrawingPlane) {
+        if let Ok(st) = self.state_mut() {
+            st.drawing_plane = plane;
+        }
+        self.settings.drawing_plane = plane;
+    }
+    pub fn zlock(&self) -> bool {
+        self.settings.zlock
+    }
+    pub fn set_zlock(&mut self, on: bool) {
+        self.settings.zlock = on;
     }
     pub fn doc(&self) -> Result<&Drawing> {
         Ok(&self.state()?.doc)
@@ -918,7 +944,9 @@ impl Session {
 
     /// Run a command with JSON parameters (no dialogs). Records undo when the drawing changes.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
-        let spec = find_command(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+        let id_lower = id.to_ascii_lowercase();
+        let real_id = if find_command(&id_lower).is_some() { id_lower } else { cmd::resolve_alias(&id_lower) };
+        let spec = find_command(&real_id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
         (spec.enabled)(self).map_err(|m| EngineError::Disabled(spec.id.into(), m))?;
         if let Some(why) = cmd::blocks::bedit::refused_in_editor(self, spec.id) {
             return Err(EngineError::Disabled(spec.id.into(), why));
@@ -1652,13 +1680,9 @@ impl Session {
             return self.input(Input::Keyword(k));
         }
         if prompt.accept.point {
-            if let Some((p3, has_z)) = prompt::parse_point3_opt(tt, self.last_point3, &self.angle_settings()) {
+            if let Some((p3, _has_z)) = prompt::parse_point3_opt(tt, self.last_point3, &self.angle_settings()) {
                 self.last_polar = prompt::parse_polar_text(tt, &self.angle_settings());
-                if has_z || p3.z != 0.0 {
-                    return self.input(Input::Point3(p3));
-                } else {
-                    return self.input(Input::Point(p3.xy()));
-                }
+                return self.input(Input::Point3(p3));
             }
             // Direct distance entry along the tracking path the cursor is on, from the point it
             // comes from (an acquired or temporary tracking point needs no base point).
@@ -1671,6 +1695,20 @@ impl Session {
             if let (Some(base), Some(dist)) = (prompt.base, units::parse_distance(tt))
                 && !prompt.accept.number
             {
+                if self.settings.zlock {
+                    let sign = if self.cursor3.z >= self.last_point3.z { 1.0 } else { -1.0 };
+                    let p3 = cadcraft_geom::Vec3::new(self.last_point3.x, self.last_point3.y, self.last_point3.z + sign * dist);
+                    return self.input(Input::Point3(p3));
+                }
+                if self.settings.orthomode && !self.camera().is_plan() {
+                    let (pt, delta) = self.camera().closest_axis_3d(self.camera().project_point(self.cursor3), self.last_point3);
+                    let diff = pt - self.last_point3;
+                    if diff.len() > 1e-6 {
+                        let sign = if delta >= 0.0 { 1.0 } else { -1.0 };
+                        let p3 = self.last_point3 + diff.normalized() * (dist * sign);
+                        return self.input(Input::Point3(p3));
+                    }
+                }
                 let mut c = self.cursor;
                 if self.settings.orthomode && !prompt.corner {
                     c = snap::iso::constrain(&self.drafting_settings(), base, c);

@@ -438,8 +438,8 @@ impl Interactive for LineM {
         match self.pts.len() {
             0 if self.first.is_some() => Prompt::new("Specify next point", Accept::POINT).kw(&["Undo"]).deferred(),
             0 => Prompt::new("Specify first point", Accept::POINT).deferred(),
-            1 | 2 => Prompt::new("Specify next point", Accept::POINT).kw(&["Undo"]).base_opt(base),
-            _ => Prompt::new("Specify next point", Accept::POINT).kw(&["Close", "Undo"]).base_opt(base),
+            1 | 2 => Prompt::new("Specify next point", Accept::POINT).kw(&["Vertical", "Undo"]).base_opt(base),
+            _ => Prompt::new("Specify next point", Accept::POINT).kw(&["Close", "Vertical", "Undo"]).base_opt(base),
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
@@ -484,10 +484,30 @@ impl Interactive for LineM {
                 None => Ok(Step::Continue),
             },
             Input::Point(p) => {
-                let z = self.pts.last().map_or(s.last_point3.z, |pt| pt.z);
-                self.push_point(s, Vec3::new(p.x, p.y, z))
+                if s.settings.zlock && let Some(last) = self.pts.last() {
+                    let z = s.cursor3.z;
+                    self.push_point(s, Vec3::new(last.x, last.y, z))
+                } else {
+                    let z = self.pts.last().map_or(0.0, |pt| pt.z);
+                    self.push_point(s, Vec3::new(p.x, p.y, z))
+                }
             }
-            Input::Point3(p3) => self.push_point(s, p3),
+            Input::Point3(p3) => {
+                if s.settings.zlock && let Some(last) = self.pts.last() {
+                    self.push_point(s, Vec3::new(last.x, last.y, p3.z))
+                } else {
+                    self.push_point(s, p3)
+                }
+            }
+            Input::Keyword(k) if k.eq_ignore_ascii_case("Vertical") || k.eq_ignore_ascii_case("V") => {
+                s.settings.zlock = !s.settings.zlock;
+                if s.settings.zlock {
+                    s.echo("Z-Axis vertical constraint enabled.");
+                } else {
+                    s.echo("Z-Axis vertical constraint disabled.");
+                }
+                Ok(Step::Continue)
+            }
             Input::Keyword(k) if k == "Undo" => {
                 if self.first.take().is_some() {
                     return Ok(Step::Continue);
@@ -518,7 +538,7 @@ impl Interactive for LineM {
             let end = s.cursor_deferred.map_or(snap::LineEnd::Point(c), snap::LineEnd::Deferred);
             return snap::resolve_deferred(snap::LineEnd::Deferred(first), end).map(|(a, b)| vec![line(a, b)]).unwrap_or_default();
         }
-        self.pts.last().map(|l| vec![line3(*l, Vec3::new(c.x, c.y, l.z))]).unwrap_or_default()
+        self.pts.last().map(|l| vec![line3(*l, s.cursor3)]).unwrap_or_default()
     }
 }
 

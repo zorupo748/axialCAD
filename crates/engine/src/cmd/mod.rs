@@ -29,6 +29,7 @@ mod modify2;
 mod mtext_opts;
 mod overkill;
 mod pline_opts;
+pub(crate) mod plane;
 pub mod plotters;
 mod props;
 pub use draw2::breakline::BreaklineOptions;
@@ -209,6 +210,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(constraints::specs());
         v.extend(lisp::specs());
         v.extend(solids::specs());
+        v.extend(plane::specs());
         v
     })
 }

@@ -153,3 +153,53 @@ fn line_3d_preserves_coordinates_through_dxf_roundtrip() {
     assert_eq!(lines[0].a, Vec3::new(0.0, 0.0, 0.0));
     assert_eq!(lines[0].b, Vec3::new(100.0, 50.0, 75.0));
 }
+
+#[test]
+fn line_interactive_2d_coordinates_after_3d_line_resets_z_zero() {
+    let mut s = Session::new();
+    // First line with elevated Z = 50.0
+    s.cmdline("line 0,0,50 10,0,50").unwrap();
+    s.cmdline("").unwrap();
+    assert!(s.running.is_none());
+
+    // Subsequent 2D line must use Z = 0.0, not carry over previous line elevation
+    s.cmdline("line 10,20 30,40").unwrap();
+    s.cmdline("").unwrap();
+    assert!(s.running.is_none());
+
+    let EntityKind::Line(l) = last_entity(&s) else { panic!("expected Line entity") };
+    assert_eq!(l.a, Vec3::new(10.0, 20.0, 0.0));
+    assert_eq!(l.b, Vec3::new(30.0, 40.0, 0.0));
+}
+
+#[test]
+fn line_with_endpoints_at_different_heights_and_roundtrip() {
+    let mut s = Session::new();
+    s.cmdline("line 10,20,30 40,50,90").unwrap();
+    s.cmdline("").unwrap();
+    assert!(s.running.is_none());
+
+    let EntityKind::Line(l) = last_entity(&s) else { panic!("expected Line entity") };
+    assert_eq!(l.a, Vec3::new(10.0, 20.0, 30.0));
+    assert_eq!(l.b, Vec3::new(40.0, 50.0, 90.0));
+
+    // Verify DXF persistence preserves both distinct heights
+    let dxf_bytes = cadcraft_io::write_dxf(s.doc().unwrap());
+    let restored = cadcraft_io::read_dxf(dxf_bytes.as_bytes()).unwrap();
+    let l_restored = restored.model.iter().find_map(|e| if let EntityKind::Line(line) = &e.kind { Some(line) } else { None }).unwrap();
+    assert_eq!(l_restored.a, Vec3::new(10.0, 20.0, 30.0));
+    assert_eq!(l_restored.b, Vec3::new(40.0, 50.0, 90.0));
+}
+
+#[test]
+fn line_mixed_2d_and_3d_endpoints() {
+    let mut s = Session::new();
+    // Start at 2D coordinate (Z = 0) and go to 3D coordinate (Z = 45)
+    s.cmdline("line 5,15 25,35,45").unwrap();
+    s.cmdline("").unwrap();
+    assert!(s.running.is_none());
+
+    let EntityKind::Line(l) = last_entity(&s) else { panic!("expected Line entity") };
+    assert_eq!(l.a, Vec3::new(5.0, 15.0, 0.0));
+    assert_eq!(l.b, Vec3::new(25.0, 35.0, 45.0));
+}

@@ -354,15 +354,68 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
         // Coordinates.
         let coord = app.canvas.cursor.map(|c| {
             let (lu, lp) = app.session.doc().map(|d| (d.header.i64("LUNITS", 2), d.header.i64("LUPREC", 4))).unwrap_or((2, 4));
-            format!(
-                "{}, {}, {}",
-                cadcraft_engine::units::format_distance(c.x, lu, lp),
-                cadcraft_engine::units::format_distance(c.y, lu, lp),
-                cadcraft_engine::units::format_distance(0.0, lu, lp)
-            )
+            let z = app.canvas.cursor3.map_or(0.0, |c3| c3.z);
+            let pl = app.session.drawing_plane();
+            if pl == cadcraft_geom::DrawingPlane::XY && z.abs() < 1e-9 {
+                format!(
+                    "{}, {}, {}",
+                    cadcraft_engine::units::format_distance(c.x, lu, lp),
+                    cadcraft_engine::units::format_distance(c.y, lu, lp),
+                    cadcraft_engine::units::format_distance(0.0, lu, lp)
+                )
+            } else {
+                format!(
+                    "[{}] {}, {}, {}",
+                    pl.name(),
+                    cadcraft_engine::units::format_distance(c.x, lu, lp),
+                    cadcraft_engine::units::format_distance(c.y, lu, lp),
+                    cadcraft_engine::units::format_distance(z, lu, lp)
+                )
+            }
         });
         // MODEL / PAPER (layouts only): toggles MSPACE and PSPACE like AutoCAD's status button.
         let mut coord_right = rx - 8.0;
+
+        // Drawing plane button: XY / XZ / YZ
+        let plane = app.session.drawing_plane();
+        let br_plane = Rect::from_min_max(pos2(coord_right - 42.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
+        let resp_plane = ui.interact(br_plane, ui.id().with("drawing_plane_toggle"), Sense::click());
+        let plane_hovered = resp_plane.hovered();
+        let is_non_xy = plane != cadcraft_geom::DrawingPlane::XY;
+        icons::describe_control(ui, &resp_plane, plane.name(), Some(is_non_xy), false);
+        p.rect_filled(br_plane, 3.0, if plane_hovered { t.control_hover } else if is_non_xy { t.toggle_on.gamma_multiply(0.25) } else { t.chrome });
+        p.rect_stroke(br_plane, 3.0, Stroke::new(1.0, if is_non_xy { t.toggle_on } else if plane_hovered { t.text_dim } else { t.border }), egui::StrokeKind::Inside);
+        p.text(br_plane.center(), egui::Align2::CENTER_CENTER, plane.name(), crate::theme::small(), if is_non_xy { t.toggle_on } else { t.text });
+        if resp_plane.on_hover_text(format!("Drawing Plane: {} (click to cycle XY -> XZ -> YZ)", plane.name())).clicked() {
+            let next = match plane {
+                cadcraft_geom::DrawingPlane::XY => cadcraft_geom::DrawingPlane::XZ,
+                cadcraft_geom::DrawingPlane::XZ => cadcraft_geom::DrawingPlane::YZ,
+                cadcraft_geom::DrawingPlane::YZ => cadcraft_geom::DrawingPlane::XY,
+            };
+            app.session.set_drawing_plane(next);
+            app.session.echo(format!("Active drawing plane set to {}.", next.name()));
+        }
+        coord_right = br_plane.left() - 6.0;
+
+        let zlock = app.session.settings.zlock;
+        let br_zlock = Rect::from_min_max(pos2(coord_right - 64.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
+        let resp_zlock = ui.interact(br_zlock, ui.id().with("zlock_toggle"), Sense::click());
+        let zlock_hovered = resp_zlock.hovered();
+        icons::describe_control(ui, &resp_zlock, "Z-LOCK", Some(zlock), false);
+        if zlock {
+            p.rect_filled(br_zlock, 3.0, t.toggle_on);
+            p.rect_stroke(br_zlock, 3.0, Stroke::new(1.5, egui::Color32::WHITE), egui::StrokeKind::Inside);
+            p.text(br_zlock.center(), egui::Align2::CENTER_CENTER, "● Z-LOCK", crate::theme::small(), t.chrome_dark);
+        } else {
+            p.rect_filled(br_zlock, 3.0, if zlock_hovered { t.control_hover } else { t.chrome });
+            p.rect_stroke(br_zlock, 3.0, Stroke::new(1.0, if zlock_hovered { t.text_dim } else { t.border }), egui::StrokeKind::Inside);
+            p.text(br_zlock.center(), egui::Align2::CENTER_CENTER, "Z-LOCK", crate::theme::small(), if zlock_hovered { t.text } else { t.text_dim });
+        }
+        if resp_zlock.on_hover_text(if zlock { "Z-Axis Lock: ON (locks next line endpoint to vertical axis; click to disable)" } else { "Z-Axis Lock: OFF (click to lock next line endpoint to vertical axis)" }).clicked() {
+            app.session.settings.zlock = !app.session.settings.zlock;
+            app.session.echo(format!("Z-Axis vertical constraint {}.", if app.session.settings.zlock { "enabled" } else { "disabled" }));
+        }
+        coord_right = br_zlock.left() - 6.0;
         // The annotation scale list (model space).
         coord_right = annoscale::status(app, ui, coord_right, r.center().y);
         if matches!(app.session.layout_space(), cadcraft_doc::Space::Paper(_)) {

@@ -17,8 +17,6 @@ use crate::CadApp;
 use crate::theme::Tokens;
 
 /// Shown when the compass ring is clicked or dragged.
-pub const NO_TWIST: &str = "ViewCube: rotating the view needs a view twist, which the 2D plan view doesn't support yet.";
-
 /// Where the ViewCube's parts are on the canvas.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
@@ -53,31 +51,102 @@ impl Layout {
             return Some(Part::Home);
         }
         if self.face.contains(p) {
-            return Some(Part::Face);
+            let dx = p.x - self.center.x;
+            let dy = p.y - self.center.y;
+            // Center area: Top face (or toggle Bottom)
+            if dx.abs() <= 11.0 && dy.abs() <= 11.0 {
+                return Some(Part::Top);
+            }
+            // Corners: Isometric views
+            if dx < -11.0 && dy < -11.0 {
+                return Some(Part::NwIso);
+            }
+            if dx > 11.0 && dy < -11.0 {
+                return Some(Part::NeIso);
+            }
+            if dx < -11.0 && dy > 11.0 {
+                return Some(Part::SwIso);
+            }
+            if dx > 11.0 && dy > 11.0 {
+                return Some(Part::SeIso);
+            }
+            // Edges: Orthogonal standard views
+            if dy < -11.0 {
+                return Some(Part::Back);
+            }
+            if dy > 11.0 {
+                return Some(Part::Front);
+            }
+            if dx < -11.0 {
+                return Some(Part::Left);
+            }
+            if dx > 11.0 {
+                return Some(Part::Right);
+            }
+            return Some(Part::Top);
         }
         let d = p.distance(self.center);
-        ((self.ring - 10.0..=self.ring + 10.0).contains(&d)).then_some(Part::Ring)
+        if (self.ring - 12.0..=self.ring + 12.0).contains(&d) {
+            let dx = p.x - self.center.x;
+            let dy = p.y - self.center.y;
+            if dy < -35.0 && dx.abs() <= 20.0 {
+                return Some(Part::CompassN);
+            }
+            if dy > 35.0 && dx.abs() <= 20.0 {
+                return Some(Part::CompassS);
+            }
+            if dx > 35.0 && dy.abs() <= 20.0 {
+                return Some(Part::CompassE);
+            }
+            if dx < -35.0 && dy.abs() <= 20.0 {
+                return Some(Part::CompassW);
+            }
+            return Some(Part::Ring);
+        }
+        None
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
-    Face,
+    Top,
+    Bottom,
+    Front,
+    Back,
+    Left,
+    Right,
+    SwIso,
+    SeIso,
+    NeIso,
+    NwIso,
     Home,
+    CompassN,
+    CompassS,
+    CompassE,
+    CompassW,
     Ring,
 }
 
 impl Part {
     fn tip(self) -> &'static str {
         match self {
-            Part::Face => "Top: plan view of the drawing (zoom extents)",
-            Part::Home => "Home: zoom to the drawing extents",
-            Part::Ring => "Compass: view rotation isn't available in the 2D plan view yet",
+            Part::Top => "Top View (click to switch Top / Bottom)",
+            Part::Bottom => "Bottom View",
+            Part::Front | Part::CompassS => "Front View (South)",
+            Part::Back | Part::CompassN => "Back View (North)",
+            Part::Left | Part::CompassW => "Left View (West)",
+            Part::Right | Part::CompassE => "Right View (East)",
+            Part::SwIso => "SW Isometric View",
+            Part::SeIso => "SE Isometric View",
+            Part::NeIso => "NE Isometric View",
+            Part::NwIso => "NW Isometric View",
+            Part::Home => "Home: SW Isometric View (zoom extents)",
+            Part::Ring => "Compass Ring (drag to orbit)",
         }
     }
 }
 
-/// Paint the ViewCube's ring, compass letters, Top face and Home button, and handle the pointer.
+/// Paint the ViewCube's ring, compass letters, cube faces/corners and Home button, and handle the pointer.
 /// The canvas paints the WCS pill itself; this returns the pointer's part for its highlight.
 pub fn show(app: &mut CadApp, ui: &mut egui::Ui, l: &Layout) {
     let resp = ui.interact(l.bounds, ui.id().with("viewcube"), Sense::click_and_drag());
@@ -88,17 +157,65 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui, l: &Layout) {
     p.circle_stroke(l.center, l.ring + 4.5, Stroke::new(1.0, Color32::from_rgb(0x5c, 0x65, 0x72)));
     let f = egui::FontId::proportional(17.0);
     let lc = Color32::from_rgb(0xc8, 0xcc, 0xd2);
+    let l_hot = Color32::from_rgb(0x60, 0xaa, 0xff);
     let c = l.center;
     let ring = l.ring;
-    p.text(c + vec2(0.0, -ring - 1.0), egui::Align2::CENTER_CENTER, crate::tl!("N"), f.clone(), lc);
-    p.text(c + vec2(0.0, ring + 1.0), egui::Align2::CENTER_CENTER, crate::tl!("S"), f.clone(), lc);
-    p.text(c + vec2(ring + 1.0, 0.0), egui::Align2::CENTER_CENTER, crate::tl!("E"), f.clone(), lc);
-    p.text(c + vec2(-ring - 1.0, 0.0), egui::Align2::CENTER_CENTER, crate::tl!("W"), f, lc);
-    let face_col = if part == Some(Part::Face) { Color32::from_rgb(0xb8, 0xbc, 0xc2) } else { Color32::from_rgb(0x9a, 0x9e, 0xa4) };
+    p.text(c + vec2(0.0, -ring - 1.0), egui::Align2::CENTER_CENTER, crate::tl!("N"), f.clone(), if part == Some(Part::CompassN) { l_hot } else { lc });
+    p.text(c + vec2(0.0, ring + 1.0), egui::Align2::CENTER_CENTER, crate::tl!("S"), f.clone(), if part == Some(Part::CompassS) { l_hot } else { lc });
+    p.text(c + vec2(ring + 1.0, 0.0), egui::Align2::CENTER_CENTER, crate::tl!("E"), f.clone(), if part == Some(Part::CompassE) { l_hot } else { lc });
+    p.text(c + vec2(-ring - 1.0, 0.0), egui::Align2::CENTER_CENTER, crate::tl!("W"), f, if part == Some(Part::CompassW) { l_hot } else { lc });
+
+    // Paint base face
+    let face_col = Color32::from_rgb(0x9a, 0x9e, 0xa4);
     p.rect_filled(l.face, 2.0, face_col);
     p.rect_stroke(l.face, 2.0, Stroke::new(1.0, Color32::from_rgb(0x6c, 0x70, 0x76)), egui::StrokeKind::Inside);
+
+    // Subtle grid lines dividing the 3x3 regions of the face
+    let left_11 = c.x - 11.0;
+    let right_11 = c.x + 11.0;
+    let top_11 = c.y - 11.0;
+    let bottom_11 = c.y + 11.0;
+    let grid_stroke = Stroke::new(1.0, Color32::from_rgb(0x7a, 0x7e, 0x86));
+    p.line_segment([pos2(left_11, l.face.top()), pos2(left_11, l.face.bottom())], grid_stroke);
+    p.line_segment([pos2(right_11, l.face.top()), pos2(right_11, l.face.bottom())], grid_stroke);
+    p.line_segment([pos2(l.face.left(), top_11), pos2(l.face.right(), top_11)], grid_stroke);
+    p.line_segment([pos2(l.face.left(), bottom_11), pos2(l.face.right(), bottom_11)], grid_stroke);
+
+    // Hover highlights for the interactive parts of the face
+    let hot_col = Color32::from_rgba_premultiplied(0x40, 0x90, 0xf0, 0x55);
+    match part {
+        Some(Part::Top) => {
+            p.rect_filled(Rect::from_min_max(pos2(left_11, top_11), pos2(right_11, bottom_11)), 1.0, hot_col);
+        }
+        Some(Part::Back) => {
+            p.rect_filled(Rect::from_min_max(pos2(left_11, l.face.top()), pos2(right_11, top_11)), 1.0, hot_col);
+        }
+        Some(Part::Front) => {
+            p.rect_filled(Rect::from_min_max(pos2(left_11, bottom_11), pos2(right_11, l.face.bottom())), 1.0, hot_col);
+        }
+        Some(Part::Left) => {
+            p.rect_filled(Rect::from_min_max(pos2(l.face.left(), top_11), pos2(left_11, bottom_11)), 1.0, hot_col);
+        }
+        Some(Part::Right) => {
+            p.rect_filled(Rect::from_min_max(pos2(right_11, top_11), pos2(l.face.right(), bottom_11)), 1.0, hot_col);
+        }
+        Some(Part::NwIso) => {
+            p.rect_filled(Rect::from_min_max(l.face.left_top(), pos2(left_11, top_11)), 1.0, hot_col);
+        }
+        Some(Part::NeIso) => {
+            p.rect_filled(Rect::from_min_max(pos2(right_11, l.face.top()), pos2(l.face.right(), top_11)), 1.0, hot_col);
+        }
+        Some(Part::SwIso) => {
+            p.rect_filled(Rect::from_min_max(pos2(l.face.left(), bottom_11), pos2(left_11, l.face.bottom())), 1.0, hot_col);
+        }
+        Some(Part::SeIso) => {
+            p.rect_filled(Rect::from_min_max(pos2(right_11, bottom_11), l.face.right_bottom()), 1.0, hot_col);
+        }
+        _ => {}
+    }
+
     let view_name = app.session.camera().view_name();
-    p.text(c, egui::Align2::CENTER_CENTER, view_name, egui::FontId::proportional(11.0), Color32::from_rgb(0x50, 0x54, 0x5a));
+    p.text(c, egui::Align2::CENTER_CENTER, view_name, egui::FontId::proportional(11.0), Color32::from_rgb(0x30, 0x34, 0x3a));
     paint_home(&p, l.home, part == Some(Part::Home));
 
     let resp = match part {
@@ -112,25 +229,71 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui, l: &Layout) {
     }
     if resp.clicked() {
         match pressed_on {
-            Some(Part::Face | Part::Home) => {
-                let _ = app.run("plan", json!({}));
+            Some(Part::Top) => {
+                if app.session.camera().is_plan() {
+                    let _ = app.run("view.bottom", json!({}));
+                } else {
+                    let _ = app.run("view.top", json!({}));
+                }
             }
-            Some(Part::Ring) => {
-                app.session.echo(NO_TWIST);
+            Some(Part::Bottom) => {
+                let _ = app.run("view.bottom", json!({}));
             }
+            Some(Part::Front | Part::CompassS) => {
+                let _ = app.run("view.front", json!({}));
+            }
+            Some(Part::Back | Part::CompassN) => {
+                let _ = app.run("view.back", json!({}));
+            }
+            Some(Part::Left | Part::CompassW) => {
+                let _ = app.run("view.left", json!({}));
+            }
+            Some(Part::Right | Part::CompassE) => {
+                let _ = app.run("view.right", json!({}));
+            }
+            Some(Part::SwIso | Part::Home) => {
+                let _ = app.run("view.swiso", json!({}));
+            }
+            Some(Part::SeIso) => {
+                let _ = app.run("view.seiso", json!({}));
+            }
+            Some(Part::NeIso) => {
+                let _ = app.run("view.neiso", json!({}));
+            }
+            Some(Part::NwIso) => {
+                let _ = app.run("view.nwiso", json!({}));
+            }
+            Some(Part::Ring) => {}
             None => {}
         }
     }
     let mut action = None;
     resp.context_menu(|ui| {
         if ui.button("Top (Plan View)").clicked() {
-            action = Some(("plan", json!({"option": "world"})));
+            action = Some(("view.top", json!({})));
+            ui.close();
+        }
+        if ui.button("Bottom View").clicked() {
+            action = Some(("view.bottom", json!({})));
             ui.close();
         }
         if ui.button("Front View").clicked() {
             action = Some(("view.front", json!({})));
             ui.close();
         }
+        if ui.button("Back View").clicked() {
+            action = Some(("view.back", json!({})));
+            ui.close();
+        }
+        if ui.button("Left View").clicked() {
+            action = Some(("view.left", json!({})));
+            ui.close();
+        }
+        if ui.button("Right View").clicked() {
+            action = Some(("view.right", json!({})));
+            ui.close();
+        }
+        ui.separator();
         if ui.button("SW Isometric").clicked() {
             action = Some(("view.swiso", json!({})));
             ui.close();
@@ -139,8 +302,17 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui, l: &Layout) {
             action = Some(("view.seiso", json!({})));
             ui.close();
         }
-        if ui.button("Home").clicked() {
-            action = Some(("zoom.extents", json!({})));
+        if ui.button("NE Isometric").clicked() {
+            action = Some(("view.neiso", json!({})));
+            ui.close();
+        }
+        if ui.button("NW Isometric").clicked() {
+            action = Some(("view.nwiso", json!({})));
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Home (SW ISO)").clicked() {
+            action = Some(("view.swiso", json!({})));
             ui.close();
         }
         if ui.button("Hide ViewCube").clicked() {
@@ -258,18 +430,15 @@ mod tests {
         app.canvas.rect.unwrap_or(Rect::NOTHING)
     }
 
-    fn view(app: &CadApp) -> (f64, f64, f64) {
-        let v = app.session.state().map(|s| s.view()).unwrap_or_default();
-        (v.center.x, v.center.y, v.height)
-    }
-
     #[test]
     fn parts_are_found_where_they_are_drawn() {
         let l = Layout::new(Rect::from_min_size(pos2(200.0, 80.0), vec2(1000.0, 800.0)));
-        assert_eq!(l.part_at(l.center), Some(Part::Face));
+        assert_eq!(l.part_at(l.center), Some(Part::Top));
         assert_eq!(l.part_at(l.home.center()), Some(Part::Home));
-        assert_eq!(l.part_at(l.center + vec2(0.0, -l.ring)), Some(Part::Ring), "N");
-        assert_eq!(l.part_at(l.center + vec2(l.ring + 3.0, 0.0)), Some(Part::Ring), "E");
+        assert_eq!(l.part_at(l.center + vec2(0.0, -l.ring)), Some(Part::CompassN), "N");
+        assert_eq!(l.part_at(l.center + vec2(l.ring, 0.0)), Some(Part::CompassE), "E");
+        assert_eq!(l.part_at(l.center + vec2(-15.0, 15.0)), Some(Part::SwIso), "SW corner");
+        assert_eq!(l.part_at(l.center + vec2(0.0, 15.0)), Some(Part::Front), "South edge");
         assert_eq!(l.part_at(l.center + vec2(30.0, 30.0)), None, "between the face and the ring");
         assert!(l.bounds.contains_rect(l.home) && l.bounds.contains_rect(l.face));
     }
@@ -278,23 +447,25 @@ mod tests {
     fn viewcube_clicks_reach_the_cube_not_the_drawing() {
         let (mut app, ctx) = app_and_ctx();
         let l = Layout::new(canvas(&app));
-        let fitted = view(&app);
-        // Zoomed in, the Top face fits the drawing again (zoom extents) and nothing is picked.
-        let _ = app.run("zoom.in", json!({}));
-        assert_ne!(view(&app), fitted);
-        click(&mut app, &ctx, l.center, egui::PointerButton::Primary);
-        assert_eq!(view(&app), fitted, "Top face zooms to extents");
-        assert!(app.session.pending_window.is_none(), "the click didn't start a selection window");
-        assert!(app.session.selection().is_empty());
-        // Home does the same.
-        let _ = app.run("zoom.in", json!({}));
+
+        // Click Home: switches to SW Isometric 3D view
         click(&mut app, &ctx, l.home.center(), egui::PointerButton::Primary);
-        assert_eq!(view(&app), fitted, "Home zooms to extents");
-        // The ring explains that the 2D view can't rotate, and doesn't touch the drawing.
-        click(&mut app, &ctx, l.center + vec2(0.0, -l.ring), egui::PointerButton::Primary);
-        assert_eq!(app.session.log.last().map(String::as_str), Some(NO_TWIST));
+        assert_eq!(app.session.camera().view_name(), "SW ISO", "Home button sets SW ISO view");
         assert!(app.session.pending_window.is_none());
-        assert_eq!(view(&app), fitted);
+        assert!(app.session.selection().is_empty());
+
+        // Click Top: returns to Top plan view
+        click(&mut app, &ctx, l.center, egui::PointerButton::Primary);
+        assert!(app.session.camera().is_plan(), "Top face sets Plan view");
+
+        // Click Front (South edge): sets Front view
+        click(&mut app, &ctx, l.center + vec2(0.0, 15.0), egui::PointerButton::Primary);
+        assert_eq!(app.session.camera().view_name(), "FRONT", "South edge sets Front view");
+
+        // Click SW corner: sets SW ISO view
+        click(&mut app, &ctx, l.center + vec2(-15.0, 15.0), egui::PointerButton::Primary);
+        assert_eq!(app.session.camera().view_name(), "SW ISO", "SW corner sets SW ISO view");
+
         // A click in the drawing still reaches the drawing.
         let empty = canvas(&app).center() + vec2(0.0, -300.0);
         click(&mut app, &ctx, empty, egui::PointerButton::Primary);

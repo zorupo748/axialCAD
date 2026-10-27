@@ -219,6 +219,9 @@ pub struct Options {
     /// Draw objects with their transparency ([`DPrim::transparency`]). Off by default: the screen
     /// follows TRANSPARENCYDISPLAY, plots the page setup's "Plot transparency".
     pub transparency: bool,
+    /// When true, lines with non-zero Z coordinates (spatial lines) are omitted from the 2D
+    /// display list (the canvas draws them directly via its spatial line pass).
+    pub skip_spatial: bool,
     /// A layout viewport whose model-space contents are left out (its border is still drawn):
     /// the canvas draws the active viewport's contents itself, see [`viewport_content`].
     pub skip_viewport: Option<Handle>,
@@ -248,6 +251,7 @@ impl Default for Options {
             view: None,
             skip_viewport: None,
             transparency: false,
+            skip_spatial: false,
             cancel: None,
         }
     }
@@ -1284,6 +1288,7 @@ fn entity_parts(b: &mut Builder, ctx: &Ctx, e: &Entity) {
                 b.polyline(ctx, rgb, lw, l);
             }
         }
+        EntityKind::Line(l) if b.opts.skip_spatial && (l.a.z != 0.0 || l.b.z != 0.0) => {}
         kind => {
             for prim in kind.prims() {
                 match prim {
