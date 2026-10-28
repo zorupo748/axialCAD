@@ -213,11 +213,7 @@ impl OrbitCamera {
             let diff = p0 - base;
             let b = v.x;
             let denom = 1.0 - b * b;
-            let x = if denom > 1e-6 {
-                base.x + (diff.x - b * diff.dot(v)) / denom
-            } else {
-                base.x + delta.x
-            };
+            let x = if denom > 1e-6 { base.x + (diff.x - b * diff.dot(v)) / denom } else { base.x + delta.x };
             (Vec3::new(x, base.y, base.z), x - base.x)
         } else {
             let r = self.right_dir();
@@ -227,11 +223,7 @@ impl OrbitCamera {
             let diff = p0 - base;
             let b = v.y;
             let denom = 1.0 - b * b;
-            let y = if denom > 1e-6 {
-                base.y + (diff.y - b * diff.dot(v)) / denom
-            } else {
-                base.y + delta.y
-            };
+            let y = if denom > 1e-6 { base.y + (diff.y - b * diff.dot(v)) / denom } else { base.y + delta.y };
             (Vec3::new(base.x, y, base.z), y - base.y)
         }
     }

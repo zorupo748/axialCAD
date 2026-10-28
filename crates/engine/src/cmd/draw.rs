@@ -484,7 +484,9 @@ impl Interactive for LineM {
                 None => Ok(Step::Continue),
             },
             Input::Point(p) => {
-                if s.settings.zlock && let Some(last) = self.pts.last() {
+                if s.settings.zlock
+                    && let Some(last) = self.pts.last()
+                {
                     let z = s.cursor3.z;
                     self.push_point(s, Vec3::new(last.x, last.y, z))
                 } else {
@@ -493,7 +495,9 @@ impl Interactive for LineM {
                 }
             }
             Input::Point3(p3) => {
-                if s.settings.zlock && let Some(last) = self.pts.last() {
+                if s.settings.zlock
+                    && let Some(last) = self.pts.last()
+                {
                     self.push_point(s, Vec3::new(last.x, last.y, p3.z))
                 } else {
                     self.push_point(s, p3)

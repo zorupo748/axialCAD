@@ -160,7 +160,13 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui, l: &Layout) {
     let l_hot = Color32::from_rgb(0x60, 0xaa, 0xff);
     let c = l.center;
     let ring = l.ring;
-    p.text(c + vec2(0.0, -ring - 1.0), egui::Align2::CENTER_CENTER, crate::tl!("N"), f.clone(), if part == Some(Part::CompassN) { l_hot } else { lc });
+    p.text(
+        c + vec2(0.0, -ring - 1.0),
+        egui::Align2::CENTER_CENTER,
+        crate::tl!("N"),
+        f.clone(),
+        if part == Some(Part::CompassN) { l_hot } else { lc },
+    );
     p.text(c + vec2(0.0, ring + 1.0), egui::Align2::CENTER_CENTER, crate::tl!("S"), f.clone(), if part == Some(Part::CompassS) { l_hot } else { lc });
     p.text(c + vec2(ring + 1.0, 0.0), egui::Align2::CENTER_CENTER, crate::tl!("E"), f.clone(), if part == Some(Part::CompassE) { l_hot } else { lc });
     p.text(c + vec2(-ring - 1.0, 0.0), egui::Align2::CENTER_CENTER, crate::tl!("W"), f, if part == Some(Part::CompassW) { l_hot } else { lc });

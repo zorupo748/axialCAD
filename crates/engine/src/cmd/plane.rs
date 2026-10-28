@@ -62,12 +62,9 @@ impl Interactive for PlaneM {
 
     fn prompt(&self, s: &Session) -> Prompt {
         let cur = s.drawing_plane().name();
-        Prompt::new(
-            format!("Specify drawing plane [XY/XZ/YZ] <{cur}>:"),
-            Accept { enter: true, text: true, ..Accept::default() },
-        )
-        .kw(&["XY", "XZ", "YZ"])
-        .default(cur)
+        Prompt::new(format!("Specify drawing plane [XY/XZ/YZ] <{cur}>:"), Accept { enter: true, text: true, ..Accept::default() })
+            .kw(&["XY", "XZ", "YZ"])
+            .default(cur)
     }
 
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {

@@ -95,10 +95,7 @@ fn test_vertical_z_calculation_across_different_orientations() {
 
         // Calculate vertical Z from that screen coordinate
         let z = cam.unproject_vertical_z(q, base);
-        assert!(
-            (z - 85.0).abs() < 1e-4,
-            "Orientation {preset}: expected Z = 85.0, got {z}"
-        );
+        assert!((z - 85.0).abs() < 1e-4, "Orientation {preset}: expected Z = 85.0, got {z}");
     }
 }
 

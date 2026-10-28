@@ -383,8 +383,32 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
         let plane_hovered = resp_plane.hovered();
         let is_non_xy = plane != cadcraft_geom::DrawingPlane::XY;
         icons::describe_control(ui, &resp_plane, plane.name(), Some(is_non_xy), false);
-        p.rect_filled(br_plane, 3.0, if plane_hovered { t.control_hover } else if is_non_xy { t.toggle_on.gamma_multiply(0.25) } else { t.chrome });
-        p.rect_stroke(br_plane, 3.0, Stroke::new(1.0, if is_non_xy { t.toggle_on } else if plane_hovered { t.text_dim } else { t.border }), egui::StrokeKind::Inside);
+        p.rect_filled(
+            br_plane,
+            3.0,
+            if plane_hovered {
+                t.control_hover
+            } else if is_non_xy {
+                t.toggle_on.gamma_multiply(0.25)
+            } else {
+                t.chrome
+            },
+        );
+        p.rect_stroke(
+            br_plane,
+            3.0,
+            Stroke::new(
+                1.0,
+                if is_non_xy {
+                    t.toggle_on
+                } else if plane_hovered {
+                    t.text_dim
+                } else {
+                    t.border
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
         p.text(br_plane.center(), egui::Align2::CENTER_CENTER, plane.name(), crate::theme::small(), if is_non_xy { t.toggle_on } else { t.text });
         if resp_plane.on_hover_text(format!("Drawing Plane: {} (click to cycle XY -> XZ -> YZ)", plane.name())).clicked() {
             let next = match plane {
@@ -411,7 +435,14 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
             p.rect_stroke(br_zlock, 3.0, Stroke::new(1.0, if zlock_hovered { t.text_dim } else { t.border }), egui::StrokeKind::Inside);
             p.text(br_zlock.center(), egui::Align2::CENTER_CENTER, "Z-LOCK", crate::theme::small(), if zlock_hovered { t.text } else { t.text_dim });
         }
-        if resp_zlock.on_hover_text(if zlock { "Z-Axis Lock: ON (locks next line endpoint to vertical axis; click to disable)" } else { "Z-Axis Lock: OFF (click to lock next line endpoint to vertical axis)" }).clicked() {
+        if resp_zlock
+            .on_hover_text(if zlock {
+                "Z-Axis Lock: ON (locks next line endpoint to vertical axis; click to disable)"
+            } else {
+                "Z-Axis Lock: OFF (click to lock next line endpoint to vertical axis)"
+            })
+            .clicked()
+        {
             app.session.settings.zlock = !app.session.settings.zlock;
             app.session.echo(format!("Z-Axis vertical constraint {}.", if app.session.settings.zlock { "enabled" } else { "disabled" }));
         }

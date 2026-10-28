@@ -1047,6 +1047,32 @@ fn list_mesh_key(key: &ListKey, list_gen: u64, origin: Vec2, bg: Rgb, lwdisplay:
 
 /// Draw the display list through the GPU paint callback (uploading it when it changed), plus
 /// the infinite lines, which are clipped to the view on the CPU every frame.
+/// The GPU mesh transform `([a, b, c, d, tx, ty], offset)` for `draw_list_gpu`.
+///
+/// In 3D views, projects vertices relative to `mesh_origin` onto camera plane (u, v) centered at
+/// `cam.target`, including the vertical offset term `-up.z * cam.target.z` so that 2D geometry
+/// shifts synchronously with the 3D grid and spatial lines during vertical pan.
+pub(crate) fn gpu_mesh_xform(mesh_origin: Vec2, center: Vec2, cam: Option<&cadcraft_geom::OrbitCamera>) -> ([f32; 6], [f32; 2]) {
+    if let Some(cam) = cam {
+        if !cam.is_plan() {
+            let m = cam.orient_matrix();
+            let to = Vec2::new(mesh_origin.x - cam.target.x, mesh_origin.y - cam.target.y);
+            let a = m.a as f32;
+            let b = m.b as f32;
+            let c_mat = m.c as f32;
+            let d = m.d as f32;
+            let e = a * to.x as f32 + c_mat * to.y as f32;
+            let u = cam.up_dir();
+            let f = b * to.x as f32 + d * to.y as f32 - (u.z * cam.target.z) as f32;
+            ([a, b, c_mat, d, e, f], [0.0f32, 0.0f32])
+        } else {
+            (crate::gpu::IDENTITY_XFORM, [(mesh_origin.x - center.x) as f32, (mesh_origin.y - center.y) as f32])
+        }
+    } else {
+        (crate::gpu::IDENTITY_XFORM, [(mesh_origin.x - center.x) as f32, (mesh_origin.y - center.y) as f32])
+    }
+}
+
 fn draw_list_gpu(c: &mut CanvasState, p: &egui::Painter, xf: &Xf, bg: Rgb, lwdisplay: bool) {
     let Some(list) = &c.list else { return };
     let origin = crate::gpu::choose_origin(&list.bounds, xf.center, f64::from(xf.rect.height()) / xf.scale.max(1e-300));
@@ -1063,23 +1089,7 @@ fn draw_list_gpu(c: &mut CanvasState, p: &egui::Painter, xf: &Xf, bg: Rgb, lwdis
         c.mesh_ms = crate::now_ms() - t0;
     }
     let center = xf.rect.center();
-    let (xform, offset) = if let Some(cam) = &xf.camera {
-        if !cam.is_plan() {
-            let m = cam.orient_matrix();
-            let to = Vec2::new(c.mesh_origin.x - cam.target.x, c.mesh_origin.y - cam.target.y);
-            let a = m.a as f32;
-            let b = m.b as f32;
-            let c_mat = m.c as f32;
-            let d = m.d as f32;
-            let e = a * to.x as f32 + c_mat * to.y as f32;
-            let f = b * to.x as f32 + d * to.y as f32;
-            ([a, b, c_mat, d, e, f], [0.0f32, 0.0f32])
-        } else {
-            (crate::gpu::IDENTITY_XFORM, [(c.mesh_origin.x - xf.center.x) as f32, (c.mesh_origin.y - xf.center.y) as f32])
-        }
-    } else {
-        (crate::gpu::IDENTITY_XFORM, [(c.mesh_origin.x - xf.center.x) as f32, (c.mesh_origin.y - xf.center.y) as f32])
-    };
+    let (xform, offset) = gpu_mesh_xform(c.mesh_origin, xf.center, xf.camera.as_ref());
     p.add(egui_wgpu::Callback::new_paint_callback(
         xf.rect,
         crate::gpu::CanvasCallback {
@@ -2542,13 +2552,15 @@ fn dynamic_input(app: &mut CadApp, p: &egui::Painter, hover: Pos2, fields: bool)
     // DYNPROMPT = 0: no prompt beside the cursor (the value boxes stay).
     let show_prompt = app.session.settings.dynprompt;
     let options = show_prompt && !prompt.keywords.is_empty();
+    let zlock_info =
+        if app.session.settings.zlock && prompt.base.is_some() { app.canvas.cursor3.map(|c3| (c3, app.session.last_point3)) } else { None };
     if !fields
         && let Some(f) = crate::cmdline::dyn_frame(app)
         && let Some(e) = crate::dyninput::parse(&app.cmd.buffer, &f)
         && let Some(c) = app.canvas.cursor
     {
         let message = if show_prompt { crate::i18n::t(&prompt.message) } else { "" };
-        let r = dynamic_input_boxes(p, at, message, &f, &e, c, app.cmd.second_locked(), options, length_units(&app.session));
+        let r = dynamic_input_boxes(p, at, message, &f, &e, c, app.cmd.second_locked(), options, length_units(&app.session), zlock_info);
         options_menu(app, p, r, hover);
         return;
     }
@@ -2561,12 +2573,18 @@ fn dynamic_input(app: &mut CadApp, p: &egui::Painter, hover: Pos2, fields: bool)
     } else if !app.cmd.buffer.is_empty() {
         text = format!("{}: {}", crate::i18n::t(&prompt.message), app.cmd.buffer);
     } else if let (Some(base), Some(c)) = (prompt.base, app.canvas.cursor) {
-        text = format!(
-            "{}   {}  <  {}°",
-            crate::i18n::t(&prompt.message),
-            distance_text(&app.session, base.dist(c)),
-            (base.angle_to(c).to_degrees() * 10.0).round() / 10.0
-        );
+        if let Some((c3, base3)) = zlock_info {
+            let dz = c3.z - base3.z;
+            let ang = if dz >= 0.0 { 90.0 } else { -90.0 };
+            text = format!("{}   {}  <  {}°", crate::i18n::t(&prompt.message), distance_text(&app.session, dz.abs()), ang);
+        } else {
+            text = format!(
+                "{}   {}  <  {}°",
+                crate::i18n::t(&prompt.message),
+                distance_text(&app.session, base.dist(c)),
+                (base.angle_to(c).to_degrees() * 10.0).round() / 10.0
+            );
+        }
     } else if let Some(c) = app.canvas.cursor {
         text = format!("{}   {}, {}", crate::i18n::t(&prompt.message), distance_text(&app.session, c.x), distance_text(&app.session, c.y));
     }
@@ -2657,12 +2675,21 @@ fn dynamic_input_boxes(
     second_locked: bool,
     options: bool,
     (lu, lp): (i64, i64),
+    zlock_info: Option<(Vec3, Vec3)>,
 ) -> Rect {
     use crate::dyninput::Format;
     let t = Tokens::get();
     let font = crate::theme::small();
     let dist = |v: f64| cadcraft_engine::units::format_distance(v, lu, lp);
-    let (live_first, live_second) = f.live(e.format, cursor);
+    let (live_first, live_second) = if let Some((c3, base3)) = zlock_info {
+        let dz = c3.z - base3.z;
+        match e.format {
+            Format::Cartesian => (0.0, dz),
+            Format::Polar => (dz.abs(), if dz >= 0.0 { std::f64::consts::FRAC_PI_2 } else { -std::f64::consts::FRAC_PI_2 }),
+        }
+    } else {
+        f.live(e.format, cursor)
+    };
     let live_second = match e.format {
         Format::Cartesian => dist(live_second),
         Format::Polar => format!("{}°", (live_second.to_degrees() * 10.0).round() / 10.0),
@@ -3127,6 +3154,101 @@ pub(crate) mod tests {
         let text = painted_text(&mut app, &ctx, at);
         assert!(text.contains(&format!("   {}  <", arch(c.len()))), "no {} in:\n{text}", arch(c.len()));
     }
+
+    /// Simulates the exact vertex position computed by the GPU vertex shader (`to_px` in gpu.rs).
+    fn sim_gpu_vertex_screen(xf: &Xf, mesh_origin: Vec2, p: Vec2) -> Pos2 {
+        let (xform, offset) = gpu_mesh_xform(mesh_origin, xf.center, xf.camera.as_ref());
+        let center = xf.rect.center();
+        let p_local = p - mesh_origin;
+        let qx = (xform[0] * p_local.x as f32 + xform[2] * p_local.y as f32) + xform[4] + offset[0];
+        let qy = (xform[1] * p_local.x as f32 + xform[3] * p_local.y as f32) + xform[5] + offset[1];
+        let wx = qx * xf.scale as f32;
+        let wy = qy * xf.scale as f32;
+        pos2(center.x + wx, center.y - wy)
+    }
+
+    #[test]
+    fn gpu_mesh_xform_vertical_pan_and_target_z() {
+        let rect = Rect::from_min_size(pos2(20.0, 100.0), vec2(1000.0, 800.0));
+        let scale = 50.0;
+        let mesh_origin = Vec2::new(10.0, 10.0);
+        let test_points = [Vec2::new(0.0, 0.0), Vec2::new(10.0, 10.0), Vec2::new(25.5, -14.2), Vec2::new(-30.0, 45.0)];
+
+        // 1. Target Z = 0: verify exact match between GPU shader and OrbitCamera::project_point
+        let mut cam_iso = cadcraft_geom::OrbitCamera::default();
+        cam_iso.set_preset("swiso");
+        cam_iso.target = cadcraft_geom::Vec3::new(5.0, 5.0, 0.0);
+        let xf_iso_z0 = Xf { rect, center: cam_iso.target.xy(), scale, camera: Some(cam_iso) };
+        for pt in &test_points {
+            let gpu = sim_gpu_vertex_screen(&xf_iso_z0, mesh_origin, *pt);
+            let cpu = xf_iso_z0.to_screen3(cadcraft_geom::Vec3::new(pt.x, pt.y, 0.0));
+            assert!((gpu.x - cpu.x).abs() < 1e-3, "Z=0 mismatch X: gpu={}, cpu={}", gpu.x, cpu.x);
+            assert!((gpu.y - cpu.y).abs() < 1e-3, "Z=0 mismatch Y: gpu={}, cpu={}", gpu.y, cpu.y);
+        }
+
+        // 2. Positive and negative target.z: verify match remains exact
+        for &tz in &[15.5, -28.25] {
+            let mut cam_z = cam_iso;
+            cam_z.target.z = tz;
+            let xf_z = Xf { rect, center: cam_z.target.xy(), scale, camera: Some(cam_z) };
+            for pt in &test_points {
+                let gpu = sim_gpu_vertex_screen(&xf_z, mesh_origin, *pt);
+                let cpu = xf_z.to_screen3(cadcraft_geom::Vec3::new(pt.x, pt.y, 0.0));
+                assert!((gpu.x - cpu.x).abs() < 1e-3, "tz={tz} mismatch X: gpu={}, cpu={}", gpu.x, cpu.x);
+                assert!((gpu.y - cpu.y).abs() < 1e-3, "tz={tz} mismatch Y: gpu={}, cpu={}", gpu.y, cpu.y);
+            }
+        }
+
+        // 3. Front view (elevation = 0°): pan vertical +100 px
+        let mut cam_front = cadcraft_geom::OrbitCamera::default();
+        cam_front.set_preset("front");
+        let xf_front_before = Xf { rect, center: cam_front.target.xy(), scale, camera: Some(cam_front) };
+
+        let mut cam_front_after = cam_front;
+        cam_front_after.pan(0.0, 100.0, scale);
+        let xf_front_after = Xf { rect, center: cam_front_after.target.xy(), scale, camera: Some(cam_front_after) };
+
+        for pt in &test_points {
+            let b = sim_gpu_vertex_screen(&xf_front_before, mesh_origin, *pt);
+            let a = sim_gpu_vertex_screen(&xf_front_after, mesh_origin, *pt);
+            let dy = a.y - b.y;
+            assert!((dy - 100.0).abs() < 1e-3, "Front view vertical pan must move +100 px, got {dy}");
+
+            // Verify historical bug reproduction: without -up.z * target.z, displacement was 0.0
+            let m = cam_front_after.orient_matrix();
+            let to = mesh_origin - cam_front_after.target.xy();
+            let f_old = (m.b as f32) * (to.x as f32) + (m.d as f32) * (to.y as f32);
+            let p_local = *pt - mesh_origin;
+            let qy_old = (m.b as f32) * (p_local.x as f32) + (m.d as f32) * (p_local.y as f32) + f_old;
+            let a_old_y = rect.center().y - qy_old * (scale as f32);
+            assert!((a_old_y - b.y).abs() < 1e-3, "Old uncorrected formula stayed frozen at 0 px displacement");
+        }
+
+        // 4. Isometric view (elevation = 35.2644°): pan vertical +100 px
+        let mut cam_swiso_before = cadcraft_geom::OrbitCamera::default();
+        cam_swiso_before.set_preset("swiso");
+        let xf_swiso_before = Xf { rect, center: cam_swiso_before.target.xy(), scale, camera: Some(cam_swiso_before) };
+
+        let mut cam_swiso_after = cam_swiso_before;
+        cam_swiso_after.pan(0.0, 100.0, scale);
+        let xf_swiso_after = Xf { rect, center: cam_swiso_after.target.xy(), scale, camera: Some(cam_swiso_after) };
+
+        for pt in &test_points {
+            let b = sim_gpu_vertex_screen(&xf_swiso_before, mesh_origin, *pt);
+            let a = sim_gpu_vertex_screen(&xf_swiso_after, mesh_origin, *pt);
+            let dy = a.y - b.y;
+            assert!((dy - 100.0).abs() < 1e-3, "Isometric view vertical pan must move +100 px, got {dy}");
+
+            // Verify historical bug reproduction: without -up.z * target.z, displacement was only 33.33 px
+            let m = cam_swiso_after.orient_matrix();
+            let to = mesh_origin - cam_swiso_after.target.xy();
+            let f_old = (m.b as f32) * (to.x as f32) + (m.d as f32) * (to.y as f32);
+            let p_local = *pt - mesh_origin;
+            let qy_old = (m.b as f32) * (p_local.x as f32) + (m.d as f32) * (p_local.y as f32) + f_old;
+            let a_old_y = rect.center().y - qy_old * (scale as f32);
+            assert!(((a_old_y - b.y) - 33.33333).abs() < 0.1, "Old uncorrected formula moved only 33.33 px");
+        }
+    }
 }
 
 /// The Block Editor's tint, base point and bar.
@@ -3182,5 +3304,128 @@ mod hatch_pick_tests {
         assert_eq!(app.hatch_dlg.as_ref().map(|s| s.edit.iter().map(|h| h.hex()).collect::<Vec<_>>()), Some(vec![hx]));
         // The double-click (at the hatch's centre grip) only opens the dialog: no grip edit.
         assert!(app.session.running.is_none(), "{:?}", app.session.running.as_ref().map(|r| r.machine.name()));
+    }
+
+    #[test]
+    fn canvas_mouse_vertical_line_under_zlock() {
+        for view_name in &["front", "swiso"] {
+            let mut app = CadApp::new(Session::new(), Services::default());
+            app.session.execute(&format!("view.{view_name}"), &json!({})).unwrap();
+            let ctx = egui::Context::default();
+            let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+            let mut time = 0.0;
+            let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+                time += 0.05;
+                app.logic(&ctx);
+                let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+                let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+                out.textures_delta.clear();
+            };
+
+            // Initial frame to establish canvas layout and xf
+            frame(&mut app, Vec::new());
+            let center = egui::pos2(800.0, 500.0);
+
+            // 1. Start LINE
+            app.session.cmdline("line").unwrap();
+            assert!(app.session.prompting());
+
+            // 2. Click point 1 at canvas center
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            frame(&mut app, vec![egui::Event::PointerMoved(center)]);
+            frame(&mut app, vec![button(center, true), button(center, false)]);
+            frame(&mut app, Vec::new());
+
+            let base3 = app.session.last_point3;
+
+            // 3. Enable Z-LOCK
+            app.session.settings.zlock = true;
+
+            // 4. Move pointer vertically by 80 px (in distinct frames)
+            let mut p_curr = center;
+            for _ in 0..4 {
+                p_curr -= egui::vec2(0.0, 20.0);
+                frame(&mut app, vec![egui::Event::PointerMoved(p_curr)]);
+            }
+
+            // 5. Verify cursor3 height changed vertically
+            let c3 = app.canvas.cursor3.expect("cursor3 must be set under zlock");
+            assert!((c3.x - base3.x).abs() < 1e-6, "X must match base: c3.x={}, base.x={}", c3.x, base3.x);
+            assert!((c3.y - base3.y).abs() < 1e-6, "Y must match base: c3.y={}, base.y={}", c3.y, base3.y);
+            assert!((c3.z - base3.z).abs() > 0.1, "Z must change with vertical mouse move, got {}", c3.z);
+
+            // 6. Click point 2 at final position
+            frame(&mut app, vec![button(p_curr, true), button(p_curr, false)]);
+            frame(&mut app, Vec::new());
+
+            // 7. Finish LINE with Enter
+            app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+            // 8. Verify the line in drawing is strictly vertical
+            let doc = app.session.doc().unwrap();
+            let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
+            let line_ent = store
+                .iter()
+                .find_map(|e| match &e.kind {
+                    cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+                    _ => None,
+                })
+                .expect("vertical line entity must exist in model space");
+
+            assert!((line_ent.a.x - line_ent.b.x).abs() < 1e-6, "Line must have identical X: a={:?}, b={:?}", line_ent.a, line_ent.b);
+            assert!((line_ent.a.y - line_ent.b.y).abs() < 1e-6, "Line must have identical Y: a={:?}, b={:?}", line_ent.a, line_ent.b);
+            assert!((line_ent.a.z - line_ent.b.z).abs() > 0.1, "Line must have distinct vertical Z: a={:?}, b={:?}", line_ent.a, line_ent.b);
+        }
+    }
+
+    #[test]
+    fn canvas_mouse_free_line_unaffected_when_zlock_is_off() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        app.session.settings.zlock = false;
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+        let mut time = 0.0;
+        let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        frame(&mut app, Vec::new());
+        let center = egui::pos2(800.0, 500.0);
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+
+        app.session.cmdline("line").unwrap();
+        frame(&mut app, vec![egui::Event::PointerMoved(center)]);
+        frame(&mut app, vec![button(center, true), button(center, false)]);
+        frame(&mut app, Vec::new());
+
+        let target = center + egui::vec2(100.0, 50.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(target)]);
+        frame(&mut app, vec![button(target, true), button(target, false)]);
+        frame(&mut app, Vec::new());
+        app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+        let doc = app.session.doc().unwrap();
+        let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
+        let line_ent = store
+            .iter()
+            .find_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+                _ => None,
+            })
+            .expect("free line entity must exist");
+
+        // When zlock is OFF, line is drawn on drawing plane (free 2D or plane displacement)
+        assert!((line_ent.a.x - line_ent.b.x).abs() > 0.01 || (line_ent.a.y - line_ent.b.y).abs() > 0.01);
     }
 }

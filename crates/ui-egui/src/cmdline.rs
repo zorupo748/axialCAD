@@ -366,7 +366,22 @@ pub fn submit(app: &mut CadApp) {
     if let Some(f) = dyn_frame(app) {
         let cursor = app.canvas.cursor.unwrap_or(app.session.cursor);
         let last = app.session.last_point;
-        let done = crate::dyninput::parse(&app.cmd.buffer, &f).and_then(|e| crate::dyninput::complete(&e, &f, cursor, last));
+        let done = if app.session.settings.zlock
+            && let Some(c3) = app.canvas.cursor3
+        {
+            let dz = c3.z - app.session.last_point3.z;
+            crate::dyninput::parse(&app.cmd.buffer, &f).and_then(|e| {
+                if !e.split {
+                    return None;
+                }
+                let first = e.first_locked().unwrap_or(dz.abs());
+                let sign = if dz >= 0.0 { 1.0 } else { -1.0 };
+                let val = first * sign;
+                Some(format!("@0,0,{val}"))
+            })
+        } else {
+            crate::dyninput::parse(&app.cmd.buffer, &f).and_then(|e| crate::dyninput::complete(&e, &f, cursor, last))
+        };
         if let Some(text) = done {
             app.cmd.buffer = text;
         }

@@ -55,10 +55,7 @@ fn test_pan_step_in_3d_isometric_view() {
     // Translation must be strictly perpendicular to the camera view direction (parallel to screen plane)
     let delta_target = cam_after.target - cam_before.target;
     let view_dir = cam_after.view_dir();
-    assert!(
-        delta_target.dot(view_dir).abs() < 1e-6,
-        "Target translation must be perpendicular to camera view vector"
-    );
+    assert!(delta_target.dot(view_dir).abs() < 1e-6, "Target translation must be perpendicular to camera view vector");
 
     // Project a world point before and after pan:
     let test_pt = Vec3::new(25.0, 30.0, 15.0);
@@ -95,14 +92,8 @@ fn test_pan_consistent_across_zoom_scales() {
             let pixel_dx = (s1.x - s0.x) * scale;
             let pixel_dy = (s0.y - s1.y) * scale;
 
-            assert!(
-                (pixel_dx - dx).abs() < 1e-5,
-                "preset {preset} scale {scale}: expected dx {dx}, got {pixel_dx}"
-            );
-            assert!(
-                (pixel_dy - dy).abs() < 1e-5,
-                "preset {preset} scale {scale}: expected dy {dy}, got {pixel_dy}"
-            );
+            assert!((pixel_dx - dx).abs() < 1e-5, "preset {preset} scale {scale}: expected dx {dx}, got {pixel_dx}");
+            assert!((pixel_dy - dy).abs() < 1e-5, "preset {preset} scale {scale}: expected dy {dy}, got {pixel_dy}");
         }
     }
 }
