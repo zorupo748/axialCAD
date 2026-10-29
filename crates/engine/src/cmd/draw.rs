@@ -415,6 +415,22 @@ impl LineM {
         Ok(Step::Continue)
     }
 
+    /// Draw the first segment from the deferred first point to `p`, resolving typed polar if present.
+    fn resolve_first_point(&mut self, s: &mut Session, first: snap::Deferred, p: Vec2) -> Result<Step> {
+        if let Some((dist, ang)) = s.last_polar.take()
+            && let Some(t) = snap::tangent_point_in_direction(&first.curve, ang, first.at)
+        {
+            let e = t + Vec2::new(ang.cos(), ang.sin()) * dist;
+            self.handles.push(s.add_entity(line(t, e))?);
+            self.pts = vec![v3(t), v3(e)];
+            s.last_point = e;
+            s.last_point3 = v3(e);
+            self.first = None;
+            return Ok(Step::Continue);
+        }
+        self.resolve_first(s, first, snap::LineEnd::Point(p))
+    }
+
     fn push_point(&mut self, s: &mut Session, p: Vec3) -> Result<Step> {
         if let Some(last) = self.pts.last().copied() {
             if last.near(p, 1e-12) {
@@ -434,12 +450,12 @@ impl Interactive for LineM {
         "LINE"
     }
     fn prompt(&self, _s: &Session) -> Prompt {
-        let base = self.pts.last().map(|p| p.xy());
+        let base3 = self.pts.last().copied();
         match self.pts.len() {
             0 if self.first.is_some() => Prompt::new("Specify next point", Accept::POINT).kw(&["Undo"]).deferred(),
             0 => Prompt::new("Specify first point", Accept::POINT).deferred(),
-            1 | 2 => Prompt::new("Specify next point", Accept::POINT).kw(&["Vertical", "Undo"]).base_opt(base),
-            _ => Prompt::new("Specify next point", Accept::POINT).kw(&["Close", "Vertical", "Undo"]).base_opt(base),
+            1 | 2 => Prompt::new("Specify next point", Accept::POINT).kw(&["Vertical", "Undo"]).base3_opt(base3),
+            _ => Prompt::new("Specify next point", Accept::POINT).kw(&["Close", "Vertical", "Undo"]).base3_opt(base3),
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
@@ -447,25 +463,8 @@ impl Interactive for LineM {
             && let Some(first) = self.first
         {
             match i {
-                Input::Point(p) => {
-                    // A deferred TAN first point with a typed `@d<a` next point: resolve
-                    // exactly from the direction and distance the user gave.
-                    if let Some((dist, ang)) = s.last_polar.take()
-                        && let Some(t) = snap::tangent_point_in_direction(&first.curve, ang, first.at)
-                    {
-                        let e = t + Vec2::new(ang.cos(), ang.sin()) * dist;
-                        self.handles.push(s.add_entity(line(t, e))?);
-                        self.pts = vec![v3(t), v3(e)];
-                        s.last_point = e;
-                        s.last_point3 = v3(e);
-                        self.first = None;
-                        return Ok(Step::Continue);
-                    }
-                    return self.resolve_first(s, first, snap::LineEnd::Point(p));
-                }
-                Input::Point3(p3) => {
-                    return self.resolve_first(s, first, snap::LineEnd::Point(p3.xy()));
-                }
+                Input::Point(p) => return self.resolve_first_point(s, first, p),
+                Input::Point3(p3) => return self.resolve_first_point(s, first, p3.xy()),
                 Input::Deferred(d) => return self.resolve_first(s, first, snap::LineEnd::Deferred(d)),
                 _ => {}
             }

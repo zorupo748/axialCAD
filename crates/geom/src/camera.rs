@@ -113,12 +113,17 @@ impl OrbitCamera {
         self.project_point(Vec3::new(p.x, p.y, 0.0))
     }
 
-    /// Unproject a 2D camera coordinate (u, v) centered at target onto the specified drawing plane.
+    /// Unproject a 2D camera coordinate (u, v) centered at target onto the specified drawing plane
+    /// at the given coordinate offset along the plane normal.
+    ///
+    /// For DrawingPlane::XY, intersects the camera ray with the plane $Z = \text{offset}$.
+    /// For DrawingPlane::XZ, intersects with $Y = \text{offset}$.
+    /// For DrawingPlane::YZ, intersects with $X = \text{offset}$.
     ///
     /// The camera ray is defined by $P(s) = P_0 + s \cdot v$, where $P_0 = \text{target} + q_x \cdot r + q_y \cdot u$
-    /// and $v$ is the view direction. If the ray is near-parallel to the plane ($|v \cdot n| \le 10^{-4}$),
-    /// a stable fallback projection onto the plane is used without numerical explosion or panic.
-    pub fn unproject_to_drawing_plane(&self, q: Vec2, plane: DrawingPlane) -> Vec3 {
+    /// and $v$ is the view direction. If the ray is near-parallel to the plane ($|v \cdot n| \le 10^{-4}$) or if
+    /// the intersection would yield non-finite or huge coordinates, a stable fallback projection onto the plane is used.
+    pub fn unproject_to_drawing_plane_at(&self, q: Vec2, plane: DrawingPlane, offset: f64) -> Vec3 {
         let r = self.right_dir();
         let u = self.up_dir();
         let v = self.view_dir();
@@ -127,35 +132,52 @@ impl OrbitCamera {
         match plane {
             DrawingPlane::XY => {
                 if self.is_plan() {
-                    return Vec3::new(self.target.x + q.x, self.target.y + q.y, 0.0);
+                    return Vec3::new(self.target.x + q.x, self.target.y + q.y, offset);
                 }
                 if v.z.abs() > 1e-4 {
-                    let s = -p0.z / v.z;
+                    let s = (offset - p0.z) / v.z;
                     let p = p0 + v * s;
-                    Vec3::new(p.x, p.y, 0.0)
+                    if p.x.is_finite() && p.y.is_finite() && p.x.abs() <= 1e8 && p.y.abs() <= 1e8 {
+                        Vec3::new(p.x, p.y, offset)
+                    } else {
+                        Vec3::new(p0.x, p0.y, offset)
+                    }
                 } else {
-                    Vec3::new(p0.x, p0.y, 0.0)
+                    Vec3::new(p0.x, p0.y, offset)
                 }
             }
             DrawingPlane::XZ => {
                 if v.y.abs() > 1e-4 {
-                    let s = -p0.y / v.y;
+                    let s = (offset - p0.y) / v.y;
                     let p = p0 + v * s;
-                    Vec3::new(p.x, 0.0, p.z)
+                    if p.x.is_finite() && p.z.is_finite() && p.x.abs() <= 1e8 && p.z.abs() <= 1e8 {
+                        Vec3::new(p.x, offset, p.z)
+                    } else {
+                        Vec3::new(p0.x, offset, p0.z)
+                    }
                 } else {
-                    Vec3::new(p0.x, 0.0, p0.z)
+                    Vec3::new(p0.x, offset, p0.z)
                 }
             }
             DrawingPlane::YZ => {
                 if v.x.abs() > 1e-4 {
-                    let s = -p0.x / v.x;
+                    let s = (offset - p0.x) / v.x;
                     let p = p0 + v * s;
-                    Vec3::new(0.0, p.y, p.z)
+                    if p.y.is_finite() && p.z.is_finite() && p.y.abs() <= 1e8 && p.z.abs() <= 1e8 {
+                        Vec3::new(offset, p.y, p.z)
+                    } else {
+                        Vec3::new(offset, p0.y, p0.z)
+                    }
                 } else {
-                    Vec3::new(0.0, p0.y, p0.z)
+                    Vec3::new(offset, p0.y, p0.z)
                 }
             }
         }
+    }
+
+    /// Unproject a 2D camera coordinate (u, v) centered at target onto the specified drawing plane.
+    pub fn unproject_to_drawing_plane(&self, q: Vec2, plane: DrawingPlane) -> Vec3 {
+        self.unproject_to_drawing_plane_at(q, plane, 0.0)
     }
 
     /// Unproject a 2D camera plane coordinate (u, v) back onto the construction plane (Z = 0).

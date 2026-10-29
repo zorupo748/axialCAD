@@ -47,15 +47,18 @@ impl Xf {
         if let Some(cam) = &self.camera { cam.unproject_to_plane(q) } else { self.center + q }
     }
     pub fn to_world3(&self, p: Pos2, plane: cadcraft_geom::DrawingPlane) -> Vec3 {
+        self.to_world3_at(p, plane, 0.0)
+    }
+    pub fn to_world3_at(&self, p: Pos2, plane: cadcraft_geom::DrawingPlane, offset: f64) -> Vec3 {
         let c = self.rect.center();
         let q = Vec2::new(f64::from(p.x - c.x) / self.scale, -f64::from(p.y - c.y) / self.scale);
         if let Some(cam) = &self.camera {
-            cam.unproject_to_drawing_plane(q, plane)
+            cam.unproject_to_drawing_plane_at(q, plane, offset)
         } else {
             match plane {
-                cadcraft_geom::DrawingPlane::XY => Vec3::new(self.center.x + q.x, self.center.y + q.y, 0.0),
-                cadcraft_geom::DrawingPlane::XZ => Vec3::new(self.center.x + q.x, 0.0, self.center.y + q.y),
-                cadcraft_geom::DrawingPlane::YZ => Vec3::new(0.0, self.center.x + q.x, self.center.y + q.y),
+                cadcraft_geom::DrawingPlane::XY => Vec3::new(self.center.x + q.x, self.center.y + q.y, offset),
+                cadcraft_geom::DrawingPlane::XZ => Vec3::new(self.center.x + q.x, offset, self.center.y + q.y),
+                cadcraft_geom::DrawingPlane::YZ => Vec3::new(offset, self.center.x + q.x, self.center.y + q.y),
             }
         }
     }
@@ -1662,6 +1665,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
 
     let prompt = app.session.current_prompt();
     let prompt_base = prompt.as_ref().and_then(|p| p.base);
+    let prompt_base3 = prompt.as_ref().and_then(|p| p.base3);
 
     // While a command asks for a point, every click places one, however fast the drafting (#815).
     // egui drops a click whose button comes up a few pixels from where it went down (a drag to it),
@@ -1686,11 +1690,18 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 let plane = app.session.drawing_plane();
                 let pt3 = if app.session.settings.zlock && prompt_base.is_some() {
                     let cam = app.session.camera();
-                    let base3 = app.session.last_point3;
+                    let base3 = prompt_base3.unwrap_or(app.session.last_point3);
                     let c = xf.rect.center();
                     let q = Vec2::new(f64::from(pos.x - c.x) / xf.scale, -f64::from(pos.y - c.y) / xf.scale);
                     let z = cam.unproject_vertical_z(q, base3);
                     Vec3::new(base3.x, base3.y, z)
+                } else if let Some(b3) = prompt_base3 {
+                    let offset = match plane {
+                        cadcraft_geom::DrawingPlane::XY => b3.z,
+                        cadcraft_geom::DrawingPlane::XZ => b3.y,
+                        cadcraft_geom::DrawingPlane::YZ => b3.x,
+                    };
+                    xf.to_world3_at(*pos, plane, offset)
                 } else {
                     xf.to_world3(*pos, plane)
                 };
@@ -1710,7 +1721,12 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     }
 
     let plane = app.session.drawing_plane();
-    let raw_world3 = hover_pos.filter(|_| inside).map(|p| xf.to_world3(p, plane));
+    let plane_offset = prompt_base3.map_or(0.0, |b| match plane {
+        cadcraft_geom::DrawingPlane::XY => b.z,
+        cadcraft_geom::DrawingPlane::XZ => b.y,
+        cadcraft_geom::DrawingPlane::YZ => b.x,
+    });
+    let raw_world3 = hover_pos.filter(|_| inside).map(|p| xf.to_world3_at(p, plane, plane_offset));
     let raw_world = raw_world3.map(|p| p.xy());
     let dyn_frame = crate::cmdline::dyn_frame(app);
     if let (Some(w), Some(w3)) = (raw_world, raw_world3) {
@@ -1733,7 +1749,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         }
         let eff3 = if let (Some(hp), Some(_base2)) = (hover_pos, prompt_base) {
             let cam = app.session.camera();
-            let base3 = app.session.last_point3;
+            let base3 = prompt_base3.unwrap_or(app.session.last_point3);
             let c = xf.rect.center();
             let q = Vec2::new(f64::from(hp.x - c.x) / xf.scale, -f64::from(hp.y - c.y) / xf.scale);
             if app.session.settings.zlock {
@@ -1744,19 +1760,19 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 ortho_pt3
             } else {
                 match plane {
-                    cadcraft_geom::DrawingPlane::XY => Vec3::new(eff.x, eff.y, 0.0),
-                    cadcraft_geom::DrawingPlane::XZ => Vec3::new(w3.x, 0.0, w3.z),
-                    cadcraft_geom::DrawingPlane::YZ => Vec3::new(0.0, w3.y, w3.z),
+                    cadcraft_geom::DrawingPlane::XY => Vec3::new(eff.x, eff.y, prompt_base3.map_or(0.0, |b| b.z)),
+                    cadcraft_geom::DrawingPlane::XZ => Vec3::new(w3.x, prompt_base3.map_or(0.0, |b| b.y), w3.z),
+                    cadcraft_geom::DrawingPlane::YZ => Vec3::new(prompt_base3.map_or(0.0, |b| b.x), w3.y, w3.z),
                 }
             }
         } else {
             match plane {
-                cadcraft_geom::DrawingPlane::XY => Vec3::new(eff.x, eff.y, 0.0),
-                cadcraft_geom::DrawingPlane::XZ => Vec3::new(w3.x, 0.0, w3.z),
-                cadcraft_geom::DrawingPlane::YZ => Vec3::new(0.0, w3.y, w3.z),
+                cadcraft_geom::DrawingPlane::XY => Vec3::new(eff.x, eff.y, prompt_base3.map_or(0.0, |b| b.z)),
+                cadcraft_geom::DrawingPlane::XZ => Vec3::new(w3.x, prompt_base3.map_or(0.0, |b| b.y), w3.z),
+                cadcraft_geom::DrawingPlane::YZ => Vec3::new(prompt_base3.map_or(0.0, |b| b.x), w3.y, w3.z),
             }
         };
-        if app.session.settings.zlock && prompt_base.is_some() {
+        if (app.session.settings.zlock || (app.session.settings.orthomode && !app.session.camera().is_plan())) && prompt_base.is_some() {
             eff = eff3.xy();
             app.canvas.snap = None;
             app.canvas.track = None;
@@ -1841,13 +1857,13 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             }
             // Preserve a snap's viewport origin for DIST, and its deferred curve where needed.
             let result = if app.session.settings.zlock && prompt_base.is_some() {
-                let pt3 = app.canvas.cursor3.unwrap_or_else(|| Vec3::new(p.x, p.y, 0.0));
+                let pt3 = app.canvas.cursor3.unwrap_or_else(|| Vec3::new(p.x, p.y, plane_offset));
                 app.session.input(Input::Point3(pt3))
             } else {
                 match app.canvas.snap {
                     Some(hit) => app.session.input_snapped(hit),
                     None => {
-                        let pt3 = app.canvas.cursor3.unwrap_or_else(|| Vec3::new(p.x, p.y, 0.0));
+                        let pt3 = app.canvas.cursor3.unwrap_or_else(|| Vec3::new(p.x, p.y, plane_offset));
                         app.session.input(Input::Point3(pt3))
                     }
                 }
@@ -3262,7 +3278,7 @@ mod rebuild;
 #[cfg(test)]
 mod hatch_pick_tests {
     use cadcraft_engine::Session;
-    use cadcraft_geom::Vec2;
+    use cadcraft_geom::{Vec2, Vec3};
     use serde_json::json;
 
     use crate::{CadApp, Services};
@@ -3309,77 +3325,170 @@ mod hatch_pick_tests {
     #[test]
     fn canvas_mouse_vertical_line_under_zlock() {
         for view_name in &["front", "swiso"] {
-            let mut app = CadApp::new(Session::new(), Services::default());
-            app.session.execute(&format!("view.{view_name}"), &json!({})).unwrap();
-            let ctx = egui::Context::default();
-            let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
-            let mut time = 0.0;
-            let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
-                time += 0.05;
-                app.logic(&ctx);
-                let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
-                let mut out = ctx.run_ui(input, |ui| app.ui(ui));
-                out.textures_delta.clear();
-            };
+            for mode in &["button", "v_opt"] {
+                println!("\n=== RUNNING TEST view={} mode={} ===", view_name, mode);
+                let mut app = CadApp::new(Session::new(), Services::default());
+                app.session.execute(&format!("view.{view_name}"), &json!({})).unwrap();
+                let ctx = egui::Context::default();
+                let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+                let mut time = 0.0;
+                let frame_id = std::cell::Cell::new(0usize);
+                let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+                    frame_id.set(frame_id.get() + 1);
+                    time += 0.05;
+                    app.logic(&ctx);
+                    let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+                    let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+                    out.textures_delta.clear();
+                };
 
-            // Initial frame to establish canvas layout and xf
-            frame(&mut app, Vec::new());
-            let center = egui::pos2(800.0, 500.0);
+                // Initial frame to establish canvas layout and xf
+                frame(&mut app, Vec::new());
+                let center = egui::pos2(800.0, 500.0);
 
-            // 1. Start LINE
-            app.session.cmdline("line").unwrap();
-            assert!(app.session.prompting());
+                let button = |pos, pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                };
 
-            // 2. Click point 1 at canvas center
-            let button = |pos, pressed| egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::default(),
-            };
-            frame(&mut app, vec![egui::Event::PointerMoved(center)]);
-            frame(&mut app, vec![button(center, true), button(center, false)]);
-            frame(&mut app, Vec::new());
+                if *mode == "button" {
+                    // Case 1: Activate Z-LOCK via status bar button before starting LINE
+                    let zlock_btn_pos = egui::pos2(1166.0, 987.0);
+                    println!("Frame {}: Clicking Z-LOCK button at {:?}", frame_id.get(), zlock_btn_pos);
+                    frame(&mut app, vec![egui::Event::PointerMoved(zlock_btn_pos)]);
+                    frame(&mut app, vec![button(zlock_btn_pos, true), button(zlock_btn_pos, false)]);
+                    frame(&mut app, Vec::new());
+                    println!("After button click: settings.zlock={}", app.session.settings.zlock);
+                    assert!(app.session.settings.zlock, "Z-LOCK button click at {:?} must enable zlock", zlock_btn_pos);
+                }
 
-            let base3 = app.session.last_point3;
+                // 1. Start LINE
+                app.session.cmdline("line").unwrap();
+                assert!(app.session.prompting(), "LINE must be prompting");
 
-            // 3. Enable Z-LOCK
-            app.session.settings.zlock = true;
+                // 2. Click point 1 at canvas center
+                println!("Frame {}: Clicking first point at center {:?}", frame_id.get(), center);
+                frame(&mut app, vec![egui::Event::PointerMoved(center)]);
+                frame(&mut app, vec![button(center, true), button(center, false)]);
+                frame(&mut app, Vec::new());
 
-            // 4. Move pointer vertically by 80 px (in distinct frames)
-            let mut p_curr = center;
-            for _ in 0..4 {
-                p_curr -= egui::vec2(0.0, 20.0);
-                frame(&mut app, vec![egui::Event::PointerMoved(p_curr)]);
+                let prompt_after_p1 = app.session.current_prompt();
+                println!("Prompt after P1: {:?}", prompt_after_p1);
+                assert!(prompt_after_p1.as_ref().and_then(|p| p.base).is_some(), "LINE prompt.base must be Some after P1");
+                let base3 = app.session.last_point3;
+                println!("Base point 3D: {:?}", base3);
+
+                if *mode == "v_opt" {
+                    // Case 2: Start LINE, accept P1, then activate Vertical via V option
+                    assert!(!app.session.settings.zlock, "zlock must be initially off for v_opt");
+                    println!("Frame {}: Typing 'V' to toggle Vertical option", frame_id.get());
+                    let err = app.cmdline("V");
+                    println!("app.cmdline('V') result: {:?}", err);
+                    println!("After 'V': settings.zlock={}", app.session.settings.zlock);
+                    assert!(app.session.settings.zlock, "Typing 'V' must enable zlock");
+                }
+
+                // 4. Move pointer vertically by 80 px (in distinct frames)
+                let mut p_curr = center;
+                for step in 1..=4 {
+                    p_curr -= egui::vec2(0.0, 20.0);
+                    frame(&mut app, vec![egui::Event::PointerMoved(p_curr)]);
+
+                    let xf = app.canvas.xf.expect("canvas.xf must exist");
+                    let cam = app.session.camera();
+                    let c = xf.rect.center();
+                    let q = Vec2::new(f64::from(p_curr.x - c.x) / xf.scale, -f64::from(p_curr.y - c.y) / xf.scale);
+                    let prompt = app.session.current_prompt();
+                    let pbase = prompt.as_ref().and_then(|p| p.base);
+                    let running_id = app.session.running.as_ref().map(|r| r.id.as_str()).unwrap_or("none");
+                    let preview = app.session.preview(app.canvas.cursor.unwrap_or(Vec2::ZERO));
+
+                    println!(
+                        "Step {}: frame={} cmd={} hover_pos={:?} zlock={} ortho={} plane={:?} prompt.base={:?} last_p3={:?} cam_target={:?} scale={} q={:?} eff3={:?} canvas.c3={:?} session.c3={:?} snap={:?} preview_count={}",
+                        step,
+                        frame_id.get(),
+                        running_id,
+                        p_curr,
+                        app.session.settings.zlock,
+                        app.session.settings.orthomode,
+                        app.session.drawing_plane(),
+                        pbase,
+                        app.session.last_point3,
+                        cam.target,
+                        xf.scale,
+                        q,
+                        app.canvas.cursor3,
+                        app.canvas.cursor3,
+                        app.session.cursor3,
+                        app.canvas.snap,
+                        preview.len()
+                    );
+                }
+
+                // 5. Verify cursor3 height changed vertically
+                let c3 = app.canvas.cursor3.expect("cursor3 must be set under zlock");
+                assert!((c3.x - base3.x).abs() < 1e-6, "X must match base: c3.x={}, base.x={}", c3.x, base3.x);
+                assert!((c3.y - base3.y).abs() < 1e-6, "Y must match base: c3.y={}, base.y={}", c3.y, base3.y);
+                assert!((c3.z - base3.z).abs() > 0.1, "Z must change with vertical mouse move, got {}", c3.z);
+
+                // Examine preview geometry
+                let preview = app.session.preview(app.canvas.cursor.expect("canvas.cursor must be set"));
+                assert_eq!(preview.len(), 1, "Preview should contain 1 line");
+                let preview_line = match &preview[0].kind {
+                    cadcraft_doc::EntityKind::Line(l) => l.clone(),
+                    other => panic!("Preview entity must be Line, got {:?}", other),
+                };
+                println!("Preview line endpoints: a={:?}, b={:?}", preview_line.a, preview_line.b);
+                assert!((preview_line.b.x - c3.x).abs() < 1e-6, "Preview endpoint X must match c3.x");
+                assert!((preview_line.b.y - c3.y).abs() < 1e-6, "Preview endpoint Y must match c3.y");
+                assert!((preview_line.b.z - c3.z).abs() < 1e-6, "Preview endpoint Z must match c3.z");
+
+                // 6. Click point 2 at final position
+                println!("Frame {}: Clicking second point at {:?}", frame_id.get(), p_curr);
+                frame(&mut app, vec![button(p_curr, true), button(p_curr, false)]);
+                frame(&mut app, Vec::new());
+
+                // 7. Finish LINE with Enter
+                app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+                // 8. Verify the line in drawing is strictly vertical
+                let doc = app.session.doc().unwrap();
+                let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
+                let line_ent = store
+                    .iter()
+                    .find_map(|e| match &e.kind {
+                        cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+                        _ => None,
+                    })
+                    .expect("vertical line entity must exist in model space");
+
+                println!("Stored line endpoints: a={:?}, b={:?}", line_ent.a, line_ent.b);
+                assert!((line_ent.a.x - line_ent.b.x).abs() < 1e-6, "Line must have identical X: a={:?}, b={:?}", line_ent.a, line_ent.b);
+                assert!((line_ent.a.y - line_ent.b.y).abs() < 1e-6, "Line must have identical Y: a={:?}, b={:?}", line_ent.a, line_ent.b);
+                assert!((line_ent.a.z - line_ent.b.z).abs() > 0.1, "Line must have distinct vertical Z: a={:?}, b={:?}", line_ent.a, line_ent.b);
+
+                // Check gap 2: final endpoint matches last preview endpoint!
+                assert!(
+                    (line_ent.b.x - preview_line.b.x).abs() < 1e-6,
+                    "Stored endpoint X must match preview: line.b.x={}, preview.b.x={}",
+                    line_ent.b.x,
+                    preview_line.b.x
+                );
+                assert!(
+                    (line_ent.b.y - preview_line.b.y).abs() < 1e-6,
+                    "Stored endpoint Y must match preview: line.b.y={}, preview.b.y={}",
+                    line_ent.b.y,
+                    preview_line.b.y
+                );
+                assert!(
+                    (line_ent.b.z - preview_line.b.z).abs() < 1e-6,
+                    "Stored endpoint Z must match preview: line.b.z={}, preview.b.z={}",
+                    line_ent.b.z,
+                    preview_line.b.z
+                );
             }
-
-            // 5. Verify cursor3 height changed vertically
-            let c3 = app.canvas.cursor3.expect("cursor3 must be set under zlock");
-            assert!((c3.x - base3.x).abs() < 1e-6, "X must match base: c3.x={}, base.x={}", c3.x, base3.x);
-            assert!((c3.y - base3.y).abs() < 1e-6, "Y must match base: c3.y={}, base.y={}", c3.y, base3.y);
-            assert!((c3.z - base3.z).abs() > 0.1, "Z must change with vertical mouse move, got {}", c3.z);
-
-            // 6. Click point 2 at final position
-            frame(&mut app, vec![button(p_curr, true), button(p_curr, false)]);
-            frame(&mut app, Vec::new());
-
-            // 7. Finish LINE with Enter
-            app.session.input(cadcraft_engine::Input::Enter).unwrap();
-
-            // 8. Verify the line in drawing is strictly vertical
-            let doc = app.session.doc().unwrap();
-            let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
-            let line_ent = store
-                .iter()
-                .find_map(|e| match &e.kind {
-                    cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
-                    _ => None,
-                })
-                .expect("vertical line entity must exist in model space");
-
-            assert!((line_ent.a.x - line_ent.b.x).abs() < 1e-6, "Line must have identical X: a={:?}, b={:?}", line_ent.a, line_ent.b);
-            assert!((line_ent.a.y - line_ent.b.y).abs() < 1e-6, "Line must have identical Y: a={:?}, b={:?}", line_ent.a, line_ent.b);
-            assert!((line_ent.a.z - line_ent.b.z).abs() > 0.1, "Line must have distinct vertical Z: a={:?}, b={:?}", line_ent.a, line_ent.b);
         }
     }
 
@@ -3427,5 +3536,356 @@ mod hatch_pick_tests {
 
         // When zlock is OFF, line is drawn on drawing plane (free 2D or plane displacement)
         assert!((line_ent.a.x - line_ent.b.x).abs() > 0.01 || (line_ent.a.y - line_ent.b.y).abs() > 0.01);
+    }
+
+    #[test]
+    fn canvas_mouse_elevated_base_horizontal_line_drawing() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        app.session.settings.zlock = false;
+        app.session.settings.orthomode = false;
+        app.session.settings.osmode = 0; // isolate free mouse input
+
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+        let mut time = 0.0;
+        let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        frame(&mut app, Vec::new());
+        let center = egui::pos2(800.0, 500.0);
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+
+        // 1. Start LINE and introduce explicit elevated first point at Z = 10.0
+        app.session.cmdline("line").unwrap();
+        app.session.input(cadcraft_engine::Input::Point3(Vec3::new(0.0, 0.0, 10.0))).unwrap();
+
+        let prompt = app.session.current_prompt().expect("prompt must exist");
+        assert_eq!(prompt.base3, Some(Vec3::new(0.0, 0.0, 10.0)));
+
+        // 2. Move mouse freely without snapping
+        let target_pos = center + egui::vec2(120.0, -80.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(target_pos)]);
+
+        // Verify cursor3 is on plane Z = 10.0
+        let c3 = app.canvas.cursor3.expect("cursor3 must be set");
+        assert!((c3.z - 10.0).abs() < 1e-6, "cursor3.z must be 10.0, got {}", c3.z);
+
+        // Verify reprojection: unprojected point on Z = 10.0 reprojects to mouse pointer
+        let screen_pos = app.canvas.xf.expect("xf").to_screen3(c3);
+        assert!((screen_pos.x - target_pos.x).abs() < 1.0, "screen_pos.x {} != target {}", screen_pos.x, target_pos.x);
+        assert!((screen_pos.y - target_pos.y).abs() < 1.0, "screen_pos.y {} != target {}", screen_pos.y, target_pos.y);
+
+        // Verify preview endpoint
+        let preview = app.session.preview(app.canvas.cursor.expect("cursor"));
+        assert_eq!(preview.len(), 1);
+        let preview_line = match &preview[0].kind {
+            cadcraft_doc::EntityKind::Line(l) => l.clone(),
+            other => panic!("expected Line, got {:?}", other),
+        };
+        assert!((preview_line.a.z - 10.0).abs() < 1e-6);
+        assert!((preview_line.b.z - 10.0).abs() < 1e-6);
+        assert!((preview_line.b.x - c3.x).abs() < 1e-6);
+        assert!((preview_line.b.y - c3.y).abs() < 1e-6);
+
+        // 3. Click second point and finish
+        frame(&mut app, vec![button(target_pos, true), button(target_pos, false)]);
+        frame(&mut app, Vec::new());
+        app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+        // 4. Verify stored line in model space
+        let doc = app.session.doc().unwrap();
+        let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
+        let line_ent = store
+            .iter()
+            .find_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+                _ => None,
+            })
+            .expect("line entity must exist");
+
+        assert!((line_ent.a.z - 10.0).abs() < 1e-6, "start Z must be 10.0, got {}", line_ent.a.z);
+        assert!((line_ent.b.z - 10.0).abs() < 1e-6, "end Z must be 10.0, got {}", line_ent.b.z);
+        assert!((line_ent.b.x - preview_line.b.x).abs() < 1e-6, "stored end X must match preview");
+        assert!((line_ent.b.y - preview_line.b.y).abs() < 1e-6, "stored end Y must match preview");
+        assert!((line_ent.b.z - preview_line.b.z).abs() < 1e-6, "stored end Z must match preview");
+    }
+
+    #[test]
+    fn canvas_mouse_elevated_base_negative_z() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        app.session.settings.zlock = false;
+        app.session.settings.orthomode = false;
+        app.session.settings.osmode = 0;
+
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+        let mut time = 0.0;
+        let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        frame(&mut app, Vec::new());
+        let center = egui::pos2(800.0, 500.0);
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+
+        app.session.cmdline("line").unwrap();
+        app.session.input(cadcraft_engine::Input::Point3(Vec3::new(0.0, 0.0, -15.0))).unwrap();
+
+        let target_pos = center + egui::vec2(-100.0, 70.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(target_pos)]);
+
+        let c3 = app.canvas.cursor3.expect("cursor3 must be set");
+        assert!((c3.z - (-15.0)).abs() < 1e-6, "cursor3.z must be -15.0, got {}", c3.z);
+
+        frame(&mut app, vec![button(target_pos, true), button(target_pos, false)]);
+        frame(&mut app, Vec::new());
+        app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+        let doc = app.session.doc().unwrap();
+        let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
+        let line_ent = store
+            .iter()
+            .find_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+                _ => None,
+            })
+            .expect("line entity must exist");
+
+        assert!((line_ent.a.z - (-15.0)).abs() < 1e-6);
+        assert!((line_ent.b.z - (-15.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn canvas_mouse_horizontal_continuation_after_vertical_v_segment() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        app.session.settings.zlock = false;
+        app.session.settings.orthomode = false;
+        app.session.settings.osmode = 0;
+
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+        let mut time = 0.0;
+        let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        frame(&mut app, Vec::new());
+        let center = egui::pos2(800.0, 500.0);
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+
+        // 1. Start LINE and click P1 at center (Z = 0)
+        app.session.cmdline("line").unwrap();
+        frame(&mut app, vec![egui::Event::PointerMoved(center)]);
+        frame(&mut app, vec![button(center, true), button(center, false)]);
+        frame(&mut app, Vec::new());
+
+        // 2. Enable Vertical constraint with 'V'
+        app.cmdline("V");
+        assert!(app.session.settings.zlock);
+
+        // 3. Move up by 80px and click P2
+        let p_vert = center - egui::vec2(0.0, 80.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(p_vert)]);
+        let c3_vert = app.canvas.cursor3.expect("cursor3 under zlock");
+        let elevated_z = c3_vert.z;
+        assert!(elevated_z.abs() > 0.1);
+
+        frame(&mut app, vec![button(p_vert, true), button(p_vert, false)]);
+        frame(&mut app, Vec::new());
+
+        // 4. Disable Vertical constraint with 'V'
+        app.cmdline("V");
+        assert!(!app.session.settings.zlock);
+
+        // 5. Move horizontally by 100px
+        let p_horiz = p_vert + egui::vec2(100.0, 0.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(p_horiz)]);
+
+        let c3_horiz = app.canvas.cursor3.expect("cursor3 for horizontal move");
+        assert!((c3_horiz.z - elevated_z).abs() < 1e-6, "Horizontal continuation must retain elevated Z={elevated_z}, got {}", c3_horiz.z);
+
+        // Preview matches
+        let preview = app.session.preview(app.canvas.cursor.expect("cursor"));
+        assert_eq!(preview.len(), 1);
+        let preview_line = match &preview[0].kind {
+            cadcraft_doc::EntityKind::Line(l) => l.clone(),
+            other => panic!("expected Line, got {:?}", other),
+        };
+        assert!((preview_line.a.z - elevated_z).abs() < 1e-6);
+        assert!((preview_line.b.z - elevated_z).abs() < 1e-6);
+
+        // 6. Click P3 and finish
+        frame(&mut app, vec![button(p_horiz, true), button(p_horiz, false)]);
+        frame(&mut app, Vec::new());
+        app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+        // 7. Verify both segments in drawing
+        let doc = app.session.doc().unwrap();
+        let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
+        let lines: Vec<_> = store
+            .iter()
+            .filter_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 2);
+
+        // Segment 1 is vertical from Z=0 to elevated_z
+        assert!((lines[0].a.x - lines[0].b.x).abs() < 1e-6);
+        assert!((lines[0].a.y - lines[0].b.y).abs() < 1e-6);
+        assert!((lines[0].a.z - 0.0).abs() < 1e-6);
+        assert!((lines[0].b.z - elevated_z).abs() < 1e-6);
+
+        // Segment 2 is horizontal at elevated_z
+        assert!((lines[1].a.z - elevated_z).abs() < 1e-6);
+        assert!((lines[1].b.z - elevated_z).abs() < 1e-6);
+        assert!((lines[1].b.x - preview_line.b.x).abs() < 1e-6);
+        assert!((lines[1].b.y - preview_line.b.y).abs() < 1e-6);
+    }
+
+    #[test]
+    fn canvas_mouse_ortho_3d_preserves_elevated_base() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        app.session.settings.zlock = false;
+        app.session.settings.orthomode = true;
+        app.session.settings.osmode = 0;
+
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+        let mut time = 0.0;
+        let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        frame(&mut app, Vec::new());
+        let center = egui::pos2(800.0, 500.0);
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+
+        app.session.cmdline("line").unwrap();
+        app.session.input(cadcraft_engine::Input::Point3(Vec3::new(0.0, 0.0, 10.0))).unwrap();
+
+        // Move horizontally along screen X (picks 3D horizontal axis X or Y)
+        let target_pos = center + egui::vec2(150.0, 0.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(target_pos)]);
+
+        let c3 = app.canvas.cursor3.expect("cursor3 must be set under 3D ortho");
+        assert!((c3.z - 10.0).abs() < 1e-6, "3D ortho along horizontal axis must retain base Z=10.0, got {}", c3.z);
+
+        frame(&mut app, vec![button(target_pos, true), button(target_pos, false)]);
+        frame(&mut app, Vec::new());
+        app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+        let doc = app.session.doc().unwrap();
+        let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
+        let line_ent = store
+            .iter()
+            .find_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+                _ => None,
+            })
+            .expect("line entity must exist");
+
+        assert!((line_ent.a.z - 10.0).abs() < 1e-6);
+        assert!((line_ent.b.z - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn canvas_mouse_new_line_does_not_inherit_previous_elevation() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        app.session.settings.zlock = false;
+        app.session.settings.orthomode = false;
+        app.session.settings.osmode = 0;
+
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+        let mut time = 0.0;
+        let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        frame(&mut app, Vec::new());
+        let center = egui::pos2(800.0, 500.0);
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+
+        // 1. Draw an elevated line at Z = 25.0
+        app.session.cmdline("line").unwrap();
+        app.session.input(cadcraft_engine::Input::Point3(Vec3::new(0.0, 0.0, 25.0))).unwrap();
+        let target_pos = center + egui::vec2(80.0, -40.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(target_pos)]);
+        frame(&mut app, vec![button(target_pos, true), button(target_pos, false)]);
+        frame(&mut app, Vec::new());
+        app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+        // Verify last_point3 was at 25.0
+        assert!((app.session.last_point3.z - 25.0).abs() < 1e-6);
+
+        // 2. Start a completely NEW LINE command with free mouse clicking
+        app.session.cmdline("line").unwrap();
+        let prompt = app.session.current_prompt().expect("prompt");
+        assert!(prompt.base3.is_none(), "New command must not have base3");
+
+        // Click P1 at center
+        frame(&mut app, vec![egui::Event::PointerMoved(center)]);
+        let c3_p1 = app.canvas.cursor3.expect("cursor3 for P1");
+        assert_eq!(c3_p1.z, 0.0, "First point of new command must be at Z=0.0");
+
+        frame(&mut app, vec![button(center, true), button(center, false)]);
+        frame(&mut app, Vec::new());
+
+        // Move to P2 and click
+        let p2_pos = center + egui::vec2(60.0, 60.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(p2_pos)]);
+        let c3_p2 = app.canvas.cursor3.expect("cursor3 for P2");
+        assert_eq!(c3_p2.z, 0.0, "Second point from base Z=0 must stay at Z=0.0");
+
+        frame(&mut app, vec![button(p2_pos, true), button(p2_pos, false)]);
+        frame(&mut app, Vec::new());
+        app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+        // 3. Verify the second line was drawn at Z = 0.0
+        let doc = app.session.doc().unwrap();
+        let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
+        let lines: Vec<_> = store
+            .iter()
+            .filter_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert!((lines[1].a.z - 0.0).abs() < 1e-6, "New line start must be at Z=0, got {}", lines[1].a.z);
+        assert!((lines[1].b.z - 0.0).abs() < 1e-6, "New line end must be at Z=0, got {}", lines[1].b.z);
     }
 }

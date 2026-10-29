@@ -10,7 +10,7 @@
 //! line and in scripts alike, and they nest (`FROM` then `M2P`).
 
 use cadcraft_doc::{Drawing, Space};
-use cadcraft_geom::Vec2;
+use cadcraft_geom::{Vec2, Vec3};
 
 use crate::prompt::{Accept, Input, Prompt};
 use crate::snap::{SnapHit, mode};
@@ -311,11 +311,13 @@ impl Session {
                     self.point_mods.push(Frame::From { base: Some(p) });
                     // `@dx,dy` at "<Offset>:" is measured from the base point.
                     self.last_point = p;
+                    self.last_point3 = Vec3::new(p.x, p.y, self.last_point3.z);
                     return Ok(());
                 }
                 Frame::Mid { first: None } => {
                     self.point_mods.push(Frame::Mid { first: Some(p) });
                     self.last_point = p;
+                    self.last_point3 = Vec3::new(p.x, p.y, self.last_point3.z);
                     return Ok(());
                 }
                 Frame::Filter { keep, first: None } => {
@@ -325,6 +327,7 @@ impl Session {
                 Frame::TempTrack => {
                     self.tracking.acquire_temporary(p);
                     self.last_point = p;
+                    self.last_point3 = Vec3::new(p.x, p.y, self.last_point3.z);
                     return Ok(());
                 }
                 Frame::Track { last } => {
@@ -332,6 +335,7 @@ impl Session {
                     let q = last.map_or(p, |l| crate::snap::ortho(l, p));
                     self.point_mods.push(Frame::Track { last: Some(q) });
                     self.last_point = q;
+                    self.last_point3 = Vec3::new(q.x, q.y, self.last_point3.z);
                     return Ok(());
                 }
                 // The offset point is already measured from the base (`@` reads the last point).

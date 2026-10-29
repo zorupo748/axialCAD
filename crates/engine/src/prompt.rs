@@ -37,6 +37,9 @@ pub struct Prompt {
     pub accept: Accept,
     /// Rubber-band origin (for direct distance entry, ortho and polar).
     pub base: Option<Vec2>,
+    /// 3D base point when available (e.g. continuing a 3D line from an elevated vertex).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base3: Option<Vec3>,
     /// The command resolves deferred tangent/perpendicular snaps ([`Input::Deferred`]) at this
     /// prompt (a point with no base yet, e.g. the first point of a line). Elsewhere a deferred
     /// pick arrives as the plain point it was picked at.
@@ -110,6 +113,16 @@ impl Prompt {
     }
     pub fn base_opt(mut self, p: Option<Vec2>) -> Self {
         self.base = p;
+        self
+    }
+    pub fn base3(mut self, p: Vec3) -> Self {
+        self.base = Some(p.xy());
+        self.base3 = Some(p);
+        self
+    }
+    pub fn base3_opt(mut self, p: Option<Vec3>) -> Self {
+        self.base = p.map(|pt| pt.xy());
+        self.base3 = p;
         self
     }
     /// The base is a window's first corner (the `corner` field).
