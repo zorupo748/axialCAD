@@ -80,6 +80,15 @@ fn same_content(a: &ListKey, b: &ListKey) -> bool {
     (a.0, a.1, a.4, a.5, a.6, a.7) == (b.0, b.1, b.4, b.5, b.6, b.7)
 }
 
+/// Embed a 2D plane coordinate `p` into 3D world coordinates for the given drawing plane and offset.
+pub(crate) fn point_on_plane(p: Vec2, plane: cadcraft_geom::DrawingPlane, offset: f64) -> Vec3 {
+    match plane {
+        cadcraft_geom::DrawingPlane::XY => Vec3::new(p.x, p.y, offset),
+        cadcraft_geom::DrawingPlane::XZ => Vec3::new(p.x, offset, p.y),
+        cadcraft_geom::DrawingPlane::YZ => Vec3::new(offset, p.x, p.y),
+    }
+}
+
 #[derive(Default)]
 pub struct CanvasState {
     pub list: Option<DisplayList>,
@@ -1664,8 +1673,6 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     }
 
     let prompt = app.session.current_prompt();
-    let prompt_base = prompt.as_ref().and_then(|p| p.base);
-    let prompt_base3 = prompt.as_ref().and_then(|p| p.base3);
 
     // While a command asks for a point, every click places one, however fast the drafting (#815).
     // egui drops a click whose button comes up a few pixels from where it went down (a drag to it),
@@ -1687,15 +1694,25 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         // The last one is placed below, at the cursor, like any click.
         if let Some((_, earlier)) = releases.split_last() {
             for pos in earlier.iter().filter(|p| rect.contains(**p)) {
+                if !app.session.prompting() {
+                    break;
+                }
+                let loop_prompt = app.session.current_prompt();
+                if !loop_prompt.as_ref().is_some_and(cadcraft_engine::pointmod::accepts) {
+                    break;
+                }
+                let loop_base = loop_prompt.as_ref().and_then(|p| p.base);
+                let loop_base3 = loop_prompt.as_ref().and_then(|p| p.base3);
+
                 let plane = app.session.drawing_plane();
-                let pt3 = if app.session.settings.zlock && prompt_base.is_some() {
+                let pt3 = if app.session.settings.zlock && loop_base.is_some() {
                     let cam = app.session.camera();
-                    let base3 = prompt_base3.unwrap_or(app.session.last_point3);
+                    let base3 = loop_base3.unwrap_or(app.session.last_point3);
                     let c = xf.rect.center();
                     let q = Vec2::new(f64::from(pos.x - c.x) / xf.scale, -f64::from(pos.y - c.y) / xf.scale);
                     let z = cam.unproject_vertical_z(q, base3);
                     Vec3::new(base3.x, base3.y, z)
-                } else if let Some(b3) = prompt_base3 {
+                } else if let Some(b3) = loop_base3 {
                     let offset = match plane {
                         cadcraft_geom::DrawingPlane::XY => b3.z,
                         cadcraft_geom::DrawingPlane::XZ => b3.y,
@@ -1705,20 +1722,21 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 } else {
                     xf.to_world3(*pos, plane)
                 };
-                let result = if app.session.settings.zlock && prompt_base.is_some() {
-                    app.session.input(Input::Point3(pt3))
-                } else {
-                    match app.canvas.snap {
-                        Some(hit) => app.session.input_snapped(hit),
-                        None => app.session.input(Input::Point3(pt3)),
-                    }
-                };
+                if !pt3.is_finite() {
+                    app.session.echo("Point coordinates must be finite.");
+                    continue;
+                }
+                let result = app.session.input(Input::Point3(pt3));
                 if let Err(e) = result {
                     app.session.echo(e.to_string());
                 }
             }
         }
     }
+
+    let prompt = app.session.current_prompt();
+    let prompt_base = prompt.as_ref().and_then(|p| p.base);
+    let prompt_base3 = prompt.as_ref().and_then(|p| p.base3);
 
     let plane = app.session.drawing_plane();
     let plane_offset = prompt_base3.map_or(0.0, |b| match plane {
@@ -1729,7 +1747,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     let raw_world3 = hover_pos.filter(|_| inside).map(|p| xf.to_world3_at(p, plane, plane_offset));
     let raw_world = raw_world3.map(|p| p.xy());
     let dyn_frame = crate::cmdline::dyn_frame(app);
-    if let (Some(w), Some(w3)) = (raw_world, raw_world3) {
+    if let (Some(w), Some(_w3)) = (raw_world, raw_world3) {
         let mut eff = effective_point(app, w, &xf, ui.ctx());
         // A locked Dynamic Input value (`40,` or `40<` typed) holds the cursor and overrides snaps.
         if let Some(f) = dyn_frame
@@ -1755,26 +1773,21 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             if app.session.settings.zlock {
                 let z = cam.unproject_vertical_z(q, base3);
                 Vec3::new(base3.x, base3.y, z)
-            } else if app.session.settings.orthomode && !cam.is_plan() {
+            } else if app.session.settings.orthomode && !cam.is_plan() && prompt_base3.is_some() && app.canvas.snap.is_none() {
                 let (ortho_pt3, _) = cam.closest_axis_3d(q, base3);
                 ortho_pt3
             } else {
-                match plane {
-                    cadcraft_geom::DrawingPlane::XY => Vec3::new(eff.x, eff.y, prompt_base3.map_or(0.0, |b| b.z)),
-                    cadcraft_geom::DrawingPlane::XZ => Vec3::new(w3.x, prompt_base3.map_or(0.0, |b| b.y), w3.z),
-                    cadcraft_geom::DrawingPlane::YZ => Vec3::new(prompt_base3.map_or(0.0, |b| b.x), w3.y, w3.z),
-                }
+                point_on_plane(eff, plane, plane_offset)
             }
         } else {
-            match plane {
-                cadcraft_geom::DrawingPlane::XY => Vec3::new(eff.x, eff.y, prompt_base3.map_or(0.0, |b| b.z)),
-                cadcraft_geom::DrawingPlane::XZ => Vec3::new(w3.x, prompt_base3.map_or(0.0, |b| b.y), w3.z),
-                cadcraft_geom::DrawingPlane::YZ => Vec3::new(prompt_base3.map_or(0.0, |b| b.x), w3.y, w3.z),
-            }
+            point_on_plane(eff, plane, plane_offset)
         };
-        if (app.session.settings.zlock || (app.session.settings.orthomode && !app.session.camera().is_plan())) && prompt_base.is_some() {
+        if app.session.settings.zlock && prompt_base.is_some() {
             eff = eff3.xy();
             app.canvas.snap = None;
+            app.canvas.track = None;
+        } else if app.session.settings.orthomode && !app.session.camera().is_plan() && prompt_base3.is_some() && app.canvas.snap.is_none() {
+            eff = eff3.xy();
             app.canvas.track = None;
         }
         app.canvas.cursor = Some(eff);
@@ -1857,14 +1870,24 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             }
             // Preserve a snap's viewport origin for DIST, and its deferred curve where needed.
             let result = if app.session.settings.zlock && prompt_base.is_some() {
-                let pt3 = app.canvas.cursor3.unwrap_or_else(|| Vec3::new(p.x, p.y, plane_offset));
-                app.session.input(Input::Point3(pt3))
+                let pt3 = app.canvas.cursor3.unwrap_or_else(|| point_on_plane(p, plane, plane_offset));
+                if pt3.is_finite() {
+                    app.session.input(Input::Point3(pt3))
+                } else {
+                    app.session.echo("Point coordinates must be finite.");
+                    Ok(())
+                }
             } else {
                 match app.canvas.snap {
                     Some(hit) => app.session.input_snapped(hit),
                     None => {
-                        let pt3 = app.canvas.cursor3.unwrap_or_else(|| Vec3::new(p.x, p.y, plane_offset));
-                        app.session.input(Input::Point3(pt3))
+                        let pt3 = app.canvas.cursor3.unwrap_or_else(|| point_on_plane(p, plane, plane_offset));
+                        if pt3.is_finite() {
+                            app.session.input(Input::Point3(pt3))
+                        } else {
+                            app.session.echo("Point coordinates must be finite.");
+                            Ok(())
+                        }
                     }
                 }
             };
@@ -3281,6 +3304,7 @@ mod hatch_pick_tests {
     use cadcraft_geom::{Vec2, Vec3};
     use serde_json::json;
 
+    use super::point_on_plane;
     use crate::{CadApp, Services};
 
     #[test]
@@ -3887,5 +3911,253 @@ mod hatch_pick_tests {
         assert_eq!(lines.len(), 2);
         assert!((lines[1].a.z - 0.0).abs() < 1e-6, "New line start must be at Z=0, got {}", lines[1].a.z);
         assert!((lines[1].b.z - 0.0).abs() < 1e-6, "New line end must be at Z=0, got {}", lines[1].b.z);
+    }
+
+    #[test]
+    fn test_fallback_point_on_plane_xy_xz_yz() {
+        let p = Vec2::new(14.0, 28.0);
+
+        // DrawingPlane::XY: offset is Z
+        let pt_xy = point_on_plane(p, cadcraft_geom::DrawingPlane::XY, 50.0);
+        assert_eq!(pt_xy, Vec3::new(14.0, 28.0, 50.0));
+        assert!(pt_xy.is_finite());
+
+        // DrawingPlane::XZ: offset is Y
+        let pt_xz = point_on_plane(p, cadcraft_geom::DrawingPlane::XZ, -35.0);
+        assert_eq!(pt_xz, Vec3::new(14.0, -35.0, 28.0));
+        assert!(pt_xz.is_finite());
+
+        // DrawingPlane::YZ: offset is X
+        let pt_yz = point_on_plane(p, cadcraft_geom::DrawingPlane::YZ, 77.0);
+        assert_eq!(pt_yz, Vec3::new(77.0, 14.0, 28.0));
+        assert!(pt_yz.is_finite());
+    }
+
+    #[test]
+    fn test_osnap_priority_over_ortho_in_3d() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        app.session.settings.zlock = false;
+        app.session.settings.orthomode = true;
+        app.session.settings.osmode = 1; // Endpoint snap
+
+        // Create an existing line from (0, 0, 0) to (10, 0, 0)
+        app.session.execute("line", &json!({"points": [[0, 0], [10, 0]]})).unwrap();
+
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+        let mut time = 0.0;
+        let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        frame(&mut app, Vec::new());
+
+        // Start LINE command with initial base at Z = 0.0
+        app.session.cmdline("line").unwrap();
+        app.session.input(cadcraft_engine::Input::Point3(Vec3::new(0.0, 5.0, 0.0))).unwrap();
+
+        // Calculate screen position of the existing endpoint (10, 0, 0) using canvas transform
+        let xf = app.canvas.xf.expect("xf must be set");
+        let snap_pos = xf.to_screen(Vec2::new(10.0, 0.0));
+
+        // Hover over the endpoint
+        frame(&mut app, vec![egui::Event::PointerMoved(snap_pos)]);
+
+        // OSNAP must take priority over ORTHO in 3D: snap must NOT be wiped out!
+        assert!(app.canvas.snap.is_some(), "OSNAP must be detected and not overridden by 3D ORTHO");
+        let snap_hit = app.canvas.snap.unwrap();
+        assert!((snap_hit.point.x - 10.0).abs() < 1e-4);
+        assert!((snap_hit.point.y - 0.0).abs() < 1e-4);
+
+        // Click to confirm the snapped point
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+        frame(&mut app, vec![button(snap_pos, true), button(snap_pos, false)]);
+        frame(&mut app, Vec::new());
+        app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+        // Check the newly created line in model space
+        let doc = app.session.doc().unwrap();
+        let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
+        let lines: Vec<_> = store
+            .iter()
+            .filter_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 2);
+        // The newly drawn line starts at base (0, 5, 0) and ends at the snapped (10, 0, 0)
+        assert!((lines[1].a.x - 0.0).abs() < 1e-4);
+        assert!((lines[1].a.y - 5.0).abs() < 1e-4);
+        assert!((lines[1].a.z - 0.0).abs() < 1e-4);
+        assert!((lines[1].b.x - 10.0).abs() < 1e-4);
+        assert!((lines[1].b.y - 0.0).abs() < 1e-4);
+        assert!((lines[1].b.z - 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_2d_command_with_prompt_base_in_3d_view_keeps_snaps() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        app.session.settings.zlock = false;
+        app.session.settings.orthomode = true;
+        app.session.settings.osmode = 1; // Endpoint snap
+
+        // Create an existing line from (10, 10, 0) to (30, 10, 0)
+        app.session.execute("line", &json!({"points": [[10, 10], [30, 10]]})).unwrap();
+
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+        let mut time = 0.0;
+        let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        frame(&mut app, Vec::new());
+
+        // Start RECTANG command (2D command) and place first corner at (0, 0)
+        app.session.cmdline("rectang").unwrap();
+        app.session.cmdline("0,0").unwrap();
+
+        let prompt = app.session.current_prompt().expect("prompt");
+        assert!(prompt.base.is_some(), "RECTANG must have 2D base");
+        assert!(prompt.base3.is_none(), "RECTANG must NOT have base3");
+
+        // Hover over the endpoint (10, 10, 0) using canvas transform
+        let xf = app.canvas.xf.expect("xf must be set");
+        let snap_pos = xf.to_screen(Vec2::new(10.0, 10.0));
+        frame(&mut app, vec![egui::Event::PointerMoved(snap_pos)]);
+
+        // Snap must NOT be cleared by 3D ORTHO for 2D commands!
+        assert!(app.canvas.snap.is_some(), "2D commands with prompt_base must preserve OSNAP in 3D views");
+    }
+
+    #[test]
+    fn test_non_finite_point_rejected_without_creating_entity_or_advancing_base() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+        let mut time = 0.0;
+        let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        frame(&mut app, Vec::new());
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+
+        // Start LINE command and establish a first point at (0, 0)
+        app.session.cmdline("line 0,0").unwrap();
+        assert!(app.session.prompting());
+        assert_eq!(app.session.current_prompt().unwrap().base, Some(Vec2::new(0.0, 0.0)));
+
+        // Enable zlock and corrupt camera target with NaN so unproject_vertical_z produces NaN
+        app.session.settings.zlock = true;
+        let mut cam = app.session.camera();
+        cam.target.x = f64::NAN;
+        app.session.set_camera(cam);
+
+        let xf = app.canvas.xf.expect("xf must be set");
+        let click_pos = xf.to_screen(Vec2::new(5.0, 5.0));
+
+        // Click on canvas
+        frame(&mut app, vec![button(click_pos, true), button(click_pos, false)]);
+        frame(&mut app, Vec::new());
+
+        // 1. Command must NOT have terminated or crashed
+        assert!(app.session.prompting(), "Command must stay open awaiting a valid point");
+
+        // 2. Base point must NOT have advanced away from (0, 0)
+        let prompt = app.session.current_prompt().expect("prompt");
+        assert_eq!(prompt.base, Some(Vec2::new(0.0, 0.0)), "Base point must not advance on invalid point rejection");
+
+        // 3. Document must NOT have created any line entity
+        let doc = app.session.doc().unwrap();
+        let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
+        assert_eq!(store.iter().count(), 0, "No entity must be created when rejecting non-finite point");
+    }
+
+    #[test]
+    fn test_multiple_clicks_in_same_frame_updates_base() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        app.session.settings.zlock = true; // Z-LOCK enabled for vertical line creation
+        app.session.settings.orthomode = false;
+        app.session.settings.osmode = 0;
+
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+        let mut time = 0.0;
+        let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        frame(&mut app, Vec::new());
+
+        // Start LINE command with NO prior point: prompt is "Specify first point", base is None
+        app.session.cmdline("line").unwrap();
+        assert!(app.session.current_prompt().unwrap().base.is_none());
+
+        // In a single frame, provide two clicks:
+        // Click 1: places first point at (0, 0, 0).
+        // Click 2: must read the newly placed base (0, 0, 0) and, because zlock is true and base is now Some,
+        //          unproject vertically along Z, keeping X=0, Y=0 and generating Z > 0!
+        let xf = app.canvas.xf.expect("xf must be set");
+        let pos1 = xf.to_screen(Vec2::new(0.0, 0.0));
+        let pos2 = pos1 + egui::vec2(0.0, -80.0); // Moving vertically on screen in swiso
+
+        let events = vec![
+            egui::Event::PointerMoved(pos2),
+            egui::Event::PointerButton { pos: pos1, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::default() },
+            egui::Event::PointerButton { pos: pos2, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::default() },
+            egui::Event::PointerButton { pos: pos2, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::default() },
+        ];
+        frame(&mut app, events);
+        frame(&mut app, Vec::new());
+        app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+        // Verify entity created
+        let doc = app.session.doc().unwrap();
+        let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
+        let lines: Vec<_> = store
+            .iter()
+            .filter_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(lines.len(), 1, "One line segment should have been created in the frame");
+        // Verify start point is at (0, 0, 0)
+        assert!((lines[0].a.x - 0.0).abs() < 1e-4, "Start X must be 0, got {}", lines[0].a.x);
+        assert!((lines[0].a.y - 0.0).abs() < 1e-4, "Start Y must be 0, got {}", lines[0].a.y);
+        assert!((lines[0].a.z - 0.0).abs() < 1e-4, "Start Z must be 0, got {}", lines[0].a.z);
+
+        // If the base update failed (stale base), loop_base was None, so zlock did not trigger,
+        // which would have placed a horizontal line on the ground plane (lines[0].b.z == 0.0, lines[0].b.x != 0.0).
+        // With fresh base update, zlock triggers: X and Y remain 0.0 and Z is strictly vertical (> 0.0)!
+        assert!((lines[0].b.x - 0.0).abs() < 1e-4, "Under zlock with fresh base, End X must remain 0.0, got {}", lines[0].b.x);
+        assert!((lines[0].b.y - 0.0).abs() < 1e-4, "Under zlock with fresh base, End Y must remain 0.0, got {}", lines[0].b.y);
+        assert!(lines[0].b.z > 1.0, "Under zlock with fresh base, End Z must be vertical (> 1.0), got {}", lines[0].b.z);
     }
 }

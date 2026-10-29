@@ -122,7 +122,12 @@ impl OrbitCamera {
     ///
     /// The camera ray is defined by $P(s) = P_0 + s \cdot v$, where $P_0 = \text{target} + q_x \cdot r + q_y \cdot u$
     /// and $v$ is the view direction. If the ray is near-parallel to the plane ($|v \cdot n| \le 10^{-4}$) or if
-    /// the intersection would yield non-finite or huge coordinates, a stable fallback projection onto the plane is used.
+    /// the intersection computation overflows/yields non-finite coordinates, a stable fallback projection onto the plane is used.
+    ///
+    /// Note that when the view direction is near-parallel to the drawing plane normal ($|v \cdot n| \le 10^{-4}$),
+    /// the camera looks edge-on to the drawing plane. Exact pointer correspondence cannot be maintained because
+    /// the line of sight does not transversally intersect the plane; projecting $P_0$ orthogonally onto the drawing plane
+    /// ensures stable, finite coordinates without jumping.
     pub fn unproject_to_drawing_plane_at(&self, q: Vec2, plane: DrawingPlane, offset: f64) -> Vec3 {
         let r = self.right_dir();
         let u = self.up_dir();
@@ -137,39 +142,39 @@ impl OrbitCamera {
                 if v.z.abs() > 1e-4 {
                     let s = (offset - p0.z) / v.z;
                     let p = p0 + v * s;
-                    if p.x.is_finite() && p.y.is_finite() && p.x.abs() <= 1e8 && p.y.abs() <= 1e8 {
+                    if p.x.is_finite() && p.y.is_finite() {
                         Vec3::new(p.x, p.y, offset)
                     } else {
-                        Vec3::new(p0.x, p0.y, offset)
+                        Vec3::new(if p0.x.is_finite() { p0.x } else { 0.0 }, if p0.y.is_finite() { p0.y } else { 0.0 }, offset)
                     }
                 } else {
-                    Vec3::new(p0.x, p0.y, offset)
+                    Vec3::new(if p0.x.is_finite() { p0.x } else { 0.0 }, if p0.y.is_finite() { p0.y } else { 0.0 }, offset)
                 }
             }
             DrawingPlane::XZ => {
                 if v.y.abs() > 1e-4 {
                     let s = (offset - p0.y) / v.y;
                     let p = p0 + v * s;
-                    if p.x.is_finite() && p.z.is_finite() && p.x.abs() <= 1e8 && p.z.abs() <= 1e8 {
+                    if p.x.is_finite() && p.z.is_finite() {
                         Vec3::new(p.x, offset, p.z)
                     } else {
-                        Vec3::new(p0.x, offset, p0.z)
+                        Vec3::new(if p0.x.is_finite() { p0.x } else { 0.0 }, offset, if p0.z.is_finite() { p0.z } else { 0.0 })
                     }
                 } else {
-                    Vec3::new(p0.x, offset, p0.z)
+                    Vec3::new(if p0.x.is_finite() { p0.x } else { 0.0 }, offset, if p0.z.is_finite() { p0.z } else { 0.0 })
                 }
             }
             DrawingPlane::YZ => {
                 if v.x.abs() > 1e-4 {
                     let s = (offset - p0.x) / v.x;
                     let p = p0 + v * s;
-                    if p.y.is_finite() && p.z.is_finite() && p.y.abs() <= 1e8 && p.z.abs() <= 1e8 {
+                    if p.y.is_finite() && p.z.is_finite() {
                         Vec3::new(offset, p.y, p.z)
                     } else {
-                        Vec3::new(offset, p0.y, p0.z)
+                        Vec3::new(offset, if p0.y.is_finite() { p0.y } else { 0.0 }, if p0.z.is_finite() { p0.z } else { 0.0 })
                     }
                 } else {
-                    Vec3::new(offset, p0.y, p0.z)
+                    Vec3::new(offset, if p0.y.is_finite() { p0.y } else { 0.0 }, if p0.z.is_finite() { p0.z } else { 0.0 })
                 }
             }
         }
@@ -666,5 +671,119 @@ mod tests {
         assert_eq!(pt.y, base.y);
         assert!(pt.z > base.z);
         assert!(delta > 0.0);
+    }
+
+    #[test]
+    fn test_unproject_to_drawing_plane_at_elevations_positive_negative() {
+        let mut cam = OrbitCamera::default();
+        cam.set_preset("swiso");
+
+        // Positive elevation offset on XY
+        let pt_pos = Vec3::new(30.0, 45.0, 150.0);
+        let q_pos = cam.project_point(pt_pos);
+        let res_pos = cam.unproject_to_drawing_plane_at(q_pos, DrawingPlane::XY, 150.0);
+        assert!((res_pos.x - pt_pos.x).abs() < 1e-9);
+        assert!((res_pos.y - pt_pos.y).abs() < 1e-9);
+        assert_eq!(res_pos.z, 150.0);
+
+        // Negative elevation offset on XY
+        let pt_neg = Vec3::new(-120.0, 80.0, -250.0);
+        let q_neg = cam.project_point(pt_neg);
+        let res_neg = cam.unproject_to_drawing_plane_at(q_neg, DrawingPlane::XY, -250.0);
+        assert!((res_neg.x - pt_neg.x).abs() < 1e-9);
+        assert!((res_neg.y - pt_neg.y).abs() < 1e-9);
+        assert_eq!(res_neg.z, -250.0);
+    }
+
+    #[test]
+    fn test_unproject_to_drawing_plane_at_planes_xy_xz_yz_and_reprojection() {
+        let mut cam = OrbitCamera::default();
+        cam.set_preset("swiso");
+
+        // DrawingPlane::XY (Z = 42.0)
+        let pt_xy = Vec3::new(12.5, 34.2, 42.0);
+        let q_xy = cam.project_point(pt_xy);
+        let unproj_xy = cam.unproject_to_drawing_plane_at(q_xy, DrawingPlane::XY, 42.0);
+        assert!((unproj_xy.x - pt_xy.x).abs() < 1e-9);
+        assert!((unproj_xy.y - pt_xy.y).abs() < 1e-9);
+        assert_eq!(unproj_xy.z, 42.0);
+        let reproj_xy = cam.project_point(unproj_xy);
+        assert!((reproj_xy.x - q_xy.x).abs() < 1e-9);
+        assert!((reproj_xy.y - q_xy.y).abs() < 1e-9);
+
+        // DrawingPlane::XZ (Y = -18.5)
+        let pt_xz = Vec3::new(55.0, -18.5, 90.0);
+        let q_xz = cam.project_point(pt_xz);
+        let unproj_xz = cam.unproject_to_drawing_plane_at(q_xz, DrawingPlane::XZ, -18.5);
+        assert!((unproj_xz.x - pt_xz.x).abs() < 1e-9);
+        assert_eq!(unproj_xz.y, -18.5);
+        assert!((unproj_xz.z - pt_xz.z).abs() < 1e-9);
+        let reproj_xz = cam.project_point(unproj_xz);
+        assert!((reproj_xz.x - q_xz.x).abs() < 1e-9);
+        assert!((reproj_xz.y - q_xz.y).abs() < 1e-9);
+
+        // DrawingPlane::YZ (X = 105.0)
+        let pt_yz = Vec3::new(105.0, -70.0, 30.0);
+        let q_yz = cam.project_point(pt_yz);
+        let unproj_yz = cam.unproject_to_drawing_plane_at(q_yz, DrawingPlane::YZ, 105.0);
+        assert_eq!(unproj_yz.x, 105.0);
+        assert!((unproj_yz.y - pt_yz.y).abs() < 1e-9);
+        assert!((unproj_yz.z - pt_yz.z).abs() < 1e-9);
+        let reproj_yz = cam.project_point(unproj_yz);
+        assert!((reproj_yz.x - q_yz.x).abs() < 1e-9);
+        assert!((reproj_yz.y - q_yz.y).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_unproject_large_valid_coordinates_not_rejected() {
+        let mut cam = OrbitCamera::default();
+        cam.set_preset("swiso");
+
+        // Camera target shifted to large coordinates (e.g. 5e8, beyond former 1e8 limit)
+        cam.target = Vec3::new(5e8, 5e8, 1e8);
+        let pt = Vec3::new(5e8 + 1234.5, 5e8 + 6789.0, 1e8 + 50.0);
+        let q = cam.project_point(pt);
+
+        let unproj = cam.unproject_to_drawing_plane_at(q, DrawingPlane::XY, 1e8 + 50.0);
+        assert!((unproj.x - pt.x).abs() < 1e-4);
+        assert!((unproj.y - pt.y).abs() < 1e-4);
+        assert_eq!(unproj.z, 1e8 + 50.0);
+
+        // Reprojection check
+        let reproj = cam.project_point(unproj);
+        assert!((reproj.x - q.x).abs() < 1e-9);
+        assert!((reproj.y - q.y).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_unproject_parallel_and_near_parallel_returns_finite_fallback() {
+        let mut cam = OrbitCamera::default();
+
+        // View direction parallel to XY plane: "front" view (elevation = 0) -> v.z = 0
+        cam.set_preset("front");
+        let q = Vec2::new(10.0, 20.0);
+        let unproj_xy = cam.unproject_to_drawing_plane_at(q, DrawingPlane::XY, 75.0);
+        assert!(unproj_xy.x.is_finite());
+        assert!(unproj_xy.y.is_finite());
+        assert_eq!(unproj_xy.z, 75.0);
+
+        // Near-parallel to XY plane: grazing angle elevation = 5e-5 < 1e-4 threshold
+        cam.elevation = 5e-5;
+        let unproj_grazing = cam.unproject_to_drawing_plane_at(q, DrawingPlane::XY, 75.0);
+        assert!(unproj_grazing.x.is_finite());
+        assert!(unproj_grazing.y.is_finite());
+        assert_eq!(unproj_grazing.z, 75.0);
+
+        // Top view: elevation = PI/2 -> view_dir.y = 0 and view_dir.x = 0
+        cam.set_preset("top");
+        let unproj_xz = cam.unproject_to_drawing_plane_at(q, DrawingPlane::XZ, -20.0);
+        assert!(unproj_xz.x.is_finite());
+        assert_eq!(unproj_xz.y, -20.0);
+        assert!(unproj_xz.z.is_finite());
+
+        let unproj_yz = cam.unproject_to_drawing_plane_at(q, DrawingPlane::YZ, 40.0);
+        assert_eq!(unproj_yz.x, 40.0);
+        assert!(unproj_yz.y.is_finite());
+        assert!(unproj_yz.z.is_finite());
     }
 }

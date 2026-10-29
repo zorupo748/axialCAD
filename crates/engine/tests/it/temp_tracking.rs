@@ -86,7 +86,7 @@ fn tk_runs_orthogonal_tracking_points_until_enter() {
     assert!(near(s.last_point, 15.0, 5.0), "{:?}", s.last_point);
     // Enter ends tracking: the line runs to the last tracking point.
     s.cmdline("").unwrap();
-    assert!(s.prompt_text().ends_with("Specify next point or [Undo]:"), "{}", s.prompt_text());
+    assert!(s.prompt_text().ends_with("Specify next point or [Vertical/Undo]:"), "{}", s.prompt_text());
     let (a, b) = last_line(&s);
     assert!(near(a, 0.0, 0.0) && near(b, 15.0, 5.0), "{a:?} {b:?}");
 }
