@@ -53,6 +53,8 @@ pub const PROFILE_VARS: &[&str] = &[
     "PICKDRAG",
     "MAXARRAY",
     "MEASUREINIT",
+    "QNEWTEMPLATE",
+    "ELEVATION",
 ];
 
 /// The most profile entries [`restore`] reads (a saved profile is untrusted input).
@@ -145,6 +147,8 @@ pub fn reset(s: &mut Session) {
     st.pickadd = d.pickadd;
     st.pickdrag = d.pickdrag;
     st.maxarray = d.maxarray;
+    st.drawing_plane_offset = d.drawing_plane_offset;
+    crate::cmd::file::set_qnew_template("");
 }
 
 fn run_options(s: &mut Session, p: &Value) -> Result<Value> {

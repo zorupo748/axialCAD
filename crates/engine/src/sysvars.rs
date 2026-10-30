@@ -8,6 +8,7 @@ mod table;
 
 const SESSION_VARS: &[&str] = &[
     "AUDITCTL",
+    "ELEVATION",
     "OSMODE",
     "OSNAPHATCH",
     "ANNOAUTOSCALE",
@@ -76,6 +77,7 @@ pub fn get(s: &Session, name: &str) -> Option<Value> {
     let n = name.trim().to_ascii_uppercase();
     let st = &s.settings;
     let v = match n.as_str() {
+        "ELEVATION" => json!(st.drawing_plane_offset),
         "OSMODE" => json!(st.osmode),
         "OSNAPHATCH" => json!(i32::from(st.osnaphatch)),
         // AutoCAD's values: positive on, negative off (4 = every annotative object).
@@ -298,6 +300,7 @@ pub fn set(s: &mut Session, name: &str, v: &Value) -> Result<()> {
             st.polarmode = bits & 8 != 0;
             st.otrack = bits & 16 != 0;
         }
+        "ELEVATION" => st.drawing_plane_offset = as_f64(v).filter(|f| f.is_finite()).ok_or_else(bad)?,
         "QNEWTEMPLATE" => crate::cmd::file::set_qnew_template(v.as_str().ok_or_else(bad)?),
         "POLARANG" => st.polarang = as_f64(v).filter(|a| *a > 0.0).ok_or_else(bad)?.to_radians(),
         "GRIDMODE" => st.gridmode = as_bool(v).ok_or_else(bad)?,

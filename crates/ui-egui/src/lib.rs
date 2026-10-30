@@ -115,6 +115,9 @@ pub struct UiState {
     pub recent_files: Vec<String>,
     /// The folder the last APPLOAD file came from: the next pick starts there.
     pub last_lisp_dir: Option<String>,
+    /// Whether CADCraft creates an initial drawing from template at startup without explicit files.
+    #[serde(default)]
+    pub startup_create_drawing: bool,
 }
 
 /// A DXF/DWG file version (2000 … 2018).
@@ -192,6 +195,7 @@ impl Default for UiState {
             save_version: SaveVersion::default().year().to_string(),
             recent_files: Vec::new(),
             last_lisp_dir: None,
+            startup_create_drawing: false,
         }
     }
 }
@@ -420,6 +424,9 @@ impl CadApp {
         if self.ui.ribbon_collapsed {
             prefs["ribbonCollapsed"] = json!(true);
         }
+        if self.ui.startup_create_drawing {
+            prefs["startupCreateDrawing"] = json!(true);
+        }
         prefs.to_string()
     }
 
@@ -458,6 +465,9 @@ impl CadApp {
         }
         if let Some(c) = v.get("ribbonCollapsed").and_then(Value::as_bool) {
             self.ui.ribbon_collapsed = c;
+        }
+        if let Some(s) = v.get("startupCreateDrawing").and_then(Value::as_bool) {
+            self.ui.startup_create_drawing = s;
         }
     }
 

@@ -143,6 +143,11 @@ impl Workspace {
     pub fn apply(&mut self, action: Action<Panel>) -> Result<(), String> {
         self.validate()?;
         let mut next = self.clone();
+        if let Action::Float { panel, .. } | Action::Activate { panel } = &action {
+            if !next.layout.contains(panel) {
+                next.set_visible(*panel, true)?;
+            }
+        }
         if let Action::Close { panel } = &action {
             let location = next.layout.location(panel).map_err(|error| error.to_string())?;
             next.hidden.retain(|(id, _)| id != panel);
@@ -429,6 +434,25 @@ pub fn show(app: &mut crate::CadApp, ui: &mut egui::Ui) {
     style.border = egui::Stroke::new(1.0, t.border);
     style.accent = t.accent;
     style.font = crate::theme::body();
+
+    // Keep floating panel headers and close buttons accessible on narrow windows or resize:
+    let avail = ui.max_rect();
+    if avail.width() > 100.0 && avail.height() > 100.0 {
+        for group in &mut workspace.layout.floating {
+            let max_w = (avail.width() - 20.0).max(120.0);
+            let max_h = (avail.height() - 20.0).max(80.0);
+            group.rect[2] = group.rect[2].clamp(120.0, max_w);
+            group.rect[3] = group.rect[3].clamp(80.0, max_h);
+            let min_x = avail.left() + 4.0;
+            let max_x = (avail.right() - 60.0).max(min_x);
+            group.rect[0] = group.rect[0].clamp(min_x, max_x);
+            let min_y = avail.top() + 4.0;
+            let max_y = (avail.bottom() - 32.0).max(min_y);
+            group.rect[1] = group.rect[1].clamp(min_y, max_y);
+        }
+        app.ui.docking.layout.floating = workspace.layout.floating.clone();
+    }
+
     let output = DockArea::new(egui::Id::new("cadcraft-docking")).show_with_limits(
         ui,
         &workspace.layout,

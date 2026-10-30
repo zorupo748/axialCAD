@@ -378,11 +378,12 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
 
         // Drawing plane button: XY / XZ / YZ
         let plane = app.session.drawing_plane();
-        let br_plane = Rect::from_min_max(pos2(coord_right - 42.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
+        let plane_text = format!("Plano: {}", plane.name());
+        let br_plane = Rect::from_min_max(pos2(coord_right - 62.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
         let resp_plane = ui.interact(br_plane, ui.id().with("drawing_plane_toggle"), Sense::click());
         let plane_hovered = resp_plane.hovered();
         let is_non_xy = plane != cadcraft_geom::DrawingPlane::XY;
-        icons::describe_control(ui, &resp_plane, plane.name(), Some(is_non_xy), false);
+        icons::describe_control(ui, &resp_plane, &plane_text, Some(is_non_xy), false);
         p.rect_filled(
             br_plane,
             3.0,
@@ -409,42 +410,116 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
             ),
             egui::StrokeKind::Inside,
         );
-        p.text(br_plane.center(), egui::Align2::CENTER_CENTER, plane.name(), crate::theme::small(), if is_non_xy { t.toggle_on } else { t.text });
-        if resp_plane.on_hover_text(format!("Drawing Plane: {} (click to cycle XY -> XZ -> YZ)", plane.name())).clicked() {
+        p.text(br_plane.center(), egui::Align2::CENTER_CENTER, &plane_text, crate::theme::small(), if is_non_xy { t.toggle_on } else { t.text });
+        if resp_plane.on_hover_text(format!("Plano de dibujo: {} (clic para alternar XY -> XZ -> YZ)", plane.name())).clicked() {
             let next = match plane {
                 cadcraft_geom::DrawingPlane::XY => cadcraft_geom::DrawingPlane::XZ,
                 cadcraft_geom::DrawingPlane::XZ => cadcraft_geom::DrawingPlane::YZ,
                 cadcraft_geom::DrawingPlane::YZ => cadcraft_geom::DrawingPlane::XY,
             };
             app.session.set_drawing_plane(next);
-            app.session.echo(format!("Active drawing plane set to {}.", next.name()));
+            app.session.echo(format!("Plano de dibujo activo: {}.", next.name()));
         }
         coord_right = br_plane.left() - 6.0;
+
+        // Elevation / Cota button with mouse adjust and origin return
+        let elev_offset = app.session.drawing_plane_offset();
+        let elev_active = elev_offset.abs() > 1e-6 || app.canvas.height_adjust;
+        let elev_text = if elev_offset.abs() < 1e-6 { "Cota: 0.00".to_string() } else { format!("Cota: {:+.2}", elev_offset) };
+        let br_elev = Rect::from_min_max(pos2(coord_right - 78.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
+        let resp_elev = ui.interact(br_elev, ui.id().with("drawing_plane_elev_toggle"), Sense::click());
+        let elev_hovered = resp_elev.hovered();
+        icons::describe_control(ui, &resp_elev, &elev_text, Some(elev_active), false);
+        p.rect_filled(
+            br_elev,
+            3.0,
+            if app.canvas.height_adjust {
+                t.toggle_on
+            } else if elev_hovered {
+                t.control_hover
+            } else if elev_active {
+                t.toggle_on.gamma_multiply(0.25)
+            } else {
+                t.chrome
+            },
+        );
+        p.rect_stroke(
+            br_elev,
+            3.0,
+            Stroke::new(
+                1.0,
+                if app.canvas.height_adjust || elev_active {
+                    t.toggle_on
+                } else if elev_hovered {
+                    t.text_dim
+                } else {
+                    t.border
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+        p.text(
+            br_elev.center(),
+            egui::Align2::CENTER_CENTER,
+            &elev_text,
+            crate::theme::small(),
+            if app.canvas.height_adjust {
+                t.chrome_dark
+            } else if elev_active {
+                t.toggle_on
+            } else {
+                t.text
+            },
+        );
+        let elev_clicked = resp_elev.clicked();
+        let elev_sec_clicked = resp_elev.secondary_clicked();
+        let _ = resp_elev.on_hover_text(format!(
+            "Cota de plano: {:.2} (Clic: ajustar con ratón, Clic secundario: restablecer a 0.0)",
+            elev_offset
+        ));
+        if elev_clicked {
+            app.canvas.height_adjust = !app.canvas.height_adjust;
+            if app.canvas.height_adjust {
+                app.canvas.height_adjust_anchor = Some(app.session.last_point3);
+                app.canvas.height_adjust_start_offset = elev_offset;
+                app.session.echo("Ajuste gráfico de cota iniciado (mueve el ratón, clic para fijar, Esc para cancelar).");
+            }
+        }
+        if elev_sec_clicked {
+            if elev_offset.abs() > 1e-6 {
+                app.session.set_drawing_plane_offset(0.0);
+                app.session.echo("Cota restablecida al plano de origen (0.0).");
+            } else {
+                app.start("plane.pick");
+            }
+        }
+        coord_right = br_elev.left() - 6.0;
 
         let zlock = app.session.settings.zlock;
         let br_zlock = Rect::from_min_max(pos2(coord_right - 64.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
         let resp_zlock = ui.interact(br_zlock, ui.id().with("zlock_toggle"), Sense::click());
         let zlock_hovered = resp_zlock.hovered();
-        icons::describe_control(ui, &resp_zlock, "Z-LOCK", Some(zlock), false);
+        let zlock_text = if zlock { "● V-LOCK" } else { "V-LOCK" };
+        icons::describe_control(ui, &resp_zlock, zlock_text, Some(zlock), false);
         if zlock {
             p.rect_filled(br_zlock, 3.0, t.toggle_on);
             p.rect_stroke(br_zlock, 3.0, Stroke::new(1.5, egui::Color32::WHITE), egui::StrokeKind::Inside);
-            p.text(br_zlock.center(), egui::Align2::CENTER_CENTER, "● Z-LOCK", crate::theme::small(), t.chrome_dark);
+            p.text(br_zlock.center(), egui::Align2::CENTER_CENTER, zlock_text, crate::theme::small(), t.chrome_dark);
         } else {
             p.rect_filled(br_zlock, 3.0, if zlock_hovered { t.control_hover } else { t.chrome });
             p.rect_stroke(br_zlock, 3.0, Stroke::new(1.0, if zlock_hovered { t.text_dim } else { t.border }), egui::StrokeKind::Inside);
-            p.text(br_zlock.center(), egui::Align2::CENTER_CENTER, "Z-LOCK", crate::theme::small(), if zlock_hovered { t.text } else { t.text_dim });
+            p.text(br_zlock.center(), egui::Align2::CENTER_CENTER, zlock_text, crate::theme::small(), if zlock_hovered { t.text } else { t.text_dim });
         }
         if resp_zlock
             .on_hover_text(if zlock {
-                "Z-Axis Lock: ON (locks next line endpoint to vertical axis; click to disable)"
+                "Bloqueo vertical (V): ACTIVADO (clic para desactivar)"
             } else {
-                "Z-Axis Lock: OFF (click to lock next line endpoint to vertical axis)"
+                "Bloqueo vertical (V): DESACTIVADO (clic para activar)"
             })
             .clicked()
         {
             app.session.settings.zlock = !app.session.settings.zlock;
-            app.session.echo(format!("Z-Axis vertical constraint {}.", if app.session.settings.zlock { "enabled" } else { "disabled" }));
+            app.session.echo(format!("Bloqueo vertical {}.", if app.session.settings.zlock { "activado" } else { "desactivado" }));
         }
         coord_right = br_zlock.left() - 6.0;
         // The annotation scale list (model space).

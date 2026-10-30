@@ -54,6 +54,7 @@ mod helix;
 mod inquiry_keywords;
 mod inquiry_z;
 mod insert_prompts;
+mod integrated_3d_drafting;
 mod isometric;
 mod join_close;
 mod json_param_validation;

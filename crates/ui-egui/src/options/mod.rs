@@ -149,6 +149,7 @@ struct UiChanges {
     savefilepath: Option<String>,
     time_sensitive_right_click: Option<bool>,
     interface_scale: Option<f32>,
+    startup_create_drawing: Option<bool>,
 }
 
 fn color_param(key: &str, v: &Value) -> Result<Option<Color32>, String> {
@@ -171,6 +172,7 @@ fn parse_ui(key: &str, v: &Value, c: &mut UiChanges) -> Result<bool, String> {
         }
         "saveFormat" => c.save_format = Some(crate::SaveFormat::parse(text()?).ok_or("saveFormat must be dxf or dwg")?),
         "systemCursor" => c.system_cursor = Some(v.as_bool().ok_or("systemCursor must be true or false")?),
+        "startupCreateDrawing" => c.startup_create_drawing = Some(v.as_bool().ok_or("startupCreateDrawing must be true or false")?),
         "historyLines" => {
             let n = v.as_u64().filter(|n| *n <= crate::cmdline::MAX_LINES as u64).ok_or("historyLines must be a whole number from 0 to 12")?;
             c.history_lines = Some(n as usize);
@@ -227,6 +229,7 @@ fn ui_json(app: &CadApp) -> Map<String, Value> {
     m.insert("SAVETIME".into(), json!(cadcraft_engine::autosave::savetime()));
     m.insert("SAVEFILEPATH".into(), json!(cadcraft_engine::autosave::savefilepath()));
     m.insert("timeSensitiveRightClick".into(), json!(o.time_sensitive_right_click));
+    m.insert("startupCreateDrawing".into(), json!(app.ui.startup_create_drawing));
     m
 }
 
@@ -300,6 +303,9 @@ fn run_json(app: &mut CadApp, params: &Value) -> Result<Value, String> {
     if let Some(b) = ui.time_sensitive_right_click {
         app.options.time_sensitive_right_click = b;
     }
+    if let Some(b) = ui.startup_create_drawing {
+        app.ui.startup_create_drawing = b;
+    }
     Ok(report(app))
 }
 
@@ -312,6 +318,7 @@ fn reset_ui(app: &mut CadApp) {
     app.ui.save_version = d.save_version;
     app.ui.system_cursor = d.system_cursor;
     app.ui.history_lines = d.history_lines;
+    app.ui.startup_create_drawing = d.startup_create_drawing;
     app.options = UiOptions::default();
 }
 
@@ -331,6 +338,7 @@ impl CadApp {
             "snapMarkerSize": self.options.snap_marker_size,
             "timeSensitiveRightClick": self.options.time_sensitive_right_click,
             "interfaceScale": self.options.interface_scale,
+            "startupCreateDrawing": self.ui.startup_create_drawing,
         })
         .to_string()
     }
@@ -347,7 +355,7 @@ impl CadApp {
         }
         let mut c = UiChanges::default();
         for key in
-            ["systemCursor", "modelBackground", "paperBackground", "selectionColor", "snapMarkerSize", "timeSensitiveRightClick", "interfaceScale"]
+            ["systemCursor", "modelBackground", "paperBackground", "selectionColor", "snapMarkerSize", "timeSensitiveRightClick", "interfaceScale", "startupCreateDrawing"]
         {
             if let Some(value) = v.get(key) {
                 let _ = parse_ui(key, value, &mut c);
@@ -374,6 +382,9 @@ impl CadApp {
         }
         if let Some(n) = c.interface_scale {
             self.options.interface_scale = n;
+        }
+        if let Some(b) = c.startup_create_drawing {
+            self.ui.startup_create_drawing = b;
         }
     }
 }

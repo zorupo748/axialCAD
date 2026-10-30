@@ -328,6 +328,8 @@ fn main() -> eframe::Result {
             // The user profile (Options): drafting settings, selection sizes, drawing-area colours.
             if let Some(profile) = cc.storage.and_then(|s| s.get_string(cadcraft_ui_egui::options::PROFILE_KEY)) {
                 app.load_profile(&profile);
+            } else {
+                app.session.settings.orthomode = true;
             }
             if let Some(prefs) = cc.storage.and_then(|s| s.get_string(cadcraft_ui_egui::PREFS_KEY)) {
                 app.load_prefs(&prefs);
@@ -382,22 +384,49 @@ pub(crate) fn apply_startup(app: &mut CadApp, sample: bool, control_port: Option
         let _ = app.run("ui.sample", serde_json::json!({}));
     }
     app.open_paths(files);
-    if should_create_initial_drawing(sample, control_port.is_some(), files, !app.session.docs.is_empty(), app.opening.busy()) {
-        // In the units the profile asks for (MEASUREINIT, restored above).
-        let metric = app.session.settings.measureinit;
-        app.session.new_drawing(metric);
+    if should_create_initial_drawing(
+        sample,
+        control_port.is_some(),
+        files,
+        !app.session.docs.is_empty(),
+        app.opening.busy(),
+        app.ui.startup_create_drawing,
+    ) {
+        let template = cadcraft_engine::cmd::file::qnew_template();
+        let mut created = false;
+        if !template.is_empty() {
+            match app.session.execute("new", &serde_json::json!({ "template": template })) {
+                Ok(_) => created = true,
+                Err(e) => {
+                    log::warn!("Plantilla predeterminada {template}: {e}");
+                    app.set_status(format!("Plantilla predeterminada no disponible: {e}"));
+                }
+            }
+        }
+        if !created {
+            // In the units the profile asks for (MEASUREINIT, restored above).
+            let metric = app.session.settings.measureinit;
+            app.session.new_drawing(metric);
+        }
     }
 }
 
-/// Whether startup should create a new blank drawing (Drawing1) instead of showing the Start page.
-pub(crate) fn should_create_initial_drawing(sample: bool, has_control: bool, files: &[String], has_docs: bool, is_opening: bool) -> bool {
+/// Whether startup should create a new drawing instead of showing the Start page.
+pub(crate) fn should_create_initial_drawing(
+    sample: bool,
+    has_control: bool,
+    files: &[String],
+    has_docs: bool,
+    is_opening: bool,
+    startup_create_drawing: bool,
+) -> bool {
     if sample || has_docs || is_opening {
         return false;
     }
     if files.iter().any(|f| !cadcraft_ui_egui::is_lisp_file(f)) {
         return false;
     }
-    if has_control {
+    if has_control || startup_create_drawing {
         return true;
     }
     files.iter().any(|f| cadcraft_ui_egui::is_lisp_file(f))
@@ -501,39 +530,43 @@ mod tests {
 
     #[test]
     fn startup_without_arguments_shows_start_page_and_does_not_create_drawing() {
-        assert!(!should_create_initial_drawing(false, false, &[], false, false));
+        assert!(!should_create_initial_drawing(false, false, &[], false, false, false));
+        assert!(should_create_initial_drawing(false, false, &[], false, false, true));
     }
 
     #[test]
     fn passing_drawing_files_does_not_create_empty_drawing_while_reading() {
-        assert!(!should_create_initial_drawing(false, false, &["plan.dwg".into()], false, true));
-        assert!(!should_create_initial_drawing(false, false, &["plan.dxf".into()], false, true));
-        assert!(!should_create_initial_drawing(false, false, &["template.dwt".into()], false, true));
-        assert!(!should_create_initial_drawing(false, false, &["plan.dwg".into()], false, false));
+        assert!(!should_create_initial_drawing(false, false, &["plan.dwg".into()], false, true, false));
+        assert!(!should_create_initial_drawing(false, false, &["plan.dxf".into()], false, true, false));
+        assert!(!should_create_initial_drawing(false, false, &["template.dwt".into()], false, true, false));
+        assert!(!should_create_initial_drawing(false, false, &["plan.dwg".into()], false, false, false));
+        assert!(!should_create_initial_drawing(false, false, &["plan.dwg".into()], false, false, true));
     }
 
     #[test]
     fn sample_flag_does_not_create_duplicate_empty_drawing() {
-        assert!(!should_create_initial_drawing(true, false, &[], true, false));
-        assert!(!should_create_initial_drawing(true, false, &[], false, false));
+        assert!(!should_create_initial_drawing(true, false, &[], true, false, false));
+        assert!(!should_create_initial_drawing(true, false, &[], false, false, false));
+        assert!(!should_create_initial_drawing(true, false, &[], false, false, true));
     }
 
     #[test]
     fn control_automation_maintains_initial_drawing_when_no_files_given() {
-        assert!(should_create_initial_drawing(false, true, &[], false, false));
-        assert!(!should_create_initial_drawing(false, true, &["plan.dwg".into()], false, true));
+        assert!(should_create_initial_drawing(false, true, &[], false, false, false));
+        assert!(!should_create_initial_drawing(false, true, &["plan.dwg".into()], false, true, false));
     }
 
     #[test]
     fn failed_file_open_does_not_leave_spurious_drawing_from_startup() {
-        assert!(!should_create_initial_drawing(false, false, &["missing.dwg".into()], false, true));
-        assert!(!should_create_initial_drawing(false, false, &["missing.dwg".into()], false, false));
+        assert!(!should_create_initial_drawing(false, false, &["missing.dwg".into()], false, true, false));
+        assert!(!should_create_initial_drawing(false, false, &["missing.dwg".into()], false, false, false));
+        assert!(!should_create_initial_drawing(false, false, &["missing.dwg".into()], false, false, true));
     }
 
     #[test]
     fn lisp_files_create_initial_drawing_if_no_drawings_specified() {
-        assert!(should_create_initial_drawing(false, false, &["script.lsp".into()], false, false));
-        assert!(!should_create_initial_drawing(false, false, &["plan.dwg".into(), "script.lsp".into()], false, true));
+        assert!(should_create_initial_drawing(false, false, &["script.lsp".into()], false, false, false));
+        assert!(!should_create_initial_drawing(false, false, &["plan.dwg".into(), "script.lsp".into()], false, true, false));
     }
 
     #[test]

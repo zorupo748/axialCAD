@@ -8,7 +8,7 @@ mod viewport;
 pub use viewport::ViewportPoint;
 
 use cadcraft_doc::{Drawing, EntityKind, Insert, MAX_BLOCK_DEPTH, Prim, Space};
-use cadcraft_geom::{Bounds2, Circle, EPS, Ellipse, Mat3, PI, Segment, Vec2, intersect_ext};
+use cadcraft_geom::{Bounds2, Circle, EPS, Ellipse, Mat3, OrbitCamera, PI, Segment, Vec2, Vec3, intersect_ext};
 use serde::Serialize;
 
 /// OSMODE bits.
@@ -53,6 +53,9 @@ pub mod mode {
 #[serde(rename_all = "camelCase")]
 pub struct SnapHit {
     pub point: Vec2,
+    /// 3D coordinates for spatial object snaps (e.g. 3D line endpoints).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point3: Option<Vec3>,
     pub mode: u32,
     pub name: &'static str,
     /// Model coordinates when this paper-space hit is inside a layout viewport.
@@ -65,11 +68,14 @@ pub struct SnapHit {
 }
 
 impl SnapHit {
-    /// The command input a pick at this snap gives: a deferred snap or a plain point.
+    /// The command input a pick at this snap gives: a deferred snap, a 3D point, or a 2D point.
     pub fn input(&self) -> crate::Input {
         match self.deferred {
             Some(d) => crate::Input::Deferred(d),
-            None => crate::Input::Point(self.point),
+            None => match self.point3 {
+                Some(p3) => crate::Input::Point3(p3),
+                None => crate::Input::Point(self.point),
+            },
         }
     }
 }
@@ -514,7 +520,7 @@ fn finish(
         da.total_cmp(&db)
     });
     if let Some((m, p)) = best {
-        return Some(SnapHit { point: *p, mode: *m, name: name_of(*m), viewport: None, deferred: None });
+        return Some(SnapHit { point: *p, point3: None, mode: *m, name: name_of(*m), viewport: None, deferred: None });
     }
     if base.is_none()
         && deferred
@@ -540,7 +546,7 @@ fn finish(
             }
         }
         if let Some((_, p)) = nb {
-            return Some(SnapHit { point: p, mode: mode::NEA, name: "Nearest", viewport: None, deferred: None });
+            return Some(SnapHit { point: p, point3: None, mode: mode::NEA, name: "Nearest", viewport: None, deferred: None });
         }
     }
     None
@@ -898,7 +904,7 @@ fn deferred_hit(prims: &[Prim], cursor: Vec2, aperture: f64, osmode: u32, clip: 
         };
         let dd = at.dist(cursor);
         if at.is_finite() && clip.is_none_or(|c| c.contains(at)) && dd <= aperture && best.is_none_or(|(bd, _)| dd < bd) {
-            best = Some((dd, SnapHit { point: at, mode: m, name, viewport: None, deferred: Some(Deferred { mode: m, curve, at }) }));
+            best = Some((dd, SnapHit { point: at, point3: None, mode: m, name, viewport: None, deferred: Some(Deferred { mode: m, curve, at }) }));
         }
     }
     best.map(|(_, h)| h)
@@ -1079,6 +1085,64 @@ pub fn grid_snap(p: Vec2, unit: Vec2, origin: Vec2, angle: f64) -> Vec2 {
 pub fn grid_frame(d: &Drawing) -> (Vec2, f64) {
     let base = d.header.point("SNAPBASE").map(|p| p.xy()).filter(|p| p.is_finite()).unwrap_or(Vec2::ZERO);
     (base, d.header.f64("SNAPANG", 0.0).to_radians())
+}
+
+/// Screen-space 3D snap to LINE endpoints (bounded OSNAP for 3D drafting).
+///
+/// Projects visible 3D LINE endpoints using the active camera and returns the closest endpoint
+/// within `aperture_cam` units in the camera projection plane. Overlapping candidates are ordered
+/// deterministically and support cycling via `cycle_idx`.
+pub fn snap_3d_line_endpoints(
+    doc: &Drawing,
+    space: &Space,
+    cam: &OrbitCamera,
+    cursor_q: Vec2,
+    aperture_cam: f64,
+    cycle_idx: usize,
+) -> Option<SnapHit> {
+    if !cursor_q.is_finite() || !aperture_cam.is_finite() || aperture_cam <= 0.0 {
+        return None;
+    }
+    let store = doc.space(space)?;
+    let mut candidates: Vec<(f64, cadcraft_doc::Handle, u8, Vec3)> = Vec::new();
+
+    for ent in store.iter() {
+        if !doc.is_visible(ent) {
+            continue;
+        }
+        if let EntityKind::Line(line) = &ent.kind {
+            for (idx, p) in [(0u8, line.a), (1u8, line.b)] {
+                let p_screen = cam.project_point(p);
+                if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
+                    let dist = (p_screen - cursor_q).len();
+                    if dist <= aperture_cam {
+                        candidates.push((dist, ent.handle, idx, p));
+                    }
+                }
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    candidates.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+
+    let chosen = candidates[cycle_idx % candidates.len()];
+    Some(SnapHit {
+        point: chosen.3.xy(),
+        point3: Some(chosen.3),
+        mode: mode::END,
+        name: "Endpoint",
+        viewport: None,
+        deferred: None,
+    })
 }
 
 #[cfg(test)]

@@ -449,13 +449,19 @@ impl Interactive for LineM {
     fn name(&self) -> &'static str {
         "LINE"
     }
-    fn prompt(&self, _s: &Session) -> Prompt {
+    fn begin(&mut self, s: &mut Session) -> Result<Step> {
+        s.settings.zlock = false;
+        Ok(Step::Continue)
+    }
+    fn prompt(&self, s: &Session) -> Prompt {
+        let base = self.pts.last().map(|p| p.xy());
         let base3 = self.pts.last().copied();
+        let kw_v = if s.settings.zlock { "NoVertical" } else { "Vertical" };
         match self.pts.len() {
             0 if self.first.is_some() => Prompt::new("Specify next point", Accept::POINT).kw(&["Undo"]).deferred(),
             0 => Prompt::new("Specify first point", Accept::POINT).deferred(),
-            1 | 2 => Prompt::new("Specify next point", Accept::POINT).kw(&["Vertical", "Undo"]).base3_opt(base3),
-            _ => Prompt::new("Specify next point", Accept::POINT).kw(&["Close", "Vertical", "Undo"]).base3_opt(base3),
+            1 | 2 => Prompt::new("Specify next point", Accept::POINT).kw(&[kw_v, "Undo"]).base_opt(base).base3_opt(base3),
+            _ => Prompt::new("Specify next point", Accept::POINT).kw(&["Close", kw_v, "Undo"]).base_opt(base).base3_opt(base3),
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
@@ -488,8 +494,10 @@ impl Interactive for LineM {
                 {
                     let z = s.cursor3.z;
                     self.push_point(s, Vec3::new(last.x, last.y, z))
+                } else if let Some(last) = self.pts.last() {
+                    self.push_point(s, Vec3::new(p.x, p.y, last.z))
                 } else {
-                    let z = self.pts.last().map_or(0.0, |pt| pt.z);
+                    let z = s.settings.drawing_plane_offset;
                     self.push_point(s, Vec3::new(p.x, p.y, z))
                 }
             }
@@ -502,8 +510,30 @@ impl Interactive for LineM {
                     self.push_point(s, p3)
                 }
             }
-            Input::Keyword(k) if k.eq_ignore_ascii_case("Vertical") || k.eq_ignore_ascii_case("V") => {
-                s.settings.zlock = !s.settings.zlock;
+            Input::Keyword(k) | Input::Text(k)
+                if k.eq_ignore_ascii_case("Vertical")
+                    || k.eq_ignore_ascii_case("V")
+                    || k.eq_ignore_ascii_case("NoVertical")
+                    || k.eq_ignore_ascii_case("V OFF")
+                    || k.eq_ignore_ascii_case("VOFF")
+                    || k.eq_ignore_ascii_case("Horizontal")
+                    || k.eq_ignore_ascii_case("H")
+                    || k.eq_ignore_ascii_case("V ON")
+                    || k.eq_ignore_ascii_case("VON") =>
+            {
+                let enable = if k.eq_ignore_ascii_case("V OFF")
+                    || k.eq_ignore_ascii_case("VOFF")
+                    || k.eq_ignore_ascii_case("NoVertical")
+                    || k.eq_ignore_ascii_case("Horizontal")
+                    || k.eq_ignore_ascii_case("H")
+                {
+                    false
+                } else if k.eq_ignore_ascii_case("V ON") || k.eq_ignore_ascii_case("VON") {
+                    true
+                } else {
+                    !s.settings.zlock
+                };
+                s.settings.zlock = enable;
                 if s.settings.zlock {
                     s.echo("Z-Axis vertical constraint enabled.");
                 } else {
@@ -526,12 +556,20 @@ impl Interactive for LineM {
                 Ok(Step::Continue)
             }
             Input::Keyword(k) if k == "Close" => {
+                s.settings.zlock = false;
                 if let (Some(a), Some(b)) = (self.pts.last().copied(), self.pts.first().copied()) {
                     s.add_entity(line3(a, b))?;
                 }
                 Ok(Step::Done)
             }
-            Input::Enter => Ok(Step::Done),
+            Input::Cancel => {
+                s.settings.zlock = false;
+                Ok(Step::Cancel)
+            }
+            Input::Enter => {
+                s.settings.zlock = false;
+                Ok(Step::Done)
+            }
             _ => Err(crate::EngineError::Other("Point or option keyword required.".into())),
         }
     }

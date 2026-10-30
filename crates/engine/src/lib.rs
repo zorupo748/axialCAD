@@ -473,6 +473,8 @@ pub struct Settings {
     /// AUDITCTL: 1 creates an audit report (.adt) file when AUDIT is run (default: 0).
     pub auditctl: bool,
     pub drawing_plane: cadcraft_geom::DrawingPlane,
+    /// Elevation offset of the active drawing plane (along its normal axis).
+    pub drawing_plane_offset: f64,
     /// Explicit Z-Axis vertical constraint (locks next point to vertical axis through base point).
     pub zlock: bool,
 }
@@ -482,6 +484,7 @@ impl Default for Settings {
         Settings {
             osmode: 4133,
             orthomode: false,
+            drawing_plane_offset: 0.0,
             zlock: false,
             polarmode: true,
             polarang: std::f64::consts::FRAC_PI_2,
@@ -849,6 +852,14 @@ impl Session {
             st.drawing_plane = plane;
         }
         self.settings.drawing_plane = plane;
+    }
+    pub fn drawing_plane_offset(&self) -> f64 {
+        self.settings.drawing_plane_offset
+    }
+    pub fn set_drawing_plane_offset(&mut self, offset: f64) {
+        if offset.is_finite() {
+            self.settings.drawing_plane_offset = offset;
+        }
     }
     pub fn zlock(&self) -> bool {
         self.settings.zlock
@@ -1380,6 +1391,7 @@ impl Session {
         // A typed selection mode or SIngle never outlives its command.
         self.select_mode = None;
         self.select_single = false;
+        self.settings.zlock = false;
         if find_command(&run.id).is_some_and(|c| c.undoable)
             && let Err(e) = self.refuse_non_finite(None, &run.before, &run.selection_before, &run.id)
         {

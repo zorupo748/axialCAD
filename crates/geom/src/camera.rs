@@ -34,6 +34,25 @@ impl DrawingPlane {
     }
 }
 
+/// The three Cartesian axes in 3D WCS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Axis3D {
+    X,
+    Y,
+    Z,
+}
+
+impl Axis3D {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
+        }
+    }
+}
+
 /// Maximum pitch angle from the XY plane (89.5°) to prevent gimbal lock, axis inversions, and
 /// upside-down camera flipping during turntable orbit navigation.
 pub const MAX_ORBIT_ELEVATION: f64 = 89.5 * std::f64::consts::PI / 180.0;
@@ -114,6 +133,64 @@ impl OrbitCamera {
     }
 
     /// Unproject a 2D camera coordinate (u, v) centered at target onto the specified drawing plane
+    /// with an arbitrary elevation offset.
+    ///
+    /// The camera ray is defined by $P(s) = P_0 + s \cdot v$, where $P_0 = \text{target} + q_x \cdot r + q_y \cdot u$
+    /// and $v$ is the view direction. If the ray is near-parallel to the plane ($|v \cdot n| \le 10^{-4}$),
+    /// this function returns `None` to inform the caller of depth ambiguity from this viewpoint.
+    pub fn unproject_to_plane_with_offset(&self, q: Vec2, plane: DrawingPlane, offset: f64) -> Option<Vec3> {
+        let r = self.right_dir();
+        let u = self.up_dir();
+        let v = self.view_dir();
+        let p0 = self.target + r * q.x + u * q.y;
+
+        match plane {
+            DrawingPlane::XY => {
+                if self.is_plan() {
+                    return Some(Vec3::new(self.target.x + q.x, self.target.y + q.y, offset));
+                }
+                if v.z.abs() > 1e-4 {
+                    let s = (offset - p0.z) / v.z;
+                    let p = p0 + v * s;
+                    if p.x.is_finite() && p.y.is_finite() {
+                        Some(Vec3::new(p.x, p.y, offset))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            DrawingPlane::XZ => {
+                if v.y.abs() > 1e-4 {
+                    let s = (offset - p0.y) / v.y;
+                    let p = p0 + v * s;
+                    if p.x.is_finite() && p.z.is_finite() {
+                        Some(Vec3::new(p.x, offset, p.z))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            DrawingPlane::YZ => {
+                if v.x.abs() > 1e-4 {
+                    let s = (offset - p0.x) / v.x;
+                    let p = p0 + v * s;
+                    if p.y.is_finite() && p.z.is_finite() {
+                        Some(Vec3::new(offset, p.y, p.z))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Unproject a 2D camera coordinate (u, v) centered at target onto the specified drawing plane
     /// at the given coordinate offset along the plane normal.
     ///
     /// For DrawingPlane::XY, intersects the camera ray with the plane $Z = \text{offset}$.
@@ -123,60 +200,19 @@ impl OrbitCamera {
     /// The camera ray is defined by $P(s) = P_0 + s \cdot v$, where $P_0 = \text{target} + q_x \cdot r + q_y \cdot u$
     /// and $v$ is the view direction. If the ray is near-parallel to the plane ($|v \cdot n| \le 10^{-4}$) or if
     /// the intersection computation overflows/yields non-finite coordinates, a stable fallback projection onto the plane is used.
-    ///
-    /// Note that when the view direction is near-parallel to the drawing plane normal ($|v \cdot n| \le 10^{-4}$),
-    /// the camera looks edge-on to the drawing plane. Exact pointer correspondence cannot be maintained because
-    /// the line of sight does not transversally intersect the plane; projecting $P_0$ orthogonally onto the drawing plane
-    /// ensures stable, finite coordinates without jumping.
     pub fn unproject_to_drawing_plane_at(&self, q: Vec2, plane: DrawingPlane, offset: f64) -> Vec3 {
+        if let Some(p) = self.unproject_to_plane_with_offset(q, plane, offset) {
+            if p.x.is_finite() && p.y.is_finite() && p.z.is_finite() {
+                return p;
+            }
+        }
         let r = self.right_dir();
         let u = self.up_dir();
-        let v = self.view_dir();
         let p0 = self.target + r * q.x + u * q.y;
-
         match plane {
-            DrawingPlane::XY => {
-                if self.is_plan() {
-                    return Vec3::new(self.target.x + q.x, self.target.y + q.y, offset);
-                }
-                if v.z.abs() > 1e-4 {
-                    let s = (offset - p0.z) / v.z;
-                    let p = p0 + v * s;
-                    if p.x.is_finite() && p.y.is_finite() {
-                        Vec3::new(p.x, p.y, offset)
-                    } else {
-                        Vec3::new(if p0.x.is_finite() { p0.x } else { 0.0 }, if p0.y.is_finite() { p0.y } else { 0.0 }, offset)
-                    }
-                } else {
-                    Vec3::new(if p0.x.is_finite() { p0.x } else { 0.0 }, if p0.y.is_finite() { p0.y } else { 0.0 }, offset)
-                }
-            }
-            DrawingPlane::XZ => {
-                if v.y.abs() > 1e-4 {
-                    let s = (offset - p0.y) / v.y;
-                    let p = p0 + v * s;
-                    if p.x.is_finite() && p.z.is_finite() {
-                        Vec3::new(p.x, offset, p.z)
-                    } else {
-                        Vec3::new(if p0.x.is_finite() { p0.x } else { 0.0 }, offset, if p0.z.is_finite() { p0.z } else { 0.0 })
-                    }
-                } else {
-                    Vec3::new(if p0.x.is_finite() { p0.x } else { 0.0 }, offset, if p0.z.is_finite() { p0.z } else { 0.0 })
-                }
-            }
-            DrawingPlane::YZ => {
-                if v.x.abs() > 1e-4 {
-                    let s = (offset - p0.x) / v.x;
-                    let p = p0 + v * s;
-                    if p.y.is_finite() && p.z.is_finite() {
-                        Vec3::new(offset, p.y, p.z)
-                    } else {
-                        Vec3::new(offset, if p0.y.is_finite() { p0.y } else { 0.0 }, if p0.z.is_finite() { p0.z } else { 0.0 })
-                    }
-                } else {
-                    Vec3::new(offset, if p0.y.is_finite() { p0.y } else { 0.0 }, if p0.z.is_finite() { p0.z } else { 0.0 })
-                }
-            }
+            DrawingPlane::XY => Vec3::new(if p0.x.is_finite() { p0.x } else { 0.0 }, if p0.y.is_finite() { p0.y } else { 0.0 }, offset),
+            DrawingPlane::XZ => Vec3::new(if p0.x.is_finite() { p0.x } else { 0.0 }, offset, if p0.z.is_finite() { p0.z } else { 0.0 }),
+            DrawingPlane::YZ => Vec3::new(offset, if p0.y.is_finite() { p0.y } else { 0.0 }, if p0.z.is_finite() { p0.z } else { 0.0 }),
         }
     }
 
@@ -214,44 +250,88 @@ impl OrbitCamera {
     /// For a 3D base point, calculate the closest orthogonal 3D point (along X, Y, or Z axis)
     /// from the camera ray at coordinate `q`.
     pub fn closest_axis_3d(&self, q: Vec2, base: Vec3) -> (Vec3, f64) {
+        let (pt, _axis, delta) = self.closest_axis_3d_with_prev(q, base, None);
+        (pt, delta)
+    }
+
+    /// Calculate the closest orthogonal 3D point with explicit axis identification and hysteresis.
+    ///
+    /// - An axis whose projected screen length is < 0.05 units is near line-of-sight and excluded.
+    /// - Candidate axes are scored by normalized directional alignment (cosine of screen angle).
+    /// - Hysteresis gives a 15% bonus to `prev` to avoid erratic switching near 45° boundaries.
+    /// - Ambiguities are resolved deterministically (X > Y > Z).
+    pub fn closest_axis_3d_with_prev(&self, q: Vec2, base: Vec3, prev: Option<Axis3D>) -> (Vec3, Axis3D, f64) {
         let p_screen = self.project_point(base);
         let delta = q - p_screen;
+        let delta_len = delta.len();
 
         let s_x = self.project_point(base + Vec3::new(1.0, 0.0, 0.0)) - p_screen;
         let s_y = self.project_point(base + Vec3::new(0.0, 1.0, 0.0)) - p_screen;
         let s_z = self.project_point(base + Vec3::new(0.0, 0.0, 1.0)) - p_screen;
 
-        let len_x = s_x.len().max(1e-6);
-        let len_y = s_y.len().max(1e-6);
-        let len_z = s_z.len().max(1e-6);
+        let len_x = s_x.len();
+        let len_y = s_y.len();
+        let len_z = s_z.len();
 
-        let proj_x = (delta.dot(s_x) / (len_x * len_x)).abs();
-        let proj_y = (delta.dot(s_y) / (len_y * len_y)).abs();
-        let proj_z = (delta.dot(s_z) / (len_z * len_z)).abs();
+        const MIN_SCREEN_AXIS_LEN: f64 = 0.05;
 
-        if proj_z >= proj_x && proj_z >= proj_y && len_z > 0.05 {
-            let z = self.unproject_vertical_z(q, base);
-            (Vec3::new(base.x, base.y, z), z - base.z)
-        } else if proj_x >= proj_y {
-            let r = self.right_dir();
-            let u = self.up_dir();
-            let v = self.view_dir();
-            let p0 = self.target + r * q.x + u * q.y;
-            let diff = p0 - base;
-            let b = v.x;
-            let denom = 1.0 - b * b;
-            let x = if denom > 1e-6 { base.x + (diff.x - b * diff.dot(v)) / denom } else { base.x + delta.x };
-            (Vec3::new(x, base.y, base.z), x - base.x)
+        let score = |s: Vec2, len: f64, axis: Axis3D| -> f64 {
+            if len < MIN_SCREEN_AXIS_LEN || delta_len < 1e-6 {
+                return -1.0;
+            }
+            let cos_theta = delta.dot(s).abs() / (len * delta_len);
+            let mut sc = cos_theta;
+            if prev == Some(axis) {
+                sc *= 1.15;
+            }
+            sc
+        };
+
+        let score_x = score(s_x, len_x, Axis3D::X);
+        let score_y = score(s_y, len_y, Axis3D::Y);
+        let score_z = score(s_z, len_z, Axis3D::Z);
+
+        let chosen = if score_z >= score_x && score_z >= score_y && score_z >= 0.0 {
+            Axis3D::Z
+        } else if score_x >= score_y && score_x >= 0.0 {
+            Axis3D::X
+        } else if score_y >= 0.0 {
+            Axis3D::Y
+        } else if len_x >= len_y && len_x >= len_z {
+            Axis3D::X
+        } else if len_y >= len_z {
+            Axis3D::Y
         } else {
-            let r = self.right_dir();
-            let u = self.up_dir();
-            let v = self.view_dir();
-            let p0 = self.target + r * q.x + u * q.y;
-            let diff = p0 - base;
-            let b = v.y;
-            let denom = 1.0 - b * b;
-            let y = if denom > 1e-6 { base.y + (diff.y - b * diff.dot(v)) / denom } else { base.y + delta.y };
-            (Vec3::new(base.x, y, base.z), y - base.y)
+            Axis3D::Z
+        };
+
+        match chosen {
+            Axis3D::Z => {
+                let z = self.unproject_vertical_z(q, base);
+                (Vec3::new(base.x, base.y, z), Axis3D::Z, z - base.z)
+            }
+            Axis3D::X => {
+                let r = self.right_dir();
+                let u = self.up_dir();
+                let v = self.view_dir();
+                let p0 = self.target + r * q.x + u * q.y;
+                let diff = p0 - base;
+                let b = v.x;
+                let denom = 1.0 - b * b;
+                let x = if denom > 1e-6 { base.x + (diff.x - b * diff.dot(v)) / denom } else { base.x + delta.x };
+                (Vec3::new(x, base.y, base.z), Axis3D::X, x - base.x)
+            }
+            Axis3D::Y => {
+                let r = self.right_dir();
+                let u = self.up_dir();
+                let v = self.view_dir();
+                let p0 = self.target + r * q.x + u * q.y;
+                let diff = p0 - base;
+                let b = v.y;
+                let denom = 1.0 - b * b;
+                let y = if denom > 1e-6 { base.y + (diff.y - b * diff.dot(v)) / denom } else { base.y + delta.y };
+                (Vec3::new(base.x, y, base.z), Axis3D::Y, y - base.y)
+            }
         }
     }
 
@@ -785,5 +865,62 @@ mod tests {
         assert_eq!(unproj_yz.x, 40.0);
         assert!(unproj_yz.y.is_finite());
         assert!(unproj_yz.z.is_finite());
+    }
+
+    #[test]
+    fn test_closest_axis_3d_hysteresis_and_deterministic_order() {
+        let mut cam = OrbitCamera::default();
+        cam.set_preset("swiso");
+        let base = Vec3::new(0.0, 0.0, 0.0);
+        let p_screen = cam.project_point(base);
+
+        // Movement in Z direction
+        let q_z = p_screen + Vec2::new(0.0, 20.0);
+        let (pt_z, axis_z, _) = cam.closest_axis_3d_with_prev(q_z, base, None);
+        assert_eq!(axis_z, Axis3D::Z);
+        assert_eq!(pt_z.x, 0.0);
+        assert_eq!(pt_z.y, 0.0);
+
+        // Movement along X axis
+        let s_x = cam.project_point(Vec3::new(1.0, 0.0, 0.0)) - p_screen;
+        let q_x = p_screen + s_x * 10.0;
+        let (_, axis_x, _) = cam.closest_axis_3d_with_prev(q_x, base, None);
+        assert_eq!(axis_x, Axis3D::X);
+
+        // Hysteresis test: near the boundary between X and Z, previous axis retains selection
+        let s_z = cam.project_point(Vec3::new(0.0, 0.0, 1.0)) - p_screen;
+        let mid_xz = (s_x.normalized() + s_z.normalized()) * 15.0;
+        let q_mid = p_screen + mid_xz;
+        let (_, axis_with_x, _) = cam.closest_axis_3d_with_prev(q_mid, base, Some(Axis3D::X));
+        let (_, axis_with_z, _) = cam.closest_axis_3d_with_prev(q_mid, base, Some(Axis3D::Z));
+        assert_eq!(axis_with_x, Axis3D::X);
+        assert_eq!(axis_with_z, Axis3D::Z);
+    }
+
+    #[test]
+    fn test_unproject_to_plane_with_offset() {
+        let mut cam = OrbitCamera::default();
+        cam.set_preset("swiso");
+
+        // XY plane at height offset 50.0
+        let target_3d = Vec3::new(10.0, 20.0, 50.0);
+        let q = cam.project_point(target_3d);
+        let unproj = cam.unproject_to_plane_with_offset(q, DrawingPlane::XY, 50.0).expect("not parallel");
+        assert!((unproj.x - target_3d.x).abs() < 1e-4);
+        assert!((unproj.y - target_3d.y).abs() < 1e-4);
+        assert!((unproj.z - 50.0).abs() < 1e-4);
+
+        // Negative offset
+        let target_neg = Vec3::new(-15.0, 30.0, -25.0);
+        let q_neg = cam.project_point(target_neg);
+        let unproj_neg = cam.unproject_to_plane_with_offset(q_neg, DrawingPlane::XY, -25.0).expect("not parallel");
+        assert!((unproj_neg.x - target_neg.x).abs() < 1e-4);
+        assert!((unproj_neg.y - target_neg.y).abs() < 1e-4);
+        assert!((unproj_neg.z - (-25.0)).abs() < 1e-4);
+
+        // Front view is parallel to XY plane (view dir points in +Y, dot with Z is 0)
+        cam.set_preset("front");
+        let parallel_res = cam.unproject_to_plane_with_offset(q, DrawingPlane::XY, 50.0);
+        assert!(parallel_res.is_none(), "Parallel view must return None rather than explosive coordinates");
     }
 }

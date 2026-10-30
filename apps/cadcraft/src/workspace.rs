@@ -102,12 +102,10 @@ fn read(path: &Path) -> Result<Option<UiState>, String> {
     }
     ui.show_palettes = ui.docking.layout.contains(&cadcraft_ui_egui::docking::Panel::Layers)
         || ui.docking.layout.contains(&cadcraft_ui_egui::docking::Panel::Properties);
-    // If the saved workspace predates ribbon support, migrate to ribbon-first layout:
-    // show ribbon and hide toolsets by default.
+    // If the saved workspace predates ribbon support, default ribbon to shown
+    // while preserving custom left columns, toolsets, and other palettes.
     if workspace.get("showRibbon").is_none() {
         ui.show_ribbon = true;
-        ui.show_toolsets = false;
-        let _ = ui.docking.set_visible(cadcraft_ui_egui::docking::Panel::ToolSets, false);
     }
     // Old or hand-edited files cannot reopen a dialog or replace the active drawing view.
     ui.dialog = None;
@@ -198,6 +196,7 @@ mod tests {
     fn temp_dir() -> PathBuf {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("cadcraft-workspace-test-{}-{sequence}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
     }
@@ -328,7 +327,7 @@ mod tests {
         let directory = temp_dir();
         let path = directory.join("workspace.json");
         let (mut store, _, _) = Workspace::at(Some(path.clone()));
-        let mut ui = UiState { show_palettes: false, ..Default::default() };
+        let mut ui = UiState { show_palettes: true, ..Default::default() };
         store.save_if_changed(&ui).unwrap();
         let good = fs::read(&path).unwrap();
         ui.collapsed_groups = vec!["x".repeat(257)];
@@ -344,13 +343,13 @@ mod tests {
         let (mut store, _, _) = Workspace::at(Some(path.clone()));
         // Simulate a destination becoming unavailable after startup.
         fs::create_dir(&path).unwrap();
-        let ui = UiState { show_palettes: false, ..Default::default() };
+        let ui = UiState { show_status_bar: false, ..Default::default() };
         let first_error = store.save_if_changed(&ui).unwrap_err();
         fs::remove_dir(&path).unwrap();
         assert_eq!(store.save_if_changed(&ui).unwrap_err(), first_error);
         assert!(!path.exists(), "ordinary frames must not retry disk writes");
         store.save_on_exit(&ui).unwrap();
-        assert!(!read(&path).unwrap().unwrap().show_palettes);
+        assert!(!read(&path).unwrap().unwrap().show_status_bar);
         fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -269,7 +269,32 @@ fn files(app: &CadApp, ui: &mut egui::Ui, changes: &mut Map<String, Value>) {
             }
         }
         ui.end_row();
+
+        ui.label(crate::tl!("Default template for new drawings"));
+        let template = cadcraft_engine::cmd::file::qnew_template();
+        ui.horizontal(|ui| {
+            let label = if template.is_empty() {
+                format!("({})", crate::tl!("None"))
+            } else {
+                template.clone()
+            };
+            ui.label(RichText::new(label).monospace());
+            if ui.button(crate::tl!("Browse...")).clicked() {
+                if let Some(p) = app.services.pick_open.as_ref().and_then(|f| f()) {
+                    changes.insert("QNEWTEMPLATE".into(), json!(p));
+                }
+            }
+            if !template.is_empty() && ui.button(crate::tl!("Clear")).clicked() {
+                changes.insert("QNEWTEMPLATE".into(), json!(""));
+            }
+        });
+        ui.end_row();
     });
+    ui.add_space(6.0);
+    let mut startup_create = app.ui.startup_create_drawing;
+    if ui.checkbox(&mut startup_create, crate::tl!("Create a drawing at startup")).changed() {
+        changes.insert("startupCreateDrawing".into(), json!(startup_create));
+    }
     hint(ui, crate::tl!("New and the first drawing at startup use these units unless a default template is set (QNEWTEMPLATE)."));
     hint(ui, crate::tl!("A drawing opened from a file keeps that file's format."));
     hint(ui, crate::tl!("Drawings with no file yet are saved in the default version. 0 minutes turns automatic save off."));
