@@ -65,6 +65,10 @@ fn tabs(panel: Panel) -> Node<Panel> {
     Node::Tabs { panels: vec![panel], active: 0 }
 }
 
+fn floating_location(rect: [f32; 4]) -> Location<Panel> {
+    Location { anchor: None, placement: Placement::Split(Zone::Center), size: None, floating: Some(rect), stack: None, sibling: Vec::new() }
+}
+
 fn split(axis: SplitAxis, size: SplitSize, first: Node<Panel>, second: Node<Panel>) -> Node<Panel> {
     Node::Split { axis, size, first: Box::new(first), second: Box::new(second) }
 }
@@ -81,25 +85,13 @@ impl Default for Workspace {
     fn default() -> Self {
         Self {
             layout: Layout {
-                root: Some(split(
-                    SplitAxis::Horizontal,
-                    SplitSize::FixedFirst(220.0),
-                    tabs(Panel::ToolSets),
-                    split(
-                        SplitAxis::Horizontal,
-                        SplitSize::FixedSecond(300.0),
-                        tabs(Panel::Canvas),
-                        Node::Stack {
-                            entries: vec![
-                                craft_ui::docking::StackEntry { panel: Panel::Layers, open: true, height: Some(135.0) },
-                                craft_ui::docking::StackEntry { panel: Panel::Properties, open: true, height: None },
-                            ],
-                        },
-                    ),
-                )),
+                root: Some(split(SplitAxis::Horizontal, SplitSize::FixedFirst(220.0), tabs(Panel::ToolSets), tabs(Panel::Canvas))),
                 floating: Vec::new(),
             },
-            hidden: Vec::new(),
+            hidden: vec![
+                (Panel::Properties, floating_location([860.0, 100.0, 320.0, 560.0])),
+                (Panel::Layers, floating_location([820.0, 120.0, 360.0, 480.0])),
+            ],
         }
     }
 }
@@ -155,7 +147,7 @@ impl Workspace {
             let location = next.layout.location(panel).map_err(|error| error.to_string())?;
             next.hidden.retain(|(id, _)| id != panel);
             next.hidden.push((*panel, location));
-        } else if let Action::Open { panel, .. } | Action::OpenAt { panel, .. } = &action {
+        } else if let Action::Open { panel, .. } | Action::OpenAt { panel, .. } | Action::Float { panel, .. } = &action {
             next.hidden.retain(|(id, _)| id != panel);
         }
         next.layout.apply_with_permissions(action, permissions).map_err(|error| error.to_string())?;
@@ -168,7 +160,7 @@ impl Workspace {
     pub fn reveal_panel(&mut self, panel: Panel) -> Result<(), String> {
         let mut next = self.clone();
         next.set_visible(panel, true)?;
-        next.apply(Action::Activate { panel })?;
+        let _ = next.apply(Action::Activate { panel });
         *self = next;
         Ok(())
     }
@@ -195,12 +187,32 @@ impl Workspace {
         }
         let restored = location.as_ref().is_some_and(|location| next.layout.restore(panel, location).is_ok());
         if !restored {
-            next.layout
-                .apply_with_permissions(
-                    Action::OpenAt { panel, anchor: Panel::Canvas, placement: Placement::Split(panel.default_side()) },
-                    permissions,
-                )
-                .map_err(|error| error.to_string())?;
+            let default_rect = match panel {
+                Panel::Properties => [860.0, 100.0, 320.0, 560.0],
+                Panel::Layers => [820.0, 120.0, 360.0, 480.0],
+                Panel::QuickCalc => [840.0, 140.0, 300.0, 400.0],
+                Panel::ExternalRefs => [800.0, 150.0, 340.0, 450.0],
+                _ => [200.0, 100.0, 300.0, 400.0],
+            };
+            if matches!(panel, Panel::Properties | Panel::Layers | Panel::QuickCalc | Panel::ExternalRefs) {
+                let float_loc = floating_location(default_rect);
+                if next.layout.restore(panel, &float_loc).is_err() {
+                    next.layout
+                        .apply_with_permissions(
+                            Action::OpenAt { panel, anchor: Panel::Canvas, placement: Placement::Split(panel.default_side()) },
+                            permissions,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    let _ = next.layout.apply_with_permissions(Action::Float { panel, rect: default_rect }, permissions);
+                }
+            } else {
+                next.layout
+                    .apply_with_permissions(
+                        Action::OpenAt { panel, anchor: Panel::Canvas, placement: Placement::Split(panel.default_side()) },
+                        permissions,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
         }
         next.validate()?;
         *self = next;
@@ -250,7 +262,15 @@ impl Workspace {
                         .filter(|number| number.is_finite() && number.abs() <= 1_000_000.0)
                         .ok_or("rect values must be finite and bounded")? as f32;
                 }
-                if operation == "float" { Action::Float { panel, rect: values } } else { Action::MoveFloating { panel, rect: values } }
+                if operation == "float" {
+                    if self.layout.floating.iter().any(|group| group.panels.contains(&panel)) {
+                        Action::MoveFloating { panel, rect: values }
+                    } else {
+                        Action::Float { panel, rect: values }
+                    }
+                } else {
+                    Action::MoveFloating { panel, rect: values }
+                }
             }
             "move" => {
                 let anchor = Panel::parse(params.get("target").and_then(Value::as_str).ok_or("target is required")?)?;
@@ -289,12 +309,85 @@ fn sync(workspace: &mut Workspace, app: &crate::CadApp) -> Result<(), String> {
     if !app.ui.show_palettes {
         workspace.set_visible(Panel::Layers, false)?;
         workspace.set_visible(Panel::Properties, false)?;
-    } else if !workspace.layout.contains(&Panel::Layers) && !workspace.layout.contains(&Panel::Properties) {
-        // Reopen the last surviving accordion entry before restoring its earlier sibling.
-        workspace.set_visible(Panel::Properties, true)?;
-        workspace.set_visible(Panel::Layers, true)?;
     }
     Ok(())
+}
+
+fn node_has_canvas(node: &Node<Panel>) -> bool {
+    match node {
+        Node::Tabs { panels, .. } => panels.contains(&Panel::Canvas),
+        Node::Split { first, second, .. } => node_has_canvas(first) || node_has_canvas(second),
+        Node::Stack { entries } => entries.iter().any(|e| e.panel == Panel::Canvas),
+    }
+}
+
+fn collect_node_panels(node: &Node<Panel>, out: &mut Vec<Panel>) {
+    match node {
+        Node::Tabs { panels, .. } => out.extend(panels.iter().copied()),
+        Node::Split { first, second, .. } => {
+            collect_node_panels(first, out);
+            collect_node_panels(second, out);
+        }
+        Node::Stack { entries } => out.extend(entries.iter().map(|e| e.panel)),
+    }
+}
+
+fn remove_sidebar_split(node: Node<Panel>, removed: &mut Vec<Panel>) -> Node<Panel> {
+    match node {
+        Node::Split { axis, size, first, second } => {
+            let first = remove_sidebar_split(*first, removed);
+            let second = remove_sidebar_split(*second, removed);
+
+            if axis == SplitAxis::Horizontal && node_has_canvas(&first) && !node_has_canvas(&second) {
+                let mut second_panels = Vec::new();
+                collect_node_panels(&second, &mut second_panels);
+                if second_panels.iter().all(|p| matches!(p, Panel::Properties | Panel::Layers | Panel::QuickCalc | Panel::ExternalRefs)) {
+                    removed.extend(second_panels);
+                    return first;
+                }
+            } else if axis == SplitAxis::Horizontal && node_has_canvas(&second) && !node_has_canvas(&first) {
+                let mut first_panels = Vec::new();
+                collect_node_panels(&first, &mut first_panels);
+                if first_panels.iter().all(|p| matches!(p, Panel::Properties | Panel::Layers | Panel::QuickCalc | Panel::ExternalRefs)) {
+                    removed.extend(first_panels);
+                    return second;
+                }
+            }
+            Node::Split { axis, size, first: Box::new(first), second: Box::new(second) }
+        }
+        other => other,
+    }
+}
+
+impl Workspace {
+    /// Removes legacy docked right sidebar for Properties/Layers, turning them into floating palettes.
+    pub fn migrate_remove_sidebar(&mut self) {
+        let mut removed = Vec::new();
+        if let Some(root) = self.layout.root.take() {
+            self.layout.root = Some(remove_sidebar_split(root, &mut removed));
+        }
+        for panel in [Panel::Properties, Panel::Layers] {
+            let default_rect = match panel {
+                Panel::Properties => [860.0, 100.0, 320.0, 560.0],
+                Panel::Layers => [820.0, 120.0, 360.0, 480.0],
+                _ => [840.0, 140.0, 300.0, 400.0],
+            };
+            if removed.contains(&panel) || !self.layout.contains(&panel) {
+                self.hidden.retain(|(p, _)| *p != panel);
+                self.hidden.push((panel, floating_location(default_rect)));
+            }
+        }
+        for (panel, location) in &mut self.hidden {
+            if matches!(panel, Panel::Properties | Panel::Layers) {
+                location.anchor = None;
+                location.stack = None;
+                location.size = None;
+                if location.floating.is_none() {
+                    location.floating = Some(if *panel == Panel::Properties { [860.0, 100.0, 320.0, 560.0] } else { [820.0, 120.0, 360.0, 480.0] });
+                }
+            }
+        }
+    }
 }
 
 fn publish_visibility(app: &mut crate::CadApp, workspace: &Workspace) {

@@ -46,6 +46,7 @@ fn snapshot(ui: &UiState) -> Result<Value, String> {
         return Err("historyLines must be between 0 and 12".into());
     }
     Ok(json!({
+        "sidebarMigrated": true,
         "docking": ui.docking,
         "showToolsets": ui.show_toolsets,
         "showPalettes": ui.show_palettes,
@@ -90,11 +91,17 @@ fn read(path: &Path) -> Result<Option<UiState>, String> {
     let docking = fields.as_object_mut().and_then(|fields| fields.remove("docking"));
     let mut ui: UiState = serde_json::from_value(fields).map_err(|error| format!("{}: invalid workspace: {error}", path.display()))?;
     if let Some(docking) = docking
-        && let Ok(docking) = serde_json::from_value::<cadcraft_ui_egui::docking::Workspace>(docking)
-        && docking.validate().is_ok()
+        && let Ok(mut docking) = serde_json::from_value::<cadcraft_ui_egui::docking::Workspace>(docking)
     {
-        ui.docking = docking;
+        if workspace.get("sidebarMigrated").is_none() {
+            docking.migrate_remove_sidebar();
+        }
+        if docking.validate().is_ok() {
+            ui.docking = docking;
+        }
     }
+    ui.show_palettes = ui.docking.layout.contains(&cadcraft_ui_egui::docking::Panel::Layers)
+        || ui.docking.layout.contains(&cadcraft_ui_egui::docking::Panel::Properties);
     // If the saved workspace predates ribbon support, migrate to ribbon-first layout:
     // show ribbon and hide toolsets by default.
     if workspace.get("showRibbon").is_none() {

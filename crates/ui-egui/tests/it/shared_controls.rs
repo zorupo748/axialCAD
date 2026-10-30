@@ -122,7 +122,11 @@ fn right_palettes_collapse_arrow_hides_menu() {
             app.logic(&ui.ctx().clone());
             cadcraft_ui_egui::palettes::right_palettes(app, ui);
         },
-        app(),
+        {
+            let mut a = app();
+            a.ui.show_palettes = true;
+            a
+        },
     );
     h.run_steps(5);
     assert!(h.state().ui.show_palettes);

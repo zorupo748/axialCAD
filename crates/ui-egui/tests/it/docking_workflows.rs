@@ -47,6 +47,8 @@ fn drag(harness: &mut Harness<'_, CadApp>, from: egui::Pos2, to: egui::Pos2) {
 #[test]
 fn real_panel_drag_float_close_reopen_and_full_workspace_reload() {
     let mut harness = harness(None, 1280.0, 1.0);
+    harness.state_mut().run("ui.panel.layers", json!({})).unwrap();
+    harness.run_steps(3);
     let source = harness.get_by_role_and_label(egui::accesskit::Role::Tab, "Layers").rect().center();
     let target = harness.get_by_role_and_label(egui::accesskit::Role::Tab, "Tool Sets").rect().center();
     drag(&mut harness, source, target);
@@ -65,6 +67,9 @@ fn real_panel_drag_float_close_reopen_and_full_workspace_reload() {
     harness.state_mut().run("ui.toggle.palettes", json!({"on": false})).unwrap();
     harness.run_steps(3);
     harness.state_mut().run("ui.toggle.palettes", json!({"on": true})).unwrap();
+    harness.run_steps(4);
+    assert!(!harness.state().ui.docking.layout.contains(&Panel::Layers));
+    harness.state_mut().run("ui.panel.layers", json!({})).unwrap();
     harness.run_steps(4);
     assert_eq!(harness.state().ui.docking.layout.floating.iter().find(|group| group.panels.contains(&Panel::Layers)).unwrap().rect, rect);
     let saved = serde_json::to_string(&harness.state().ui).unwrap();
@@ -104,6 +109,9 @@ fn docking_renders_default_float_and_redocked_at_normal_and_narrow_sizes() {
             let mut harness = harness(None, width, scale);
             for state in ["default", "floating", "redocked"] {
                 if state == "floating" {
+                    harness.state_mut().run("ui.panel.properties", json!({})).unwrap();
+                    harness.state_mut().run("ui.panel.layers", json!({})).unwrap();
+                    harness.run_steps(3);
                     harness.state_mut().run("ui.dock", json!({"operation":"float", "panel":"layers", "rect":[160,100,300,380]})).unwrap();
                 } else if state == "redocked" {
                     harness
@@ -114,7 +122,13 @@ fn docking_renders_default_float_and_redocked_at_normal_and_narrow_sizes() {
                 harness.run_steps(5);
                 harness.state().ui.docking.validate().unwrap();
                 let content = harness.state().ui.docking.layout.panels();
-                assert_eq!(content.len(), 4);
+                if state == "default" {
+                    assert_eq!(content.len(), 2);
+                    assert!(!content.contains(&&Panel::Layers));
+                    assert!(!content.contains(&&Panel::Properties));
+                } else {
+                    assert!(content.contains(&&Panel::Layers));
+                }
                 assert!(content.contains(&&Panel::Canvas));
                 if let Ok(directory) = std::env::var("CRAFT_UI_DOCKING_DIR") {
                     std::fs::create_dir_all(&directory).unwrap();
@@ -127,8 +141,33 @@ fn docking_renders_default_float_and_redocked_at_normal_and_narrow_sizes() {
 
 #[test]
 fn automation_reaches_split_stack_resize_and_tab_reorder_through_the_same_handler() {
-    use craft_ui::{docking::Action, layout::SplitSize};
+    use craft_ui::docking::{Action, Layout, Node, StackEntry};
+    use craft_ui::layout::{SplitAxis, SplitSize};
     let mut h = harness(None, 1280.0, 1.0);
+    h.state_mut().ui.docking = cadcraft_ui_egui::docking::Workspace {
+        layout: Layout {
+            root: Some(Node::Split {
+                axis: SplitAxis::Horizontal,
+                size: SplitSize::FixedFirst(220.0),
+                first: Box::new(Node::Tabs { active: 0, panels: vec![Panel::ToolSets] }),
+                second: Box::new(Node::Split {
+                    axis: SplitAxis::Horizontal,
+                    size: SplitSize::FixedSecond(300.0),
+                    first: Box::new(Node::Tabs { active: 0, panels: vec![Panel::Canvas] }),
+                    second: Box::new(Node::Stack {
+                        entries: vec![
+                            StackEntry { panel: Panel::Layers, open: true, height: Some(135.0) },
+                            StackEntry { panel: Panel::Properties, open: true, height: None },
+                        ],
+                    }),
+                }),
+            }),
+            floating: Vec::new(),
+        },
+        hidden: Vec::new(),
+    };
+    h.state_mut().ui.show_palettes = true;
+    h.run_steps(3);
     h.state_mut()
         .run(
             "ui.dock",
@@ -147,7 +186,33 @@ fn automation_reaches_split_stack_resize_and_tab_reorder_through_the_same_handle
 
 #[test]
 fn stack_boundary_resizes_by_pointer_and_keyboard_without_changing_the_drawing() {
+    use craft_ui::docking::{Layout, Node, StackEntry};
+    use craft_ui::layout::{SplitAxis, SplitSize};
     let mut h = harness(None, 1280.0, 1.0);
+    h.state_mut().ui.docking = cadcraft_ui_egui::docking::Workspace {
+        layout: Layout {
+            root: Some(Node::Split {
+                axis: SplitAxis::Horizontal,
+                size: SplitSize::FixedFirst(220.0),
+                first: Box::new(Node::Tabs { active: 0, panels: vec![Panel::ToolSets] }),
+                second: Box::new(Node::Split {
+                    axis: SplitAxis::Horizontal,
+                    size: SplitSize::FixedSecond(300.0),
+                    first: Box::new(Node::Tabs { active: 0, panels: vec![Panel::Canvas] }),
+                    second: Box::new(Node::Stack {
+                        entries: vec![
+                            StackEntry { panel: Panel::Layers, open: true, height: Some(135.0) },
+                            StackEntry { panel: Panel::Properties, open: true, height: None },
+                        ],
+                    }),
+                }),
+            }),
+            floating: Vec::new(),
+        },
+        hidden: Vec::new(),
+    };
+    h.state_mut().ui.show_palettes = true;
+    h.run_steps(3);
     let drawing = h.state().session.doc().unwrap().clone();
     let center = h
         .get_all_by_role_and_label(egui::accesskit::Role::Splitter, "Resize panels")
@@ -176,6 +241,8 @@ fn grouped_restore_preserves_order_and_rectangle_in_both_close_orders_after_relo
     use craft_ui::docking::{Action, Placement};
     for order in [[Panel::Layers, Panel::Properties], [Panel::Properties, Panel::Layers]] {
         let mut workspace = cadcraft_ui_egui::docking::Workspace::default();
+        workspace.reveal_panel(Panel::Layers).unwrap();
+        workspace.reveal_panel(Panel::Properties).unwrap();
         let rect = [50.0, 60.0, 320.0, 400.0];
         workspace.apply(Action::Float { panel: Panel::Layers, rect }).unwrap();
         workspace
@@ -198,9 +265,10 @@ fn grouped_restore_preserves_order_and_rectangle_in_both_close_orders_after_relo
 #[test]
 fn explicit_properties_open_restores_closed_panel_and_activates_inactive_tab() {
     let mut harness = harness(None, 1000.0, 1.0);
-    harness.state_mut().run("ui.dock", json!({"operation":"close","panel":"properties"})).unwrap();
+    assert!(!harness.state().ui.docking.layout.contains(&Panel::Properties));
     harness.state_mut().cmdline("PROPERTIES");
     assert!(harness.state().ui.docking.layout.contains(&Panel::Properties));
+    harness.state_mut().run("ui.panel.layers", json!({})).unwrap();
     harness.state_mut().run("ui.dock", json!({"operation":"float","panel":"layers","rect":[400,250,300,350]})).unwrap();
     harness.state_mut().run("ui.dock", json!({"operation":"move","panel":"properties","target":"layers","zone":"center"})).unwrap();
     harness.state_mut().run("ui.dock", json!({"operation":"activate","panel":"layers"})).unwrap();
@@ -215,6 +283,7 @@ fn explicit_properties_open_restores_closed_panel_and_activates_inactive_tab() {
 #[test]
 fn middle_press_over_floating_panel_does_not_pan_drawing() {
     let mut harness = harness(None, 1280.0, 1.0);
+    harness.state_mut().run("ui.panel.layers", json!({})).unwrap();
     harness.state_mut().run("ui.dock", json!({"operation":"float","panel":"layers","rect":[400,250,300,350]})).unwrap();
     harness.run_steps(4);
     let before = harness.state().session.state().unwrap().view();
@@ -248,21 +317,21 @@ fn type_command(h: &mut Harness<'_, CadApp>, command: &str) {
 #[test]
 fn properties_typed_in_rendered_command_line_reopens_and_selects_actual_workspace() {
     let mut h = harness(None, 1280.0, 1.0);
-    h.state_mut().run("ui.dock", json!({"operation":"close","panel":"properties"})).unwrap();
-    h.run_steps(3);
+    assert!(!h.state().ui.docking.layout.contains(&Panel::Properties));
     let drawing = h.state().session.doc().unwrap().clone();
     let tools = h.state().ui.docking.layout.location(&Panel::ToolSets).unwrap();
     type_command(&mut h, "PROPERTIES");
     assert!(h.state().ui.docking.layout.contains(&Panel::Properties));
-    assert!(h.state().ui.docking.layout.contains(&Panel::Layers));
+    assert!(!h.state().ui.docking.layout.contains(&Panel::Layers));
     let restored_tools = h.state().ui.docking.layout.location(&Panel::ToolSets).unwrap();
     assert_eq!(restored_tools.anchor, tools.anchor);
     assert_eq!(restored_tools.placement, tools.placement);
     assert_eq!(restored_tools.size, tools.size);
     assert_eq!(restored_tools.floating, tools.floating);
     assert_eq!(restored_tools.stack, tools.stack);
-    assert!(restored_tools.sibling.contains(&Panel::Properties));
+    assert!(h.state().ui.docking.layout.floating.iter().any(|group| group.panels.contains(&Panel::Properties)));
 
+    h.state_mut().run("ui.panel.layers", json!({})).unwrap();
     h.state_mut().run("ui.dock", json!({"operation":"float","panel":"layers","rect":[400,250,300,350]})).unwrap();
     h.state_mut().run("ui.dock", json!({"operation":"move","panel":"properties","target":"layers","zone":"center"})).unwrap();
     h.state_mut().run("ui.dock", json!({"operation":"activate","panel":"layers"})).unwrap();
@@ -276,6 +345,7 @@ fn properties_typed_in_rendered_command_line_reopens_and_selects_actual_workspac
 #[test]
 fn reset_typed_in_canvas_preserves_authoritative_workspace_replacement() {
     let mut h = harness(None, 1280.0, 1.0);
+    h.state_mut().run("ui.panel.layers", json!({})).unwrap();
     h.state_mut().run("ui.dock", json!({"operation":"float","panel":"layers","rect":[400,200,300,350]})).unwrap();
     h.run_steps(3);
     let drawing = h.state().session.doc().unwrap().clone();

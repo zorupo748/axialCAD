@@ -169,7 +169,7 @@ impl Default for UiState {
             show_ribbon: true,
             ribbon_tab: "Home".into(),
             ribbon_collapsed: false,
-            show_palettes: true,
+            show_palettes: false,
             show_toolbar: true,
             show_file_tabs: true,
             show_status_bar: true,
