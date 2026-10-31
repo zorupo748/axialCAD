@@ -364,7 +364,6 @@ pub fn submit(app: &mut CadApp) {
     // Dynamic Input: a split entry (`40,30`, `40<90`, `40,`) is completed from the cursor and
     // measured from the last point.
     if let Some(f) = dyn_frame(app) {
-        let cursor = app.canvas.cursor.unwrap_or(app.session.cursor);
         let last = app.session.last_point;
         let done = if app.session.settings.zlock
             && let Some(c3) = app.canvas.cursor3
@@ -380,7 +379,7 @@ pub fn submit(app: &mut CadApp) {
                 Some(format!("@0,0,{val}"))
             })
         } else {
-            crate::dyninput::parse(&app.cmd.buffer, &f).and_then(|e| crate::dyninput::complete(&e, &f, cursor, last))
+            crate::dyninput::parse(&app.cmd.buffer, &f).and_then(|e| crate::dyninput::complete(&e, &f, app.canvas.cursor, last))
         };
         if let Some(text) = done {
             app.cmd.buffer = text;

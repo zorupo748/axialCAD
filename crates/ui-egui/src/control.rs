@@ -365,16 +365,23 @@ pub fn handle(app: &mut CadApp, ctx: &egui::Context, req: &ControlRequest) -> Ou
             let wp3 = if world {
                 cadcraft_geom::Vec3::new(x, y, f("z").unwrap_or(0.0))
             } else {
-                app.canvas.xf.map(|xf| xf.to_world3(egui::pos2(x as f32, y as f32), plane)).unwrap_or_else(|| cadcraft_geom::Vec3::new(x, y, 0.0))
+                let Some(xf) = app.canvas.xf else { return err("canvas transform is unavailable") };
+                let offset =
+                    app.session.current_prompt().and_then(|p| p.base3).map_or(app.session.drawing_plane_offset(), |base| plane.normal_offset(base));
+                let Some(point) = xf.to_world3_with_offset(egui::pos2(x as f32, y as f32), plane, offset) else {
+                    return err("pointer ray is parallel to the active drawing plane");
+                };
+                point
             };
             let wp = wp3.xy();
-            app.session.cursor = wp;
+            let cursor = if app.session.running.as_ref().is_some_and(|r| r.id == "line") { plane.coordinates(wp3) } else { wp };
+            app.session.cursor = cursor;
             app.session.cursor3 = wp3;
             app.session.cursor_deferred = None;
-            app.canvas.cursor = Some(wp);
+            app.canvas.cursor = Some(cursor);
             app.canvas.cursor3 = Some(wp3);
             if action == "move" {
-                if let Some(sp) = app.canvas.xf.map(|xf| xf.to_screen(wp)) {
+                if let Some(sp) = app.canvas.xf.map(|xf| if world { xf.to_screen3(wp3) } else { egui::pos2(x as f32, y as f32) }) {
                     app.synthetic.push(egui::Event::PointerMoved(sp));
                 }
                 return ok(json!({"world": [wp3.x, wp3.y, wp3.z]}));

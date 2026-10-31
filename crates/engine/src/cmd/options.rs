@@ -92,13 +92,16 @@ pub fn profile(s: &Session) -> Value {
 pub fn apply(s: &mut Session, values: &Value) -> Result<()> {
     let Some(obj) = values.as_object() else { return Err(bad("options", "expected an object of profile variables")) };
     let before = s.settings.clone();
+    let before_template = crate::cmd::file::qnew_template();
     for (name, v) in obj {
         if !is_profile_var(name) {
             s.settings = before;
+            crate::cmd::file::set_qnew_template(&before_template);
             return Err(bad("options", format!("{name} is not a profile setting")));
         }
         if let Err(e) = crate::sysvars::set(s, name, v) {
             s.settings = before;
+            crate::cmd::file::set_qnew_template(&before_template);
             return Err(bad("options", format!("invalid value for {}: {e}", name.to_ascii_uppercase())));
         }
     }
@@ -168,11 +171,13 @@ fn run_options(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let values: Map<String, Value> = obj.iter().filter(|(k, _)| k.as_str() != "reset").map(|(k, v)| (k.clone(), v.clone())).collect();
     let before = s.settings.clone();
+    let before_template = crate::cmd::file::qnew_template();
     if reset_first {
         reset(s);
     }
     if let Err(e) = apply(s, &Value::Object(values)) {
         s.settings = before;
+        crate::cmd::file::set_qnew_template(&before_template);
         return Err(e);
     }
     s.touch();

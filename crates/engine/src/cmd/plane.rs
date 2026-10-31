@@ -135,10 +135,14 @@ pub(crate) fn run_plane_origin(s: &mut Session, _p: &Value) -> Result<Value> {
 }
 
 pub(crate) fn run_plane_pick(s: &mut Session, p: &Value) -> Result<Value> {
-    if let Some(pt) = p.get("point").and_then(Value::as_array).filter(|a| a.len() == 3) {
-        let x = pt.first().and_then(Value::as_f64).unwrap_or(0.0);
-        let y = pt.get(1).and_then(Value::as_f64).unwrap_or(0.0);
-        let z = pt.get(2).and_then(Value::as_f64).unwrap_or(0.0);
+    if let Some(value) = p.get("point") {
+        let Some(pt) = value.as_array().filter(|a| a.len() == 3) else {
+            return Err(bad("plane.pick", "`point` must be an array of three finite numbers"));
+        };
+        let coordinate = |i: usize| pt.get(i).and_then(Value::as_f64).filter(|v| v.is_finite());
+        let (Some(x), Some(y), Some(z)) = (coordinate(0), coordinate(1), coordinate(2)) else {
+            return Err(bad("plane.pick", "`point` must be an array of three finite numbers"));
+        };
         let off = match s.drawing_plane() {
             DrawingPlane::XY => z,
             DrawingPlane::XZ => y,

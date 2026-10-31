@@ -95,11 +95,7 @@ fn same_content(a: &ListKey, b: &ListKey) -> bool {
 
 /// Embed a 2D plane coordinate `p` into 3D world coordinates for the given drawing plane and offset.
 pub(crate) fn point_on_plane(p: Vec2, plane: cadcraft_geom::DrawingPlane, offset: f64) -> Vec3 {
-    match plane {
-        cadcraft_geom::DrawingPlane::XY => Vec3::new(p.x, p.y, offset),
-        cadcraft_geom::DrawingPlane::XZ => Vec3::new(p.x, offset, p.y),
-        cadcraft_geom::DrawingPlane::YZ => Vec3::new(offset, p.x, p.y),
-    }
+    plane.embed(p, offset)
 }
 
 #[derive(Default)]
@@ -1465,6 +1461,24 @@ fn effective_point(app: &mut CadApp, raw: Vec2, xf: &Xf, ctx: &egui::Context) ->
     r.point
 }
 
+fn store_cursor_resolution(app: &mut CadApp, point: Option<(Vec2, Vec3)>) {
+    if let Some((cursor, cursor3)) = point {
+        app.canvas.cursor = Some(cursor);
+        app.session.cursor = cursor;
+        app.canvas.cursor3 = Some(cursor3);
+        app.session.cursor3 = cursor3;
+        app.session.cursor_deferred = app.canvas.snap.and_then(|hit| hit.deferred);
+        app.canvas.parallel_plane_warning = false;
+    } else {
+        app.canvas.cursor = None;
+        app.canvas.cursor3 = None;
+        app.canvas.snap = None;
+        app.canvas.active_axis_3d = None;
+        app.session.cursor_deferred = None;
+        // The canvas option gates preview and click handling; session cursor fields stay last-valid.
+    }
+}
+
 /// Unified 3D effective point resolution for hover, dynamic input, previews, and click confirmation.
 /// Enforces the explicit priority:
 /// 1. Locked Dynamic Input / grip dimensions.
@@ -1472,6 +1486,10 @@ fn effective_point(app: &mut CadApp, raw: Vec2, xf: &Xf, ctx: &egui::Context) ->
 /// 3. Ejes: ORTHO 3D closest axis (X, Y, or Z) with hysteresis, or legacy Z-LOCK if active.
 /// 4. Plano libre: work plane unprojection with elevation offset (user work plane for first point,
 ///    continuation height of previous vertex for subsequent points).
+///
+/// A parallel free-plane ray has no point: it clears the cursor and cannot confirm a click.
+/// Explicit 3D endpoint snaps remain WCS points; ordinary 2D snap coordinates are embedded in
+/// the active plane by LINE's `Input::Point` contract.
 fn resolve_effective_point(
     app: &mut CadApp,
     hp: Pos2,
@@ -1479,8 +1497,8 @@ fn resolve_effective_point(
     ctx: &egui::Context,
     prompt_base: Option<Vec2>,
     dyn_frame: Option<crate::dyninput::Frame>,
-) -> (Vec2, Vec3) {
-    let raw2 = xf.to_world(hp);
+) -> Option<(Vec2, Vec3)> {
+    let raw_world = xf.to_world(hp);
     let c = xf.rect.center();
     let q = Vec2::new(f64::from(hp.x - c.x) / xf.scale, -f64::from(hp.y - c.y) / xf.scale);
     let cam = app.session.camera();
@@ -1492,42 +1510,35 @@ fn resolve_effective_point(
     let orthomode = app.session.settings.orthomode;
     let prompt_base3 = app.session.current_prompt().as_ref().and_then(|p| p.base3);
     let base3 = prompt_base3.unwrap_or(app.session.last_point3);
+    let line_prompt = app.session.running.as_ref().is_some_and(|r| r.id == "line");
+    let continuation_offset = if prompt_base.is_some() { plane.normal_offset(base3) } else { plane_offset };
+    let plane_point = xf.to_world3_with_offset(hp, plane, continuation_offset);
+    let raw2 = if line_prompt { plane_point.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
+    let prompt_point = |p: Vec2| {
+        if prompt_base.is_some() && !line_prompt { Vec3::new(p.x, p.y, base3.z) } else { plane.embed(p, continuation_offset) }
+    };
 
     // Priority 1: Locked Dynamic Input or Grip Held
     if let Some(f) = dyn_frame
         && let Some(e) = crate::dyninput::parse(&app.cmd.buffer, &f)
         && e.first_locked().is_some()
     {
+        if line_prompt && plane_point.is_none() && !(app.cmd.second_locked() && e.second_value().is_some()) {
+            app.canvas.parallel_plane_warning = true;
+            return None;
+        }
         let eff = crate::dyninput::constrain(&e, &f, raw2, app.cmd.second_locked());
         app.canvas.snap = None;
         app.canvas.track = None;
         app.canvas.active_axis_3d = None;
-        let eff3 = if prompt_base.is_some() {
-            Vec3::new(eff.x, eff.y, base3.z)
-        } else {
-            match plane {
-                cadcraft_geom::DrawingPlane::XY => Vec3::new(eff.x, eff.y, plane_offset),
-                cadcraft_geom::DrawingPlane::XZ => Vec3::new(eff.x, plane_offset, eff.y),
-                cadcraft_geom::DrawingPlane::YZ => Vec3::new(plane_offset, eff.x, eff.y),
-            }
-        };
-        return (eff, eff3);
+        return Some((eff, prompt_point(eff)));
     }
     let grip_held = crate::grip_dyn::constrain(app, raw2);
     if let Some(q_grip) = grip_held {
         app.canvas.snap = None;
         app.canvas.track = None;
         app.canvas.active_axis_3d = None;
-        let eff3 = if prompt_base.is_some() {
-            Vec3::new(q_grip.x, q_grip.y, base3.z)
-        } else {
-            match plane {
-                cadcraft_geom::DrawingPlane::XY => Vec3::new(q_grip.x, q_grip.y, plane_offset),
-                cadcraft_geom::DrawingPlane::XZ => Vec3::new(q_grip.x, plane_offset, q_grip.y),
-                cadcraft_geom::DrawingPlane::YZ => Vec3::new(plane_offset, q_grip.x, q_grip.y),
-            }
-        };
-        return (q_grip, eff3);
+        return Some((q_grip, prompt_point(q_grip)));
     }
 
     // Priority 2: 3D LINE Endpoint Snap (when in 3D camera view)
@@ -1538,44 +1549,41 @@ fn resolve_effective_point(
     if !cam.is_plan() && wants_point && app.session.pending_window.is_none() && is_end_active {
         let ap_cam = aperture / xf.scale;
         let cycle_idx = app.canvas.snap_cycle.map_or(0, |c| c.index);
-        if let Ok(st) = app.session.state() {
-            if let Some(hit3d) = snap::snap_3d_line_endpoints(&st.doc, &st.edit_space(), &cam, q, ap_cam, cycle_idx) {
-                let p3 = hit3d.point3.unwrap_or_else(|| Vec3::new(hit3d.point.x, hit3d.point.y, 0.0));
-                app.canvas.snap = Some(hit3d);
-                app.canvas.track = None;
-                app.canvas.active_axis_3d = None;
-                app.canvas.parallel_plane_warning = false;
-                return (p3.xy(), p3);
-            }
+        if let Ok(st) = app.session.state()
+            && let Some(hit3d) = snap::snap_3d_line_endpoints(&st.doc, &st.edit_space(), &cam, q, ap_cam, cycle_idx)
+        {
+            let p3 = hit3d.point3.unwrap_or_else(|| Vec3::new(hit3d.point.x, hit3d.point.y, 0.0));
+            app.canvas.snap = Some(hit3d);
+            app.canvas.track = None;
+            app.canvas.active_axis_3d = None;
+            app.canvas.parallel_plane_warning = false;
+            return Some((if line_prompt { plane.coordinates(p3) } else { p3.xy() }, p3));
         }
     }
 
     // Priority 2b: Standard 2D snap and tracking
     let mut eff = effective_point(app, raw2, xf, ctx);
-    if !zlock
-        && dyn_frame.and_then(|f| crate::dyninput::parse(&app.cmd.buffer, &f)).is_none_or(|e| e.first_locked().is_none())
-    {
+    if !zlock && dyn_frame.and_then(|f| crate::dyninput::parse(&app.cmd.buffer, &f)).is_none_or(|e| e.first_locked().is_none()) {
         override_cursor(app, raw2, xf);
-        if app.session.snap_override().is_some() || snap_cycle(app, raw2, aperture / xf.scale).is_some() {
-            if let Some(c) = app.canvas.cursor {
-                eff = c;
-            }
+        if (app.session.snap_override().is_some() || snap_cycle(app, raw2, aperture / xf.scale).is_some())
+            && let Some(c) = app.canvas.cursor
+        {
+            eff = c;
         }
     }
 
     if app.canvas.snap.is_some() {
         app.canvas.active_axis_3d = None;
         app.canvas.parallel_plane_warning = false;
-        let eff3 = if prompt_base.is_some() {
-            Vec3::new(eff.x, eff.y, base3.z)
+        let eff3 = if let Some(hit) = app.canvas.snap
+            && let Some(p3) = hit.point3
+            && line_prompt
+        {
+            return Some((plane.coordinates(p3), p3));
         } else {
-            match plane {
-                cadcraft_geom::DrawingPlane::XY => Vec3::new(eff.x, eff.y, plane_offset),
-                cadcraft_geom::DrawingPlane::XZ => Vec3::new(eff.x, plane_offset, eff.y),
-                cadcraft_geom::DrawingPlane::YZ => Vec3::new(plane_offset, eff.x, eff.y),
-            }
+            prompt_point(eff)
         };
-        return (eff, eff3);
+        return Some((eff, eff3));
     }
 
     // Priority 3: 3D Axis Snapping (ORTHO 3D) or legacy Z-LOCK
@@ -1587,7 +1595,7 @@ fn resolve_effective_point(
             app.canvas.snap = None;
             app.canvas.track = None;
             app.canvas.parallel_plane_warning = false;
-            return (eff3.xy(), eff3);
+            return Some((if line_prompt { plane.coordinates(eff3) } else { eff3.xy() }, eff3));
         } else if orthomode {
             let prev_axis = app.canvas.active_axis_3d;
             let (ortho_pt3, axis, _) = cam.closest_axis_3d_with_prev(q, base3, prev_axis);
@@ -1595,43 +1603,20 @@ fn resolve_effective_point(
             app.canvas.snap = None;
             app.canvas.track = None;
             app.canvas.parallel_plane_warning = false;
-            return (ortho_pt3.xy(), ortho_pt3);
+            return Some((if line_prompt { plane.coordinates(ortho_pt3) } else { ortho_pt3.xy() }, ortho_pt3));
         }
     }
 
     // Priority 4: Free plane unprojection
     app.canvas.active_axis_3d = None;
-    if prompt_base.is_some() {
-        let continuation_offset = match plane {
-            cadcraft_geom::DrawingPlane::XY => base3.z,
-            cadcraft_geom::DrawingPlane::XZ => base3.y,
-            cadcraft_geom::DrawingPlane::YZ => base3.x,
-        };
-        match cam.unproject_to_plane_with_offset(q, plane, continuation_offset) {
-            Some(p3) => {
-                app.canvas.parallel_plane_warning = false;
-                (p3.xy(), p3)
-            }
-            None => {
-                app.canvas.parallel_plane_warning = true;
-                (eff, Vec3::new(eff.x, eff.y, continuation_offset))
-            }
+    match plane_point {
+        Some(p3) => {
+            app.canvas.parallel_plane_warning = false;
+            Some((if line_prompt { plane.coordinates(p3) } else { p3.xy() }, p3))
         }
-    } else {
-        match cam.unproject_to_plane_with_offset(q, plane, plane_offset) {
-            Some(p3) => {
-                app.canvas.parallel_plane_warning = false;
-                (p3.xy(), p3)
-            }
-            None => {
-                app.canvas.parallel_plane_warning = true;
-                let default_p3 = match plane {
-                    cadcraft_geom::DrawingPlane::XY => Vec3::new(eff.x, eff.y, plane_offset),
-                    cadcraft_geom::DrawingPlane::XZ => Vec3::new(eff.x, plane_offset, eff.y),
-                    cadcraft_geom::DrawingPlane::YZ => Vec3::new(plane_offset, eff.x, eff.y),
-                };
-                (eff, default_p3)
-            }
+        None => {
+            app.canvas.parallel_plane_warning = true;
+            None
         }
     }
 }
@@ -1716,22 +1701,29 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // taken by the row.
     let on_menu = hover_pos.is_some_and(|p| over_canvas_menu(app, p));
     // Graphical height adjustment manipulator
+    let mut offset_adjust_confirmed = false;
     if app.canvas.height_adjust {
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             app.canvas.height_adjust = false;
             app.session.set_drawing_plane_offset(app.canvas.height_adjust_start_offset);
-            app.session.echo("Ajuste de cota cancelado.");
+            app.session.echo(crate::tl!("Plane offset adjustment cancelled."));
         } else if inside && pressed_primary && !middle_down {
             app.canvas.height_adjust = false;
-            app.session.echo(format!("Cota de plano fijada en {:.2}.", app.session.drawing_plane_offset()));
+            offset_adjust_confirmed = true;
+            app.session.echo(crate::tf!("Drawing plane offset fixed at {offset}.", offset = format!("{:.2}", app.session.drawing_plane_offset())));
         } else if let Some(hp) = hover_pos {
             let cam = app.session.camera();
             let c = xf.rect.center();
             let q = Vec2::new(f64::from(hp.x - c.x) / xf.scale, -f64::from(hp.y - c.y) / xf.scale);
             let anchor = app.canvas.height_adjust_anchor.unwrap_or(Vec3::ZERO);
-            let z = cam.unproject_vertical_z(q, anchor);
-            if z.is_finite() {
-                app.session.set_drawing_plane_offset(z);
+            let plane = app.session.drawing_plane();
+            let normal = match plane {
+                cadcraft_geom::DrawingPlane::XY => Vec3::Z,
+                cadcraft_geom::DrawingPlane::XZ => Vec3::new(0.0, 1.0, 0.0),
+                cadcraft_geom::DrawingPlane::YZ => Vec3::new(1.0, 0.0, 0.0),
+            };
+            if let Some(offset) = cam.unproject_axis_coordinate(q, anchor, normal) {
+                app.session.set_drawing_plane_offset(offset);
             }
         }
     }
@@ -1913,23 +1905,11 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 if !loop_prompt.as_ref().is_some_and(cadcraft_engine::pointmod::accepts) {
                     break;
                 }
-                let _loop_base = loop_prompt.as_ref().and_then(|p| p.base);
-                let loop_base3 = loop_prompt.as_ref().and_then(|p| p.base3);
-
-                let plane = app.session.drawing_plane();
-                let plane_offset = if let Some(b3) = loop_base3 {
-                    match plane {
-                        cadcraft_geom::DrawingPlane::XY => b3.z,
-                        cadcraft_geom::DrawingPlane::XZ => b3.y,
-                        cadcraft_geom::DrawingPlane::YZ => b3.x,
-                    }
-                } else {
-                    app.session.drawing_plane_offset()
+                let loop_base = loop_prompt.as_ref().and_then(|p| p.base);
+                let loop_dyn_frame = crate::cmdline::dyn_frame(app);
+                let Some((_, pt3)) = resolve_effective_point(app, *pos, &xf, ui.ctx(), loop_base, loop_dyn_frame) else {
+                    continue;
                 };
-                let pt3 = app.canvas.cursor3.unwrap_or_else(|| {
-                    xf.to_world3_with_offset(*pos, plane, plane_offset)
-                        .unwrap_or_else(|| xf.to_world3_at(*pos, plane, plane_offset))
-                });
                 if !pt3.is_finite() {
                     app.session.echo("Point coordinates must be finite.");
                     continue;
@@ -1950,27 +1930,15 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     let prompt_base3 = prompt.as_ref().and_then(|p| p.base3);
 
     let plane = app.session.drawing_plane();
-    let plane_offset = prompt_base3.map_or(app.session.drawing_plane_offset(), |b| match plane {
-        cadcraft_geom::DrawingPlane::XY => b.z,
-        cadcraft_geom::DrawingPlane::XZ => b.y,
-        cadcraft_geom::DrawingPlane::YZ => b.x,
-    });
-    let raw_world3 = hover_pos.filter(|_| inside).map(|p| xf.to_world3_at(p, plane, plane_offset));
-    let raw_world = raw_world3.map(|p| p.xy());
+    let plane_offset = prompt_base3.map_or(app.session.drawing_plane_offset(), |b| plane.normal_offset(b));
+    let raw_world = hover_pos.filter(|_| inside).map(|p| xf.to_world(p));
     let dyn_frame = crate::cmdline::dyn_frame(app);
-    if let (Some(_w), Some(_w3)) = (raw_world, raw_world3) {
-        let (eff, eff3) = resolve_effective_point(app, hover_pos.unwrap_or(pos2(0.0, 0.0)), &xf, ui.ctx(), prompt_base, dyn_frame);
-        app.canvas.cursor = Some(eff);
-        app.session.cursor = eff;
-        app.canvas.cursor3 = Some(eff3);
-        app.session.cursor3 = eff3;
-        app.session.cursor_deferred = app.canvas.snap.and_then(|h| h.deferred);
+    if raw_world.is_some() {
+        let point = resolve_effective_point(app, hover_pos.unwrap_or(pos2(0.0, 0.0)), &xf, ui.ctx(), prompt_base, dyn_frame);
+        store_cursor_resolution(app, point);
     } else {
-        app.canvas.cursor = None;
-        app.canvas.cursor3 = None;
-        app.canvas.snap = None;
-        app.canvas.active_axis_3d = None;
-        app.session.cursor_deferred = None;
+        store_cursor_resolution(app, None);
+        app.canvas.parallel_plane_warning = false;
     }
 
     // A click on the Dynamic Input options menu picks the keyword; elsewhere it closes the menu.
@@ -1991,7 +1959,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         app.session.pending_window = None;
         app.canvas.drag_window = false;
     }
-    let pressed_primary = pressed_primary && !app.canvas.height_adjust && !picked && !hatch_dialog && !idle_dbl;
+    let pressed_primary = pressed_primary && !app.canvas.height_adjust && !offset_adjust_confirmed && !picked && !hatch_dialog && !idle_dbl;
     let key: CycleKey = (
         app.session.running.as_ref().map(|r| r.id.clone()),
         app.session.current_prompt().map(|p| p.message),
@@ -2417,16 +2385,28 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         let anchor = app.canvas.height_adjust_anchor.unwrap_or(Vec3::ZERO);
         let cur_z = app.session.drawing_plane_offset();
         let p_base = xf.to_screen3(anchor);
-        let p_top = xf.to_screen3(Vec3::new(anchor.x, anchor.y, cur_z));
+        let plane = app.session.drawing_plane();
+        let p_top = xf.to_screen3(plane.embed(plane.coordinates(anchor), cur_z));
         painter.line_segment([p_base, p_top], Stroke::new(2.0, t.toggle_on));
         painter.circle_filled(p_top, 4.0, t.toggle_on);
-        let readout = format!("Cota: {:+.2} (Clic: fijar, Esc: cancelar)", cur_z);
+        let readout = crate::tf!("Elevation: {offset} (Click: fix, Esc: cancel)", offset = format!("{cur_z:+.2}"));
         tooltip(&painter, p_top + vec2(16.0, -12.0), &readout);
     }
     // Parallel plane view ambiguity warning
-    if app.canvas.parallel_plane_warning {
+    let active_normal = match app.session.drawing_plane() {
+        cadcraft_geom::DrawingPlane::XY => Vec3::Z,
+        cadcraft_geom::DrawingPlane::XZ => Vec3::new(0.0, 1.0, 0.0),
+        cadcraft_geom::DrawingPlane::YZ => Vec3::new(1.0, 0.0, 0.0),
+    };
+    let adjust_axis_hidden = app.canvas.height_adjust && 1.0 - app.session.camera().view_dir().dot(active_normal).powi(2) <= 1e-6;
+    if app.canvas.parallel_plane_warning || adjust_axis_hidden {
         let warn_pos = pos2(rect.center().x, rect.top() + 24.0);
-        tooltip(&painter, warn_pos, "⚠ Vista paralela al plano de dibujo (cota ambigua)");
+        let warning = if adjust_axis_hidden {
+            crate::tl!("⚠ View is parallel to the plane normal; its offset cannot be adjusted from this view")
+        } else {
+            crate::tl!("⚠ View is parallel to the drawing plane (offset is ambiguous)")
+        };
+        tooltip(&painter, warn_pos, warning);
     }
     draw_tiles(app, ui, &tiles);
     // UCS icon, ViewCube and viewport label.
@@ -3496,6 +3476,184 @@ mod hatch_pick_tests {
         assert_eq!(super::hatch_at(&app, Vec2::new(5.0, 5.0), 10.0).map(|h| h.hex()), Some(hx));
         assert_eq!(super::hatch_at(&app, Vec2::new(25.0, 0.0), 10.0), None, "a line is not a hatch");
         assert_eq!(super::hatch_at(&app, Vec2::new(60.0, 60.0), 10.0), None);
+    }
+
+    #[cfg(test)]
+    mod work_plane_cursor_tests {
+        use super::super::{Xf, resolve_effective_point};
+        use cadcraft_engine::{Input, Session};
+        use cadcraft_geom::{DrawingPlane, Vec2, Vec3};
+        use egui::{Context, Pos2, Rect, vec2};
+        use serde_json::json;
+
+        use crate::{CadApp, Services};
+
+        fn app_on_plane(plane: DrawingPlane, offset: f64) -> CadApp {
+            let mut app = CadApp::new(Session::new(), Services::default());
+            app.session.execute("view.swiso", &json!({})).unwrap();
+            app.session.set_drawing_plane(plane);
+            app.session.set_drawing_plane_offset(offset);
+            app.session.settings.orthomode = false;
+            app.session.settings.osmode = 0;
+            app
+        }
+
+        fn resolve_at(app: &mut CadApp, point: Vec3) -> Option<(Vec2, Vec3)> {
+            let state = app.session.state().unwrap();
+            let xf = Xf {
+                rect: Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0)),
+                center: state.view().center,
+                scale: 50.0,
+                camera: Some(app.session.camera()),
+            };
+            let screen = xf.to_screen3(point);
+            let prompt_base = app.session.current_prompt().and_then(|p| p.base);
+            let dyn_frame = crate::cmdline::dyn_frame(app);
+            resolve_effective_point(app, screen, &xf, &Context::default(), prompt_base, dyn_frame)
+        }
+
+        #[test]
+        fn dynamic_input_uses_local_coordinates_on_each_work_plane() {
+            for (plane, offset) in [(DrawingPlane::XY, 12.5), (DrawingPlane::XZ, -7.25), (DrawingPlane::YZ, 3.75)] {
+                let mut app = app_on_plane(plane, offset);
+                app.session.settings.dynpi_cartesian = true;
+                app.session.start("line").unwrap();
+                app.cmd.buffer = "5,".into();
+
+                let first_target = plane.embed(Vec2::new(5.0, 7.0), offset);
+                let (_, first) = resolve_at(&mut app, first_target).expect("first point resolves");
+                assert!(first.dist(first_target) < 1e-4, "first dynamic point on {plane:?}: {first:?}");
+
+                let base = plane.embed(Vec2::new(10.0, 20.0), offset);
+                app.session.input(Input::Point3(base)).unwrap();
+                assert_eq!(
+                    app.session.current_prompt().and_then(|p| p.base),
+                    Some(Vec2::new(10.0, 20.0)),
+                    "LINE prompt base uses local plane coordinates for {plane:?}; active plane={:?}, prompt base3={:?}",
+                    app.session.drawing_plane(),
+                    app.session.current_prompt().and_then(|p| p.base3),
+                );
+                let next_target = plane.embed(Vec2::new(15.0, 27.0), offset);
+                let (_, next) = resolve_at(&mut app, next_target).expect("continuation resolves");
+                assert!(next.dist(next_target) < 1e-4, "continuation dynamic point on {plane:?}: {next:?}");
+            }
+        }
+
+        #[test]
+        fn parallel_work_plane_ray_does_not_create_a_fallback_point() {
+            let mut app = app_on_plane(DrawingPlane::XZ, 14.0);
+            app.session.execute("view.top", &json!({})).unwrap();
+            app.session.start("line").unwrap();
+            assert!(resolve_at(&mut app, Vec3::new(2.0, 14.0, 3.0)).is_none());
+            assert!(app.canvas.parallel_plane_warning);
+        }
+
+        #[test]
+        fn spatial_endpoint_snap_remains_a_wcs_capture_off_the_work_plane() {
+            let mut app = app_on_plane(DrawingPlane::XZ, 9.0);
+            let endpoint = Vec3::new(4.0, 12.0, 6.0);
+            app.session.execute("line", &json!({"points": [[100.0, 100.0, 100.0], [4.0, 12.0, 6.0]]})).unwrap();
+            app.session.settings.osmode = cadcraft_engine::snap::mode::END;
+            app.session.start("line").unwrap();
+
+            let (_, captured) = resolve_at(&mut app, endpoint).expect("3D endpoint snap resolves");
+            assert_eq!(captured, endpoint, "3D endpoint snaps stay at their captured WCS point");
+            assert_ne!(captured.y, app.session.drawing_plane_offset());
+        }
+
+        #[test]
+        fn ordinary_2d_snap_coordinates_are_embedded_in_the_work_plane() {
+            let mut app = app_on_plane(DrawingPlane::XZ, -6.0);
+            app.session.execute("line", &json!({"points": [[0.0, 0.0], [10.0, 10.0]]})).unwrap();
+            app.session.settings.osmode = cadcraft_engine::snap::mode::MID;
+            app.session.start("line").unwrap();
+
+            let midpoint = DrawingPlane::XZ.embed(Vec2::new(5.0, 5.0), -6.0);
+            let (_, captured) = resolve_at(&mut app, midpoint).expect("midpoint snap resolves");
+            assert_eq!(app.canvas.snap.map(|hit| hit.mode), Some(cadcraft_engine::snap::mode::MID));
+            assert!(app.canvas.snap.is_some_and(|hit| hit.point3.is_none()), "2D snaps remain plane coordinates");
+            assert!(captured.dist(midpoint) < 1e-4);
+        }
+
+        #[test]
+        fn dynamic_input_acceptance_uses_the_work_plane_coordinate_contract() {
+            for (plane, offset) in [(DrawingPlane::XY, 12.5), (DrawingPlane::XZ, -7.25), (DrawingPlane::YZ, 3.75)] {
+                let mut app = app_on_plane(plane, offset);
+                app.session.settings.dynpi_cartesian = true;
+                app.session.cmdline("line").unwrap();
+
+                app.canvas.cursor = Some(Vec2::new(10.0, 20.0));
+                app.cmd.buffer = "10,20".into();
+                crate::cmdline::submit(&mut app);
+                assert_eq!(app.session.last_point3, plane.embed(Vec2::new(10.0, 20.0), offset), "Dynamic Input first point on {plane:?}");
+
+                app.canvas.cursor = Some(Vec2::new(13.0, 24.0));
+                app.cmd.buffer = "3,4".into();
+                crate::cmdline::submit(&mut app);
+                assert_eq!(app.session.last_point3, plane.embed(Vec2::new(13.0, 24.0), offset), "Dynamic Input continuation on {plane:?}");
+            }
+        }
+
+        #[test]
+        fn invalid_cursor_cannot_complete_dynamic_input_from_a_stale_position() {
+            let mut app = app_on_plane(DrawingPlane::XZ, 9.0);
+            app.session.settings.dynpi_cartesian = true;
+            app.session.cmdline("line").unwrap();
+            app.session.cmdline("10,20").unwrap();
+            let accepted = app.session.last_point3;
+            app.session.cursor = Vec2::new(80.0, 90.0);
+            app.canvas.cursor = None;
+            app.canvas.parallel_plane_warning = true;
+            app.cmd.buffer = "5".into();
+
+            crate::cmdline::submit(&mut app);
+            assert_eq!(app.session.last_point3, accepted, "direct distance input must not use a stale cursor");
+            assert!(app.session.log.last().is_some_and(|line| line.contains("valid cursor position")));
+
+            app.cmd.buffer = "5,".into();
+
+            crate::cmdline::submit(&mut app);
+            assert_eq!(app.session.last_point3, accepted, "a missing second Dynamic Input value must not reuse stale cursor state");
+            assert!(app.session.prompting(), "invalid cursor input must leave LINE active");
+
+            app.cmd.buffer = "5,6".into();
+            crate::cmdline::submit(&mut app);
+            assert_eq!(
+                app.session.last_point3,
+                DrawingPlane::XZ.embed(Vec2::new(15.0, 26.0), 9.0),
+                "fully numeric input needs no cursor intersection"
+            );
+        }
+
+        #[test]
+        fn cursor_state_clears_after_valid_projection_becomes_parallel() {
+            let mut app = app_on_plane(DrawingPlane::XZ, 9.0);
+            app.session.cmdline("line").unwrap();
+            let valid = resolve_at(&mut app, DrawingPlane::XZ.embed(Vec2::new(10.0, 20.0), 9.0)).expect("isometric ray intersects XZ");
+            super::super::store_cursor_resolution(&mut app, Some(valid));
+            let last_valid = app.session.cursor3;
+            assert!(app.canvas.cursor.is_some());
+
+            app.session.execute("view.top", &json!({})).unwrap();
+            let invalid = resolve_at(&mut app, DrawingPlane::XZ.embed(Vec2::new(10.0, 20.0), 9.0));
+            assert!(invalid.is_none(), "top view ray is parallel to XZ");
+            super::super::store_cursor_resolution(&mut app, invalid);
+
+            assert!(app.canvas.cursor.is_none(), "no cursor means the canvas preview path is suppressed");
+            assert!(app.canvas.cursor3.is_none());
+            assert_eq!(app.session.cursor3, last_valid, "engine cursor remains the last real point, not a fabricated replacement");
+            assert!(app.canvas.parallel_plane_warning);
+
+            app.cmd.buffer = "5,6".into();
+            crate::cmdline::submit(&mut app);
+            assert_eq!(app.session.last_point3, DrawingPlane::XZ.embed(Vec2::new(5.0, 6.0), 9.0), "explicit coordinates still work");
+
+            app.session.execute("view.swiso", &json!({})).unwrap();
+            let valid_again = resolve_at(&mut app, DrawingPlane::XZ.embed(Vec2::new(10.0, 20.0), 9.0));
+            super::super::store_cursor_resolution(&mut app, valid_again);
+            assert!(app.canvas.cursor.is_some(), "cursor resolution recovers with a non-parallel view");
+            assert!(!app.canvas.parallel_plane_warning);
+        }
     }
 
     #[test]

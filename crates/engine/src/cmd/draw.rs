@@ -405,30 +405,49 @@ impl LineM {
             let what = if first.mode == snap::mode::TAN { "tangent" } else { "perpendicular" };
             return Err(crate::EngineError::Other(format!("No {what} line through that point; pick another point.")));
         };
-        self.handles.push(s.add_entity(line(a, b))?);
-        let a3 = v3(a);
-        let b3 = v3(b);
+        let plane = s.drawing_plane();
+        let offset = s.drawing_plane_offset();
+        let a3 = plane.embed(a, offset);
+        let b3 = plane.embed(b, offset);
+        self.handles.push(s.add_entity(line3(a3, b3))?);
         self.pts = vec![a3, b3];
         self.first = None;
-        s.last_point = b;
+        s.last_point = plane.coordinates(b3);
         s.last_point3 = b3;
         Ok(Step::Continue)
     }
 
     /// Draw the first segment from the deferred first point to `p`, resolving typed polar if present.
-    fn resolve_first_point(&mut self, s: &mut Session, first: snap::Deferred, p: Vec2) -> Result<Step> {
+    fn resolve_first_point(&mut self, s: &mut Session, first: snap::Deferred, p: Vec2, captured: Option<Vec3>) -> Result<Step> {
         if let Some((dist, ang)) = s.last_polar.take()
             && let Some(t) = snap::tangent_point_in_direction(&first.curve, ang, first.at)
         {
             let e = t + Vec2::new(ang.cos(), ang.sin()) * dist;
-            self.handles.push(s.add_entity(line(t, e))?);
-            self.pts = vec![v3(t), v3(e)];
-            s.last_point = e;
-            s.last_point3 = v3(e);
+            let plane = s.drawing_plane();
+            let offset = captured.map_or(s.drawing_plane_offset(), |p3| plane.normal_offset(p3));
+            let t3 = plane.embed(t, offset);
+            let e3 = captured.unwrap_or_else(|| plane.embed(e, offset));
+            self.handles.push(s.add_entity(line3(t3, e3))?);
+            self.pts = vec![t3, e3];
+            s.last_point = plane.coordinates(e3);
+            s.last_point3 = e3;
             self.first = None;
             return Ok(Step::Continue);
         }
-        self.resolve_first(s, first, snap::LineEnd::Point(p))
+        let Some((a, b)) = snap::resolve_deferred(snap::LineEnd::Deferred(first), snap::LineEnd::Point(p)) else {
+            let what = if first.mode == snap::mode::TAN { "tangent" } else { "perpendicular" };
+            return Err(crate::EngineError::Other(format!("No {what} line through that point; pick another point.")));
+        };
+        let plane = s.drawing_plane();
+        let offset = captured.map_or(s.drawing_plane_offset(), |p3| plane.normal_offset(p3));
+        let a3 = plane.embed(a, offset);
+        let b3 = captured.unwrap_or_else(|| plane.embed(b, offset));
+        self.handles.push(s.add_entity(line3(a3, b3))?);
+        self.pts = vec![a3, b3];
+        self.first = None;
+        s.last_point = plane.coordinates(b3);
+        s.last_point3 = b3;
+        Ok(Step::Continue)
     }
 
     fn push_point(&mut self, s: &mut Session, p: Vec3) -> Result<Step> {
@@ -439,7 +458,7 @@ impl LineM {
             self.handles.push(s.add_entity(line3(last, p))?);
         }
         self.pts.push(p);
-        s.last_point = p.xy();
+        s.last_point = s.drawing_plane().coordinates(p);
         s.last_point3 = p;
         Ok(Step::Continue)
     }
@@ -454,14 +473,14 @@ impl Interactive for LineM {
         Ok(Step::Continue)
     }
     fn prompt(&self, s: &Session) -> Prompt {
-        let base = self.pts.last().map(|p| p.xy());
+        let base = self.pts.last().map(|p| s.drawing_plane().coordinates(*p));
         let base3 = self.pts.last().copied();
         let kw_v = if s.settings.zlock { "NoVertical" } else { "Vertical" };
         match self.pts.len() {
             0 if self.first.is_some() => Prompt::new("Specify next point", Accept::POINT).kw(&["Undo"]).deferred(),
             0 => Prompt::new("Specify first point", Accept::POINT).deferred(),
-            1 | 2 => Prompt::new("Specify next point", Accept::POINT).kw(&[kw_v, "Undo"]).base_opt(base).base3_opt(base3),
-            _ => Prompt::new("Specify next point", Accept::POINT).kw(&["Close", kw_v, "Undo"]).base_opt(base).base3_opt(base3),
+            1 | 2 => Prompt::new("Specify next point", Accept::POINT).kw(&[kw_v, "Undo"]).base3_opt(base3).base_opt(base),
+            _ => Prompt::new("Specify next point", Accept::POINT).kw(&["Close", kw_v, "Undo"]).base3_opt(base3).base_opt(base),
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
@@ -469,8 +488,8 @@ impl Interactive for LineM {
             && let Some(first) = self.first
         {
             match i {
-                Input::Point(p) => return self.resolve_first_point(s, first, p),
-                Input::Point3(p3) => return self.resolve_first_point(s, first, p3.xy()),
+                Input::Point(p) => return self.resolve_first_point(s, first, p, None),
+                Input::Point3(p3) => return self.resolve_first_point(s, first, s.drawing_plane().coordinates(p3), Some(p3)),
                 Input::Deferred(d) => return self.resolve_first(s, first, snap::LineEnd::Deferred(d)),
                 _ => {}
             }
@@ -482,7 +501,7 @@ impl Interactive for LineM {
             }
             // A deferred pick with a known last point (not offered by the prompt, but harmless).
             Input::Deferred(d) => match self.pts.last().copied() {
-                Some(last) => match snap::resolve_deferred(snap::LineEnd::Point(last.xy()), snap::LineEnd::Deferred(d)) {
+                Some(last) => match snap::resolve_deferred(snap::LineEnd::Point(s.drawing_plane().coordinates(last)), snap::LineEnd::Deferred(d)) {
                     Some((_, p)) => self.input(s, Input::Point(p)),
                     None => Err(crate::EngineError::Other("No tangent or perpendicular from the last point.".into())),
                 },
@@ -495,10 +514,9 @@ impl Interactive for LineM {
                     let z = s.cursor3.z;
                     self.push_point(s, Vec3::new(last.x, last.y, z))
                 } else if let Some(last) = self.pts.last() {
-                    self.push_point(s, Vec3::new(p.x, p.y, last.z))
+                    self.push_point(s, s.drawing_plane().embed(p, s.drawing_plane().normal_offset(*last)))
                 } else {
-                    let z = s.settings.drawing_plane_offset;
-                    self.push_point(s, Vec3::new(p.x, p.y, z))
+                    self.push_point(s, s.drawing_plane().embed(p, s.settings.drawing_plane_offset))
                 }
             }
             Input::Point3(p3) => {
@@ -507,6 +525,7 @@ impl Interactive for LineM {
                 {
                     self.push_point(s, Vec3::new(last.x, last.y, p3.z))
                 } else {
+                    // A 3D endpoint snap is an intentional WCS capture, not a 2D plane point.
                     self.push_point(s, p3)
                 }
             }
@@ -550,7 +569,7 @@ impl Interactive for LineM {
                 }
                 self.pts.pop();
                 if let Some(last) = self.pts.last() {
-                    s.last_point = last.xy();
+                    s.last_point = s.drawing_plane().coordinates(*last);
                     s.last_point3 = *last;
                 }
                 Ok(Step::Continue)

@@ -28,10 +28,12 @@
 	= Equals	= Igual a
 	> Greater than	> Mayor que
 	A drawing opened from a file keeps that file's format.	Un dibujo abierto desde un archivo conserva el formato de ese archivo.
+	A valid cursor position is required for direct distance input.	Se requiere una posición válida del cursor para introducir una distancia directa.
 	A variable name starts with a letter and has only letters, digits and _	El nombre de una variable empieza por una letra y solo lleva letras, dígitos y _
 	About	Acerca de
 	About CADCraft	Acerca de CADCraft
 	Absolute	Absolutas
+	Active drawing plane: {plane}.	Plano de dibujo activo: {plane}.
 	Add Current Scale	Añadir escala actual
 	Add Leader	Añadir directriz
 	Add Vertex	Añadir vértice
@@ -271,6 +273,9 @@
 	Drawing (DWG)	Dibujo (DWG)
 	Drawing (DXF)	Dibujo (DXF)
 	Drawing Limits	Límites del dibujo
+	Drawing plane: {plane} (click to cycle XY -> XZ -> YZ)	Plano de dibujo: {plane} (clic para alternar XY -> XZ -> YZ)
+	Drawing plane offset: {offset} (Click: adjust with mouse, right-click: reset to 0.0)	Cota del plano de dibujo: {offset} (Clic: ajustar con el ratón, clic derecho: restablecer a 0.0)
+	Drawing plane offset fixed at {offset}.	Cota del plano de dibujo fijada en {offset}.
 	Drawing Recovery Manager...	Administrador de recuperación de dibujos...
 	Drawing Template (DWT)	Plantilla de dibujo (DWT)
 	Drawing Utilities	Utilidades de dibujo
@@ -288,7 +293,11 @@
 	Edit Text...	Editar texto...
 	Editor	Editar
 	Elevation	Elevación
+	Elevation: 0.00	Cota: 0.00
+	Elevation: {offset}	Cota: {offset}
+	Elevation: {offset} (Click: fix, Esc: cancel)	Cota: {offset} (Clic: fijar, Esc: cancelar)
 	Ellipse	Elipse
+	Graphical plane offset adjustment started (move the mouse, click to fix, Esc to cancel).	Ajuste gráfico del desplazamiento del plano iniciado (mueve el ratón, clic para fijar, Esc para cancelar).
 	Elliptical Arc	Arco elíptico
 	Enable Dynamic Input (F12)	Activar entrada dinámica (F12)
 	End Object Isolation	Terminar aislamiento de objetos
@@ -677,6 +686,9 @@
 	Path Array	Matriz de camino
 	Pattern	Patrón
 	Perpendicular	Perpendicular
+	Plane offset adjustment cancelled.	Ajuste del desplazamiento del plano cancelado.
+	Plane offset reset to the origin (0.0).	Desplazamiento del plano restablecido al origen (0.0).
+	Plane: {plane}	Plano: {plane}
 	Plot	Trazar
 	Plot (click: do not plot)	Se trazará (clic: no trazar)
 	Plot Preview	Vista previa de trazado
@@ -1193,6 +1205,11 @@
 	Version {version}	Versión {version}
 	Vertical	Vertical
 	VerticalDistance	Distancia vertical
+	Vertical lock (V): OFF (click to turn on)	Bloqueo vertical (V): DESACTIVADO (clic para activar)
+	Vertical lock (V): ON (click to turn off)	Bloqueo vertical (V): ACTIVADO (clic para desactivar)
+	Vertical lock {state}.	Bloqueo vertical {state}.
+	⚠ View is parallel to the drawing plane (offset is ambiguous)	⚠ La vista es paralela al plano de dibujo (desplazamiento ambiguo)
+	⚠ View is parallel to the plane normal; its offset cannot be adjusted from this view	⚠ La vista es paralela a la normal del plano; no se puede ajustar el desplazamiento desde esta vista
 	View	Vista
 	ViewCube	Cubo de vistas
 	Viewport	Ventana gráfica

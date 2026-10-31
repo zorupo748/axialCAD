@@ -4,8 +4,10 @@
 use std::collections::BTreeSet;
 
 use cadcraft_engine::Session;
+use cadcraft_geom::{DrawingPlane, Vec2};
 use cadcraft_ui_egui::control::{ControlRequest, Outcome, handle};
-use cadcraft_ui_egui::{CadApp, Services};
+use cadcraft_ui_egui::{CadApp, Services, canvas::Xf};
+use egui::{Pos2, Rect, vec2};
 use serde_json::{Value, json};
 
 fn call(app: &mut CadApp, method: &str, params: Value) -> Value {
@@ -70,4 +72,19 @@ fn unknown_method_points_to_control_methods() {
     assert_eq!(r["ok"], false);
     let e = r["error"].as_str().unwrap_or_default();
     assert!(e.starts_with("unknown method `help`") && e.contains("control.methods"), "{e}");
+}
+
+#[test]
+fn screen_pointer_rejects_a_ray_parallel_to_the_work_plane() {
+    let mut app = app();
+    app.session.execute("view.top", &json!({})).unwrap();
+    app.session.set_drawing_plane(DrawingPlane::XZ);
+    app.session.start("line").unwrap();
+    app.canvas.xf =
+        Some(Xf { rect: Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0)), center: Vec2::ZERO, scale: 50.0, camera: Some(app.session.camera()) });
+
+    let response = call(&mut app, "ui.pointer", json!({"space":"screen", "x":500.0, "y":400.0, "action":"click"}));
+    assert_eq!(response["ok"], false, "{response}");
+    assert!(response["error"].as_str().is_some_and(|e| e.contains("parallel to the active drawing plane")), "{response}");
+    assert!(app.session.prompting(), "an ambiguous screen point must not advance LINE");
 }

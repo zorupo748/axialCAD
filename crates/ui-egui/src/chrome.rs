@@ -299,6 +299,24 @@ fn visible_tabs(widths: &[f32], active: Option<usize>, room: f32) -> std::ops::R
 }
 
 /// Status bar: layout tabs on the left, coordinates and drafting toggles on the right.
+fn format_cursor_coordinates(cursor: cadcraft_geom::Vec3, plane: cadcraft_geom::DrawingPlane, lu: i64, lp: i64) -> String {
+    if plane == cadcraft_geom::DrawingPlane::XY && cursor.z.abs() < 1e-9 {
+        format!(
+            "{}, {}, {}",
+            cadcraft_engine::units::format_distance(cursor.x, lu, lp),
+            cadcraft_engine::units::format_distance(cursor.y, lu, lp),
+            cadcraft_engine::units::format_distance(0.0, lu, lp)
+        )
+    } else {
+        format!(
+            "[WCS] {}, {}, {}",
+            cadcraft_engine::units::format_distance(cursor.x, lu, lp),
+            cadcraft_engine::units::format_distance(cursor.y, lu, lp),
+            cadcraft_engine::units::format_distance(cursor.z, lu, lp)
+        )
+    }
+}
+
 pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
     egui::Panel::bottom("cc_status").exact_size(26.0).frame(egui::Frame::NONE.fill(t.chrome)).show(ui, |ui| {
@@ -352,33 +370,16 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
         let size = 20.0;
         let mut rx = r.right() - 8.0 - toggles.len() as f32 * (size + 4.0);
         // Coordinates.
-        let coord = app.canvas.cursor.map(|c| {
+        let coord = app.canvas.cursor3.map(|cursor| {
             let (lu, lp) = app.session.doc().map(|d| (d.header.i64("LUNITS", 2), d.header.i64("LUPREC", 4))).unwrap_or((2, 4));
-            let z = app.canvas.cursor3.map_or(0.0, |c3| c3.z);
-            let pl = app.session.drawing_plane();
-            if pl == cadcraft_geom::DrawingPlane::XY && z.abs() < 1e-9 {
-                format!(
-                    "{}, {}, {}",
-                    cadcraft_engine::units::format_distance(c.x, lu, lp),
-                    cadcraft_engine::units::format_distance(c.y, lu, lp),
-                    cadcraft_engine::units::format_distance(0.0, lu, lp)
-                )
-            } else {
-                format!(
-                    "[{}] {}, {}, {}",
-                    pl.name(),
-                    cadcraft_engine::units::format_distance(c.x, lu, lp),
-                    cadcraft_engine::units::format_distance(c.y, lu, lp),
-                    cadcraft_engine::units::format_distance(z, lu, lp)
-                )
-            }
+            format_cursor_coordinates(cursor, app.session.drawing_plane(), lu, lp)
         });
         // MODEL / PAPER (layouts only): toggles MSPACE and PSPACE like AutoCAD's status button.
         let mut coord_right = rx - 8.0;
 
         // Drawing plane button: XY / XZ / YZ
         let plane = app.session.drawing_plane();
-        let plane_text = format!("Plano: {}", plane.name());
+        let plane_text = crate::tf!("Plane: {plane}", plane = plane.name());
         let br_plane = Rect::from_min_max(pos2(coord_right - 62.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
         let resp_plane = ui.interact(br_plane, ui.id().with("drawing_plane_toggle"), Sense::click());
         let plane_hovered = resp_plane.hovered();
@@ -411,21 +412,25 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
             egui::StrokeKind::Inside,
         );
         p.text(br_plane.center(), egui::Align2::CENTER_CENTER, &plane_text, crate::theme::small(), if is_non_xy { t.toggle_on } else { t.text });
-        if resp_plane.on_hover_text(format!("Plano de dibujo: {} (clic para alternar XY -> XZ -> YZ)", plane.name())).clicked() {
+        if resp_plane.on_hover_text(crate::tf!("Drawing plane: {plane} (click to cycle XY -> XZ -> YZ)", plane = plane.name())).clicked() {
             let next = match plane {
                 cadcraft_geom::DrawingPlane::XY => cadcraft_geom::DrawingPlane::XZ,
                 cadcraft_geom::DrawingPlane::XZ => cadcraft_geom::DrawingPlane::YZ,
                 cadcraft_geom::DrawingPlane::YZ => cadcraft_geom::DrawingPlane::XY,
             };
             app.session.set_drawing_plane(next);
-            app.session.echo(format!("Plano de dibujo activo: {}.", next.name()));
+            app.session.echo(crate::tf!("Active drawing plane: {plane}.", plane = next.name()));
         }
         coord_right = br_plane.left() - 6.0;
 
         // Elevation / Cota button with mouse adjust and origin return
         let elev_offset = app.session.drawing_plane_offset();
         let elev_active = elev_offset.abs() > 1e-6 || app.canvas.height_adjust;
-        let elev_text = if elev_offset.abs() < 1e-6 { "Cota: 0.00".to_string() } else { format!("Cota: {:+.2}", elev_offset) };
+        let elev_text = if elev_offset.abs() < 1e-6 {
+            crate::tl!("Elevation: 0.00").to_string()
+        } else {
+            crate::tf!("Elevation: {offset}", offset = format!("{elev_offset:+.2}"))
+        };
         let br_elev = Rect::from_min_max(pos2(coord_right - 78.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
         let resp_elev = ui.interact(br_elev, ui.id().with("drawing_plane_elev_toggle"), Sense::click());
         let elev_hovered = resp_elev.hovered();
@@ -473,22 +478,23 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
         );
         let elev_clicked = resp_elev.clicked();
         let elev_sec_clicked = resp_elev.secondary_clicked();
-        let _ = resp_elev.on_hover_text(format!(
-            "Cota de plano: {:.2} (Clic: ajustar con ratón, Clic secundario: restablecer a 0.0)",
-            elev_offset
+        let _ = resp_elev.on_hover_text(crate::tf!(
+            "Drawing plane offset: {offset} (Click: adjust with mouse, right-click: reset to 0.0)",
+            offset = format!("{elev_offset:.2}")
         ));
         if elev_clicked {
             app.canvas.height_adjust = !app.canvas.height_adjust;
             if app.canvas.height_adjust {
-                app.canvas.height_adjust_anchor = Some(app.session.last_point3);
+                let plane = app.session.drawing_plane();
+                app.canvas.height_adjust_anchor = Some(plane.embed(plane.coordinates(app.session.last_point3), elev_offset));
                 app.canvas.height_adjust_start_offset = elev_offset;
-                app.session.echo("Ajuste gráfico de cota iniciado (mueve el ratón, clic para fijar, Esc para cancelar).");
+                app.session.echo(crate::tl!("Graphical plane offset adjustment started (move the mouse, click to fix, Esc to cancel)."));
             }
         }
         if elev_sec_clicked {
             if elev_offset.abs() > 1e-6 {
                 app.session.set_drawing_plane_offset(0.0);
-                app.session.echo("Cota restablecida al plano de origen (0.0).");
+                app.session.echo(crate::tl!("Plane offset reset to the origin (0.0)."));
             } else {
                 app.start("plane.pick");
             }
@@ -512,14 +518,15 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
         }
         if resp_zlock
             .on_hover_text(if zlock {
-                "Bloqueo vertical (V): ACTIVADO (clic para desactivar)"
+                crate::tl!("Vertical lock (V): ON (click to turn off)")
             } else {
-                "Bloqueo vertical (V): DESACTIVADO (clic para activar)"
+                crate::tl!("Vertical lock (V): OFF (click to turn on)")
             })
             .clicked()
         {
             app.session.settings.zlock = !app.session.settings.zlock;
-            app.session.echo(format!("Bloqueo vertical {}.", if app.session.settings.zlock { "activado" } else { "desactivado" }));
+            let state = if app.session.settings.zlock { crate::tl!("On") } else { crate::tl!("Off") };
+            app.session.echo(crate::tf!("Vertical lock {state}.", state = state));
         }
         coord_right = br_zlock.left() - 6.0;
         // The annotation scale list (model space).
@@ -766,6 +773,7 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cadcraft_geom::{DrawingPlane, Vec2, Vec3};
 
     #[test]
     fn mac_title_row_centres_and_clears_the_traffic_lights() {
@@ -793,5 +801,12 @@ mod tests {
         assert_eq!(visible_tabs(&w, Some(3), 0.0), 3..4);
         assert_eq!(visible_tabs(&w, Some(9), f32::NAN), 0..0);
         assert_eq!(visible_tabs(&[], Some(0), 100.0), 0..0);
+    }
+
+    #[test]
+    fn status_coordinates_show_world_axes_during_non_xy_line_prompts() {
+        let cursor = Vec3::new(3.0, 9.0, 4.0);
+        assert_eq!(format_cursor_coordinates(cursor, DrawingPlane::XZ, 2, 4), "[WCS] 3.0000, 9.0000, 4.0000");
+        assert_eq!(DrawingPlane::XZ.embed(Vec2::new(3.0, 4.0), 9.0), cursor);
     }
 }

@@ -12,9 +12,25 @@
 use cadcraft_doc::{EntityKind, Line as DocLine, Space};
 use cadcraft_engine::cmd::file::{qnew_template, set_qnew_template};
 use cadcraft_engine::snap::snap_3d_line_endpoints;
+use cadcraft_engine::snap::{Deferred, SnapCurve, mode as snap_mode};
 use cadcraft_engine::{Input, Session};
 use cadcraft_geom::{Axis3D, DrawingPlane, Vec2, Vec3};
 use serde_json::json;
+use std::sync::Mutex;
+
+static TEMPLATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn template_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEMPLATE_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+struct RestoreQnewTemplate(String);
+
+impl Drop for RestoreQnewTemplate {
+    fn drop(&mut self) {
+        set_qnew_template(&self.0);
+    }
+}
 
 fn last_line(s: &Session) -> DocLine {
     let e = s.doc().unwrap().model.iter().last().expect("at least one entity");
@@ -141,6 +157,139 @@ fn test_first_point_at_chosen_elevation_plane_offset() {
 }
 
 #[test]
+fn test_line_point_coordinates_follow_xy_xz_yz_planes() {
+    let mut s = Session::new();
+    for (plane, offset, first, next) in [
+        (DrawingPlane::XY, 12.5, Vec3::new(10.0, 20.0, 12.5), Vec3::new(30.0, 40.0, 12.5)),
+        (DrawingPlane::XZ, -7.25, Vec3::new(10.0, -7.25, 20.0), Vec3::new(30.0, -7.25, 40.0)),
+        (DrawingPlane::YZ, 3.75, Vec3::new(3.75, 10.0, 20.0), Vec3::new(3.75, 30.0, 40.0)),
+    ] {
+        s.set_drawing_plane(plane);
+        s.set_drawing_plane_offset(offset);
+        s.start("line").unwrap();
+        s.input(Input::Point(Vec2::new(10.0, 20.0))).unwrap();
+        s.input(Input::Point(Vec2::new(30.0, 40.0))).unwrap();
+        s.input(Input::Enter).unwrap();
+        let line = last_line(&s);
+        assert_eq!(line.a, first, "first point on {plane:?}");
+        assert_eq!(line.b, next, "continuation point on {plane:?}");
+    }
+}
+
+#[test]
+fn test_line_typed_points_respect_work_plane_and_explicit_wcs_coordinates() {
+    for (plane, offset) in [(DrawingPlane::XY, 11.0), (DrawingPlane::XZ, -7.0), (DrawingPlane::YZ, 5.0)] {
+        let mut s = Session::new();
+        s.set_drawing_plane(plane);
+        s.set_drawing_plane_offset(offset);
+        s.cmdline("line").unwrap();
+        s.cmdline("10,20").unwrap();
+        s.cmdline("@3,4").unwrap();
+        s.cmdline("").unwrap();
+        let line = last_line(&s);
+        assert_eq!(line.a, plane.embed(Vec2::new(10.0, 20.0), offset), "typed 2D first point on {plane:?}");
+        assert_eq!(line.b, plane.embed(Vec2::new(13.0, 24.0), offset), "typed 2D relative continuation on {plane:?}");
+
+        s.cmdline("line").unwrap();
+        s.cmdline("100,200,300").unwrap();
+        s.cmdline("@1,2,3").unwrap();
+        s.cmdline("").unwrap();
+        let line = last_line(&s);
+        assert_eq!(line.a, Vec3::new(100.0, 200.0, 300.0), "explicit 3D first point remains WCS on {plane:?}");
+        assert_eq!(line.b, Vec3::new(101.0, 202.0, 303.0), "explicit 3D relative continuation remains WCS on {plane:?}");
+
+        s.cmdline("line").unwrap();
+        s.cmdline("*10,20").unwrap();
+        s.cmdline("*30,40").unwrap();
+        s.cmdline("").unwrap();
+        let line = last_line(&s);
+        assert_eq!(line.a, Vec3::new(10.0, 20.0, 0.0), "explicit world-coordinate prefix remains WCS on {plane:?}");
+        assert_eq!(line.b, Vec3::new(30.0, 40.0, 0.0), "explicit world-coordinate prefix remains WCS on {plane:?}");
+    }
+}
+
+#[test]
+fn test_typed_two_component_points_keep_other_commands_xy_contract() {
+    let mut s = Session::new();
+    s.set_drawing_plane(DrawingPlane::XZ);
+    s.set_drawing_plane_offset(9.0);
+    s.cmdline("circle 10,20 5").unwrap();
+
+    let circle = s.doc().unwrap().model.iter().last().expect("circle entity");
+    let EntityKind::Circle(circle) = &circle.kind else { panic!("expected Circle entity") };
+    assert_eq!(circle.center, Vec3::new(10.0, 20.0, 0.0));
+}
+
+#[test]
+fn test_line_undo_restores_local_work_plane_coordinates_for_relative_input() {
+    for (plane, offset) in [(DrawingPlane::XZ, -7.0), (DrawingPlane::YZ, 5.0)] {
+        let mut s = Session::new();
+        s.set_drawing_plane(plane);
+        s.set_drawing_plane_offset(offset);
+        s.start("line").unwrap();
+        s.input(Input::Point(Vec2::new(10.0, 20.0))).unwrap();
+        s.input(Input::Point(Vec2::new(30.0, 40.0))).unwrap();
+        s.input(Input::Point(Vec2::new(50.0, 60.0))).unwrap();
+        s.cmdline("Undo").unwrap();
+
+        let restored = plane.embed(Vec2::new(30.0, 40.0), offset);
+        assert_eq!(s.last_point, Vec2::new(30.0, 40.0), "Undo restores local last_point on {plane:?}");
+        assert_eq!(s.last_point3, restored, "Undo restores WCS last_point3 on {plane:?}");
+
+        s.cmdline("@5,7").unwrap();
+        s.input(Input::Enter).unwrap();
+        assert_eq!(last_line(&s).b, plane.embed(Vec2::new(35.0, 47.0), offset), "relative continuation after Undo on {plane:?}");
+    }
+}
+
+#[test]
+fn test_plane_pick_rejects_malformed_point_components() {
+    let mut s = Session::new();
+    s.set_drawing_plane_offset(11.0);
+    for point in [json!([1.0, "bad", 3.0]), json!([1.0, null, 3.0]), json!([1.0, 2.0]), json!([1.0, 2.0, 3.0, 4.0])] {
+        assert!(s.execute("plane.pick", &json!({"point": point})).is_err(), "{point}");
+        assert_eq!(s.drawing_plane_offset(), 11.0, "invalid input must not alter the plane");
+    }
+}
+
+#[test]
+fn test_deferred_snap_preserves_a_captured_3d_endpoint() {
+    let mut s = Session::new();
+    s.set_drawing_plane(DrawingPlane::XZ);
+    s.set_drawing_plane_offset(-4.0);
+    s.start("line").unwrap();
+    s.input(Input::Deferred(Deferred {
+        mode: snap_mode::PER,
+        curve: SnapCurve::Line { a: Vec2::new(0.0, 0.0), b: Vec2::new(10.0, 0.0) },
+        at: Vec2::new(3.0, 2.0),
+    }))
+    .unwrap();
+    let captured = Vec3::new(8.0, -4.0, 5.0);
+    s.input(Input::Point3(captured)).unwrap();
+    s.input(Input::Enter).unwrap();
+
+    let line = last_line(&s);
+    assert_eq!(line.b, captured, "the selected 3D endpoint remains a WCS capture");
+    assert_eq!(line.a.y, -4.0, "the deferred 2D snap point is embedded in the active plane");
+}
+
+#[test]
+fn test_options_failure_restores_qnewtemplate_and_settings() {
+    let _serial = template_test_lock();
+    let _restore = RestoreQnewTemplate(qnew_template());
+    set_qnew_template("original-template.dwt");
+    let mut s = Session::new();
+    s.settings.pickbox = 12.0;
+    let before_profile = cadcraft_engine::cmd::options::profile(&s);
+
+    let result = s.execute("options", &json!({"reset": true, "QNEWTEMPLATE": "partially-applied.dwt", "PICKBOX": 7, "UNKNOWN_PROFILE_KEY": true}));
+
+    assert!(result.is_err());
+    assert_eq!(qnew_template(), "original-template.dwt");
+    assert_eq!(cadcraft_engine::cmd::options::profile(&s), before_profile, "every profile setting must roll back together");
+}
+
+#[test]
 fn test_plane_offset_origin_return_and_commands() {
     let mut s = Session::new();
 
@@ -199,27 +348,32 @@ fn test_snap_3d_line_endpoints_deterministic_order_and_cycling() {
     s.viewport_px = (800.0, 600.0);
     s.execute("view.swiso", &json!({})).unwrap();
 
-    // Two lines meeting at exactly the same endpoint (20, 20, 20)
-    s.cmdline("line 0,0,0 20,20,20").unwrap();
-    s.cmdline("").unwrap();
-    s.cmdline("line 50,50,50 20,20,20").unwrap();
-    s.cmdline("").unwrap();
-
     let cam = s.camera();
+    let first = Vec3::new(20.0, 20.0, 20.0);
+    let second = first + cam.view_dir() * 20.0;
+    assert_ne!(first, second);
+    assert!((cam.project_point(first) - cam.project_point(second)).len() < 1e-8);
+    let far = Vec3::new(1000.0, 1000.0, 1000.0);
+    s.execute("line", &json!({"points": [[far.x, far.y, far.z], [first.x, first.y, first.z]]})).unwrap();
+    s.execute("line", &json!({"points": [[far.x, far.y, far.z], [second.x, second.y, second.z]]})).unwrap();
     let doc = s.doc().unwrap();
-    let s_joint = cam.project_point(Vec3::new(20.0, 20.0, 20.0));
+    let s_joint = cam.project_point(first);
 
     // Cycle index 0
     let hit0 = snap_3d_line_endpoints(doc, &Space::Model, &cam, s_joint, 15.0, 0).expect("hit 0");
     // Cycle index 1
     let hit1 = snap_3d_line_endpoints(doc, &Space::Model, &cam, s_joint, 15.0, 1).expect("hit 1");
 
-    assert_eq!(hit0.point3, Some(Vec3::new(20.0, 20.0, 20.0)));
-    assert_eq!(hit1.point3, Some(Vec3::new(20.0, 20.0, 20.0)));
+    let candidates = [Some(first), Some(second)];
+    assert!(candidates.contains(&hit0.point3), "unexpected first candidate: {:?}", hit0.point3);
+    assert!(candidates.contains(&hit1.point3), "unexpected second candidate: {:?}", hit1.point3);
+    assert_ne!(hit0.point3, hit1.point3, "cycling must select distinct 3D endpoints");
 }
 
 #[test]
 fn test_qnewtemplate_persistence_and_independence() {
+    let _serial = template_test_lock();
+    let _restore = RestoreQnewTemplate(qnew_template());
     let dir = std::env::temp_dir().join(format!("cadcraft-tmpl-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let tmpl_path = dir.join("test_custom.dwt");

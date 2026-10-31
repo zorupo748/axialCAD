@@ -1090,8 +1090,9 @@ pub fn grid_frame(d: &Drawing) -> (Vec2, f64) {
 /// Screen-space 3D snap to LINE endpoints (bounded OSNAP for 3D drafting).
 ///
 /// Projects visible 3D LINE endpoints using the active camera and returns the closest endpoint
-/// within `aperture_cam` units in the camera projection plane. Overlapping candidates are ordered
-/// deterministically and support cycling via `cycle_idx`.
+/// within `aperture_cam` units in the camera projection plane. This currently scans every entity
+/// in the active space (O(N)); spatial indexing is intentionally outside this functional fix.
+/// Overlapping candidates are ordered deterministically and support cycling via `cycle_idx`.
 pub fn snap_3d_line_endpoints(
     doc: &Drawing,
     space: &Space,

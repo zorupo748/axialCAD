@@ -16,6 +16,33 @@ pub enum DrawingPlane {
 }
 
 impl DrawingPlane {
+    /// Embed 2D drawing-plane coordinates into WCS at `offset` along the plane normal.
+    pub fn embed(self, p: Vec2, offset: f64) -> Vec3 {
+        match self {
+            Self::XY => Vec3::new(p.x, p.y, offset),
+            Self::XZ => Vec3::new(p.x, offset, p.y),
+            Self::YZ => Vec3::new(offset, p.x, p.y),
+        }
+    }
+
+    /// Project WCS coordinates onto the two coordinate axes of this drawing plane.
+    pub fn coordinates(self, p: Vec3) -> Vec2 {
+        match self {
+            Self::XY => Vec2::new(p.x, p.y),
+            Self::XZ => Vec2::new(p.x, p.z),
+            Self::YZ => Vec2::new(p.y, p.z),
+        }
+    }
+
+    /// Coordinate along this drawing plane's normal.
+    pub fn normal_offset(self, p: Vec3) -> f64 {
+        match self {
+            Self::XY => p.z,
+            Self::XZ => p.y,
+            Self::YZ => p.x,
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "xy" | "top" | "plan" | "world" => Some(Self::XY),
@@ -245,6 +272,28 @@ impl OrbitCamera {
         } else {
             base.z + (q.y - self.project_point(base).y)
         }
+    }
+
+    /// Find a point's coordinate along a world axis by intersecting the camera ray with the
+    /// line through `base` parallel to that axis. Returns `None` when the view cannot distinguish
+    /// movement along that axis.
+    pub fn unproject_axis_coordinate(&self, q: Vec2, base: Vec3, axis: Vec3) -> Option<f64> {
+        let length = axis.len();
+        if !length.is_finite() || length < 1e-12 {
+            return None;
+        }
+        let axis = axis * (1.0 / length);
+        let p0 = self.target + self.right_dir() * q.x + self.up_dir() * q.y;
+        let view = self.view_dir();
+        let alignment = axis.dot(view);
+        let denom = 1.0 - alignment * alignment;
+        if denom <= 1e-6 {
+            return None;
+        }
+        let diff = p0 - base;
+        let delta = (diff.dot(axis) - diff.dot(view) * alignment) / denom;
+        let coordinate = base.dot(axis) + delta;
+        coordinate.is_finite().then_some(coordinate)
     }
 
     /// For a 3D base point, calculate the closest orthogonal 3D point (along X, Y, or Z axis)
@@ -734,6 +783,28 @@ mod tests {
         let q_front = cam.project_point(target_pt);
         let z_front = cam.unproject_vertical_z(q_front, base);
         assert!((z_front - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn unproject_axis_coordinate_resolves_each_work_plane_normal() {
+        let mut cam = OrbitCamera::default();
+        cam.set_preset("swiso");
+        for (base, target, axis, expected) in [
+            (Vec3::new(2.0, 3.0, 7.0), Vec3::new(2.0, 3.0, 19.0), Vec3::Z, 19.0),
+            (Vec3::new(2.0, 11.0, 3.0), Vec3::new(2.0, -5.0, 3.0), Vec3::new(0.0, 1.0, 0.0), -5.0),
+            (Vec3::new(11.0, 2.0, 3.0), Vec3::new(-5.0, 2.0, 3.0), Vec3::new(1.0, 0.0, 0.0), -5.0),
+        ] {
+            let q = cam.project_point(target);
+            let coordinate = cam.unproject_axis_coordinate(q, base, axis).expect("axis is visible");
+            assert!((coordinate - expected).abs() < 1e-6, "{coordinate} != {expected}");
+        }
+    }
+
+    #[test]
+    fn unproject_axis_coordinate_rejects_axis_parallel_to_view() {
+        let cam = OrbitCamera::default();
+        let base = Vec3::new(1.0, 2.0, 3.0);
+        assert_eq!(cam.unproject_axis_coordinate(Vec2::ZERO, base, Vec3::Z), None);
     }
 
     #[test]

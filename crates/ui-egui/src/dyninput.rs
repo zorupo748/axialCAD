@@ -170,14 +170,22 @@ pub fn constrain(entry: &Entry<'_>, frame: &Frame, p: Vec2, second_locked: bool)
 /// (nothing split yet: a plain number stays direct distance entry). Empty boxes take the cursor's
 /// value. Entries measured from the last point are sent with `@` when the prompt's base is the
 /// session's last point (`last`, what `@` resolves against); otherwise, and for absolute entries,
-/// the finished point is sent as `#x,y`, so what was previewed is exactly what is placed.
-pub fn complete(entry: &Entry<'_>, frame: &Frame, cursor: Vec2, last: Vec2) -> Option<String> {
+/// the finished point is sent as `#x,y`, so what was previewed is exactly what is placed. Fully
+/// specified entries do not need a cursor position.
+pub fn complete(entry: &Entry<'_>, frame: &Frame, cursor: Option<Vec2>, last: Vec2) -> Option<String> {
     if !entry.split {
         return None;
     }
-    let (live_first, live_second) = frame.live(entry.format, constrain(entry, frame, cursor, false));
-    let first = entry.first_locked().unwrap_or(live_first);
-    let second = entry.second_value().unwrap_or(live_second);
+    let first = entry.first_locked();
+    let second = entry.second_value();
+    let (live_first, live_second) = if first.is_none() || second.is_none() {
+        let cursor = cursor?;
+        frame.live(entry.format, constrain(entry, frame, cursor, false))
+    } else {
+        (0.0, 0.0)
+    };
+    let first = first.unwrap_or(live_first);
+    let second = second.unwrap_or(live_second);
     if frame.relative() && frame.base == Some(last) {
         return Some(match entry.format {
             Format::Cartesian => format!("@{first},{second}"),
@@ -235,7 +243,7 @@ mod tests {
 
     fn sent(text: &str, frame: &Frame, cursor: Vec2, last: Vec2) -> Option<Vec2> {
         let e = parse(text, frame)?;
-        let t = complete(&e, frame, cursor, last)?;
+        let t = complete(&e, frame, Some(cursor), last)?;
         cadcraft_engine::prompt::parse_point(&t, last)
     }
 
@@ -341,9 +349,9 @@ mod tests {
     fn plain_numbers_and_other_text_go_through_as_typed() {
         let f = second_point(Vec2::ZERO);
         // Direct distance entry.
-        assert_eq!(parse("25", &f).and_then(|e| complete(&e, &f, Vec2::X, Vec2::ZERO)), None);
+        assert_eq!(parse("25", &f).and_then(|e| complete(&e, &f, Some(Vec2::X), Vec2::ZERO)), None);
         for t in ["@40,40", "#0,0", "c", "rec", "1,2,3", "40,abc"] {
-            assert!(parse(t, &f).and_then(|e| complete(&e, &f, Vec2::X, Vec2::ZERO)).is_none(), "{t}");
+            assert!(parse(t, &f).and_then(|e| complete(&e, &f, Some(Vec2::X), Vec2::ZERO)).is_none(), "{t}");
         }
     }
 
@@ -352,16 +360,25 @@ mod tests {
         let base = Vec2::new(0.0, 60.0);
         let f = second_point(base);
         let e = parse("40,40", &f).unwrap();
-        assert_eq!(complete(&e, &f, Vec2::ZERO, base).as_deref(), Some("@40,40"));
+        assert_eq!(complete(&e, &f, Some(Vec2::ZERO), base).as_deref(), Some("@40,40"));
         // A prompt whose base is not the last point: send the finished point itself.
         let other_last = Vec2::new(500.0, 500.0);
-        let t = complete(&e, &f, Vec2::ZERO, other_last).unwrap();
+        let t = complete(&e, &f, Some(Vec2::ZERO), other_last).unwrap();
         assert!(t.starts_with('#'), "{t}");
         assert!(close(cadcraft_engine::prompt::parse_point(&t, other_last), Vec2::new(40.0, 100.0)));
         // Polar too.
         let e = parse("40<90", &f).unwrap();
-        let t = complete(&e, &f, Vec2::ZERO, other_last).unwrap();
+        let t = complete(&e, &f, Some(Vec2::ZERO), other_last).unwrap();
         assert!(close(cadcraft_engine::prompt::parse_point(&t, other_last), Vec2::new(0.0, 100.0)));
+    }
+
+    #[test]
+    fn fully_entered_values_complete_without_a_cursor_but_live_values_do_not() {
+        let frame = second_point(Vec2::new(10.0, 20.0));
+        let full = parse("3,4", &frame).unwrap();
+        assert_eq!(complete(&full, &frame, None, frame.base.unwrap()).as_deref(), Some("@3,4"));
+        let partial = parse("3,", &frame).unwrap();
+        assert_eq!(complete(&partial, &frame, None, frame.base.unwrap()), None);
     }
 
     fn run_frame(app: &mut crate::CadApp, ctx: &egui::Context, events: Vec<egui::Event>) {

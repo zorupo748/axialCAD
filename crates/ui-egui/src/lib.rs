@@ -373,6 +373,16 @@ impl CadApp {
     /// Submit a line of command-line text. A refused line is echoed to the history; the error is
     /// also returned.
     pub fn cmdline(&mut self, text: &str) -> Option<String> {
+        if self.canvas.parallel_plane_warning
+            && self.canvas.cursor.is_none()
+            && self.session.current_prompt().is_some_and(|prompt| prompt.accept.point)
+            && !text.contains([',', '<'])
+            && cadcraft_engine::units::parse_distance(text).is_some()
+        {
+            let error = crate::tl!("A valid cursor position is required for direct distance input.");
+            self.session.echo(error);
+            return Some(error.to_string());
+        }
         if !self.session.prompting() {
             let first = text.split_whitespace().next().unwrap_or("");
             // `cmd {json}` is a programmatic call: the engine runs it with those parameters.

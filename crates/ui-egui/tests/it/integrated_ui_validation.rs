@@ -10,6 +10,17 @@ use cadcraft_ui_egui::{CadApp, Services, UiState, docking::Panel};
 use egui::{Event, Key, Modifiers, PointerButton, pos2, vec2};
 use egui_kittest::Harness;
 use serde_json::json;
+use std::sync::Mutex;
+
+static TEMPLATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+struct RestoreQnewTemplate(String);
+
+impl Drop for RestoreQnewTemplate {
+    fn drop(&mut self) {
+        cadcraft_engine::cmd::file::set_qnew_template(&self.0);
+    }
+}
 
 fn harness(state: Option<UiState>, width: f32, height: f32) -> Harness<'static, CadApp> {
     let mut app = CadApp::new(Session::default(), Services::default());
@@ -92,18 +103,20 @@ fn test_recovered_right_canvas_area_accepts_base_point_and_creates_final_line_en
 fn test_graphical_height_adjustment_escape_cancels_without_altering_drawing() {
     let mut h = harness(None, 1280.0, 760.0);
     let initial_entities = h.state().session.doc().unwrap().model.len();
+    h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
+    h.state_mut().session.set_drawing_plane(cadcraft_geom::DrawingPlane::XZ);
     h.state_mut().session.set_drawing_plane_offset(20.0);
-
-    // Enter height adjustment
-    h.state_mut().canvas.height_adjust = true;
-    h.state_mut().canvas.height_adjust_anchor = Some(cadcraft_geom::Vec3::new(0.0, 0.0, 20.0));
-    h.state_mut().canvas.height_adjust_start_offset = 20.0;
-
-    // Simulate mouse drag
-    h.event(Event::PointerMoved(pos2(500.0, 300.0)));
     h.run_steps(2);
 
-    // Press Escape to cancel
+    h.state_mut().canvas.height_adjust = true;
+    h.state_mut().canvas.height_adjust_anchor = Some(cadcraft_geom::Vec3::new(0.0, 20.0, 0.0));
+    h.state_mut().canvas.height_adjust_start_offset = 20.0;
+
+    let target = h.state().canvas.xf.unwrap().to_screen3(cadcraft_geom::Vec3::new(0.0, 35.0, 0.0));
+    h.event(Event::PointerMoved(target));
+    h.run_steps(3);
+    assert!((h.state().session.drawing_plane_offset() - 35.0).abs() < 1e-6, "XZ offset follows world Y");
+
     h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(1);
     h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });
@@ -113,6 +126,70 @@ fn test_graphical_height_adjustment_escape_cancels_without_altering_drawing() {
     assert!(!h.state().canvas.height_adjust, "Escape must exit height adjust mode");
     assert_eq!(h.state().session.drawing_plane_offset(), 20.0, "Offset must revert to start offset");
     assert_eq!(h.state().session.doc().unwrap().model.len(), initial_entities, "Drawing must remain untouched");
+}
+
+#[test]
+fn test_graphical_height_adjustment_click_keeps_the_new_plane_offset() {
+    let mut h = harness(None, 1280.0, 760.0);
+    h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
+    h.state_mut().session.set_drawing_plane(cadcraft_geom::DrawingPlane::YZ);
+    h.state_mut().session.set_drawing_plane_offset(2.0);
+    h.state_mut().session.start("line").unwrap();
+    h.run_steps(2);
+
+    h.state_mut().canvas.height_adjust = true;
+    h.state_mut().canvas.height_adjust_anchor = Some(cadcraft_geom::Vec3::new(2.0, 0.0, 0.0));
+    h.state_mut().canvas.height_adjust_start_offset = 2.0;
+    let target = h.state().canvas.xf.unwrap().to_screen3(cadcraft_geom::Vec3::new(4.0, 0.0, 0.0));
+    h.event(Event::PointerMoved(target));
+    h.run_steps(3);
+    assert!((h.state().session.drawing_plane_offset() - 4.0).abs() < 1e-6, "YZ offset follows world X");
+
+    h.event(Event::PointerButton { pos: target, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    h.event(Event::PointerButton { pos: target, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert!(!h.state().canvas.height_adjust, "click confirms height adjustment");
+    assert!((h.state().session.drawing_plane_offset() - 4.0).abs() < 1e-6, "confirmation keeps the selected offset");
+    assert!(h.state().session.current_prompt().and_then(|prompt| prompt.base).is_none(), "confirmation click must not place LINE's first point");
+}
+
+#[test]
+fn test_parallel_projection_clears_canvas_cursor_and_does_not_accept_stale_point() {
+    let mut h = harness(None, 1280.0, 760.0);
+    h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
+    h.state_mut().session.set_drawing_plane(cadcraft_geom::DrawingPlane::XZ);
+    h.state_mut().session.set_drawing_plane_offset(9.0);
+    h.state_mut().session.start("line").unwrap();
+    h.run_steps(2);
+
+    let xf = h.state().canvas.xf.unwrap();
+    let world_point = xf.to_world3_with_offset(xf.rect.center(), cadcraft_geom::DrawingPlane::XZ, 9.0).unwrap();
+    let target = xf.to_screen3(world_point);
+    h.event(Event::PointerMoved(target));
+    h.run_steps(2);
+    assert!(h.state().canvas.cursor.is_some(), "isometric view provides a valid XZ cursor point");
+    let last_valid = h.state().session.cursor3;
+
+    h.state_mut().session.execute("view.top", &json!({})).unwrap();
+    h.run_steps(2);
+    assert!(h.state().canvas.cursor.is_none(), "top-view ray is parallel to XZ");
+    assert_eq!(h.state().session.cursor3, last_valid, "the engine retains only the last real point");
+
+    h.event(Event::PointerButton { pos: target, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    h.event(Event::PointerButton { pos: target, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert!(h.state().session.current_prompt().and_then(|prompt| prompt.base).is_none(), "invalid click must not place the stale cursor");
+
+    assert!(h.state_mut().cmdline("5,6").is_none());
+    assert_eq!(h.state().session.last_point3, cadcraft_geom::DrawingPlane::XZ.embed(cadcraft_geom::Vec2::new(5.0, 6.0), 9.0));
+
+    h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
+    h.run_steps(2);
+    h.event(Event::PointerMoved(target));
+    h.run_steps(2);
+    assert!(h.state().canvas.cursor.is_some(), "cursor becomes valid again in isometric view");
 }
 
 #[test]
@@ -142,6 +219,8 @@ fn test_floating_palettes_remain_accessible_on_narrow_window_resize() {
 
 #[test]
 fn test_default_template_and_startup_options_roundtrip() {
+    let _serial = TEMPLATE_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _restore = RestoreQnewTemplate(cadcraft_engine::cmd::file::qnew_template());
     let mut app = CadApp::new(Session::default(), Services::default());
 
     // Set QNEWTEMPLATE and startupCreateDrawing

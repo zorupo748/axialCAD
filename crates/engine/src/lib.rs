@@ -1692,8 +1692,16 @@ impl Session {
             return self.input(Input::Keyword(k));
         }
         if prompt.accept.point {
-            if let Some((p3, _has_z)) = prompt::parse_point3_opt(tt, self.last_point3, &self.angle_settings()) {
+            let line_prompt = self.running.as_ref().is_some_and(|run| run.id == "line");
+            let angles = self.angle_settings();
+            if let Some((p3, has_z)) = prompt::parse_point3_opt(tt, self.last_point3, &angles) {
                 self.last_polar = prompt::parse_polar_text(tt, &self.angle_settings());
+                let world_2d = tt.starts_with('*') || tt.strip_prefix('@').is_some_and(|rest| rest.trim_start().starts_with('*'));
+                if line_prompt && !has_z && !world_2d {
+                    if let Some(point) = prompt::parse_point_with(tt, self.last_point, &angles) {
+                        return self.input(Input::Point(point));
+                    }
+                }
                 return self.input(Input::Point3(p3));
             }
             // Direct distance entry along the tracking path the cursor is on, from the point it
