@@ -273,11 +273,7 @@ fn files(app: &CadApp, ui: &mut egui::Ui, changes: &mut Map<String, Value>) {
         ui.label(crate::tl!("Default template for new drawings"));
         let template = cadcraft_engine::cmd::file::qnew_template();
         ui.horizontal(|ui| {
-            let label = if template.is_empty() {
-                format!("({})", crate::tl!("None"))
-            } else {
-                template.clone()
-            };
+            let label = if template.is_empty() { format!("({})", crate::tl!("None")) } else { template.clone() };
             ui.label(RichText::new(label).monospace());
             if ui.button(crate::tl!("Browse...")).clicked() {
                 if let Some(p) = app.services.pick_open.as_ref().and_then(|f| f()) {
@@ -324,6 +320,11 @@ fn drafting(app: &CadApp, ui: &mut egui::Ui, changes: &mut Map<String, Value>, s
         ui.end_row();
     });
     hint(ui, crate::tl!("The aperture is how near the cursor must come to a point for an object snap to find it."));
+    ui.add_space(8.0);
+    let mut z_zero_helper = app.options.z_zero_drop_helper;
+    if ui.checkbox(&mut z_zero_helper, crate::tl!("Show vertical drop helper to Z=0")).changed() {
+        changes.insert("zZeroDropHelper".into(), json!(z_zero_helper));
+    }
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         ui.label(crate::tl!("Snap, grid, polar tracking and Dynamic Input:"));

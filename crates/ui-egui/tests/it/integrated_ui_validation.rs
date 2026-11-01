@@ -186,16 +186,15 @@ fn test_selection_window_escape_clears_the_first_corner() {
 }
 
 #[test]
-fn test_line_ground_acquisition_and_local_vertical_capture_are_distinct() {
+fn test_regression_a_and_d_oblique_free_diagonal_and_vertical_marker() {
+    // Regression D: Vertical marker acquire, confirm, release
     let mut ui = UiState::default();
     ui.show_palettes = false;
     let _ = ui.docking.set_visible(Panel::Layers, false);
     let _ = ui.docking.set_visible(Panel::Properties, false);
     let mut h = harness(Some(ui), 1280.0, 760.0);
-    h.state_mut().session.execute("view.front", &json!({})).unwrap();
+    h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
     let mut camera = h.state().session.camera();
-    camera.azimuth = -1.3;
-    camera.elevation = 0.3;
     camera.height = 1200.0;
     h.state_mut().session.set_camera(camera);
     h.state_mut().session.settings.axistrack = true;
@@ -207,52 +206,88 @@ fn test_line_ground_acquisition_and_local_vertical_capture_are_distinct() {
 
     let xf = h.state().canvas.xf.unwrap();
     let ground_center = xf.to_screen3(cadcraft_geom::Vec3::ZERO);
-    let target = cadcraft_geom::Vec3::new(80.0, 50.0, 0.0);
-    let target_screen = xf.to_screen3(target);
-    assert!(xf.rect.contains(target_screen));
-    let vertical_cursor = ground_center + egui::vec2(0.0, 6.0);
+    let vertical_cursor = ground_center + egui::vec2(2.0, 2.0); // within 8 px acquire
     h.event(Event::PointerMoved(vertical_cursor));
     h.run_steps(2);
-    assert!(!h.state().canvas.ground_target_acquired, "the local vertical snap takes priority inside its acquire radius");
-    assert!(h.state().canvas.axis_track_z_zero, "the local vertical Z=0 guide remains a distinct capture");
-    assert!(h.state().canvas.cursor3.is_some_and(|point| point.dist(cadcraft_geom::Vec3::ZERO) < 0.1));
+    assert!(h.state().canvas.axis_track_z_zero, "vertical marker acquires inside tolerance");
+    assert_eq!(h.state().canvas.active_axis_3d, Some(cadcraft_geom::Axis3D::Z));
+    assert!(h.state().canvas.cursor3.is_some_and(|point| point.dist(cadcraft_geom::Vec3::ZERO) < 1e-6));
 
-    let acquisition_cursor = ground_center + egui::vec2(0.0, 20.0);
-    h.event(Event::PointerMoved(acquisition_cursor));
+    // Release when moving outside (> 12 px)
+    let outside_cursor = ground_center + egui::vec2(25.0, 0.0);
+    h.event(Event::PointerMoved(outside_cursor));
     h.run_steps(2);
-    assert!(h.state().canvas.ground_target_acquired, "moving outside the local guide but inside the reference area acquires Z=0");
-    assert!(!h.state().canvas.axis_track_z_zero, "acquisition replaces the released local guide");
-    h.event(Event::PointerMoved(ground_center));
-    h.run_steps(2);
-    assert!(h.state().canvas.ground_target_acquired, "approaching the vertical guide does not release the acquired ground plane");
-    assert!(!h.state().canvas.axis_track_z_zero, "the acquired plane remains the effective candidate near the vertical guide");
+    assert!(!h.state().canvas.axis_track_z_zero, "leaving marker area releases vertical constraint");
+    let free_c3 = h.state().canvas.cursor3.unwrap();
+    assert!(free_c3.dist(cadcraft_geom::Vec3::ZERO) > 0.5);
+    assert_eq!(free_c3.z, 0.0, "free point outside marker resolves on global Z=0 without retaining base X/Y");
 
+    // Move back into vertical marker and confirm
+    h.event(Event::PointerMoved(vertical_cursor));
+    h.run_steps(2);
+    assert!(h.state().canvas.axis_track_z_zero);
+    click_at(&mut h, vertical_cursor);
+    let lines = h.state().session.doc().unwrap().model.clone();
+    let drop_line = lines
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Line(l) if l.a == cadcraft_geom::Vec3::new(0.0, 0.0, 100.0) => Some(l.clone()),
+            _ => None,
+        })
+        .expect("vertical drop line must be created");
+    assert_eq!(drop_line.b, cadcraft_geom::Vec3::ZERO, "confirmed drop line has exact (base.x, base.y, 0)");
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+
+    // Regression A: Second oblique view with different zoom, Auto, ORTHO/V off
+    // LINE from (0,0,100), free click at projection of (80,50,0) without typing Z0 or passing through a ring.
+    h.state_mut().session.execute("view.neiso", &json!({})).unwrap();
+    let mut cam2 = h.state().session.camera();
+    cam2.height = 1000.0;
+    h.state_mut().session.set_camera(cam2);
+    h.state_mut().session.settings.axistrack = false;
+    h.state_mut().session.settings.orthomode = false;
+    h.state_mut().session.settings.zlock = false;
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "0,0,100");
+
+    let xf2 = h.state().canvas.xf.unwrap();
+    let target = cadcraft_geom::Vec3::new(80.0, 50.0, 0.0);
+    let target_screen = xf2.to_screen3(target);
+    assert!(xf2.rect.contains(target_screen));
     h.event(Event::PointerMoved(target_screen));
     h.run_steps(2);
-    assert!(
-        h.state().canvas.cursor3.is_some_and(|point| point.dist(target) < 0.1),
-        "the acquired plane follows the lateral cursor movement: {:?}",
-        h.state().canvas.cursor3
-    );
-    let resolved = h.state().canvas.cursor3.unwrap();
+    assert!(!h.state().canvas.axis_track_z_zero);
+    let resolved = h.state().canvas.cursor3.expect("free point resolves on global Z=0");
+    assert!(resolved.dist(target) < 0.2, "resolved cursor {resolved:?} matches independent target {target:?}");
+    assert_eq!(resolved.z, 0.0);
+
     let preview = h.state().session.preview(h.state().canvas.cursor.unwrap());
-    let preview_endpoint = preview.iter().find_map(|entity| match &entity.kind {
-        EntityKind::Line(line) if line.a == cadcraft_geom::Vec3::new(0.0, 0.0, 100.0) => Some(line.b),
-        _ => None,
-    });
-    assert!(
-        preview_endpoint.is_some_and(|point| point.dist(resolved) < 0.1),
-        "preview {preview_endpoint:?} must use the resolved ground cursor {resolved:?}"
-    );
+    let preview_endpoint = preview
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Line(l) if l.a == cadcraft_geom::Vec3::new(0.0, 0.0, 100.0) => Some(l.b),
+            _ => None,
+        })
+        .expect("preview exists");
+    assert!(preview_endpoint.dist(target) < 0.2);
+    assert_eq!(preview_endpoint.z, 0.0);
+
     click_at(&mut h, target_screen);
-    let saved = h.state().session.doc().unwrap().model.iter().find_map(|entity| match &entity.kind {
-        EntityKind::Line(line) if line.a.z == 100.0 => Some(line.b),
-        _ => None,
-    });
-    assert!(
-        saved.is_some_and(|point| point.dist(preview_endpoint.unwrap()) < 0.1 && point.z == 0.0),
-        "the accepted diagonal must match the preview on global Z=0: saved={saved:?}, preview={preview_endpoint:?}"
-    );
+    let saved_diag = h
+        .state()
+        .session
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Line(l) if l.a == cadcraft_geom::Vec3::new(0.0, 0.0, 100.0) && l.b.dist(target) < 0.5 => Some(l.clone()),
+            _ => None,
+        })
+        .expect("saved diagonal line must exist in model space");
+    assert_eq!(saved_diag.b.z, 0.0, "diagonal endpoint real stored Z is exactly 0.0");
+    assert!(saved_diag.b.dist(target) < 0.2);
 }
 
 #[test]
@@ -282,8 +317,7 @@ fn test_recovered_right_canvas_area_accepts_base_point_and_creates_final_line_en
 
     // Verify base point was accepted (first point recorded, machine prompting for next point)
     assert!(
-        h.state().session.prompt_text().to_lowercase().contains("next point")
-            || h.state().session.prompt_text().to_lowercase().contains("siguiente"),
+        h.state().session.prompt_text().to_lowercase().contains("next point") || h.state().session.prompt_text().to_lowercase().contains("siguiente"),
         "Base point in recovered right canvas must be accepted: {}",
         h.state().session.prompt_text()
     );
@@ -427,7 +461,7 @@ fn test_line_z0_option_uses_clicked_global_ground_point_once() {
 }
 
 #[test]
-fn test_line_automatically_acquires_visible_ground_target_and_saves_diagonal() {
+fn test_regression_g_and_a_ortho_v_and_free_diagonal() {
     for (axistrack, orthomode, zlock) in [(false, false, false), (true, false, false), (false, true, false), (false, false, true)] {
         let mut ui = UiState::default();
         ui.show_palettes = false;
@@ -447,102 +481,54 @@ fn test_line_automatically_acquires_visible_ground_target_and_saves_diagonal() {
         type_and_submit(&mut h, "0,0,100");
         h.state_mut().session.settings.orthomode = orthomode;
         h.state_mut().session.settings.zlock = zlock;
-        assert!(!h.state().session.current_prompt().unwrap().global_xy_zero, "automatic acquisition must not activate explicit Z=0 mode");
 
         let base = cadcraft_geom::Vec3::new(0.0, 0.0, 100.0);
         let target = cadcraft_geom::Vec3::new(500.0, 400.0, 0.0);
         let xf = h.state().canvas.xf.unwrap();
         let target_screen = xf.to_screen3(target);
-        let ground_center = xf.to_screen3(cadcraft_geom::Vec3::ZERO);
-        assert!(xf.rect.contains(target_screen), "target must be inside canvas: {target_screen:?}");
-        let target_offset = target_screen.distance(ground_center);
-        assert!(target_offset > 52.0, "decisive target must be more than 52 screen pixels beyond the ring center: {target_offset}");
+        assert!(xf.rect.contains(target_screen));
 
-        let free = cadcraft_geom::Vec3::new(350.0, 250.0, 100.0);
-        let free_screen = xf.to_screen3(free);
-        assert!(xf.rect.contains(free_screen));
-        h.event(Event::PointerMoved(free_screen));
-        h.run_steps(2);
-        assert!(!h.state().canvas.ground_target_acquired, "outside the visible target, normal continuation remains free");
-        if !orthomode && !zlock {
-            assert!((h.state().canvas.cursor3.unwrap().z - base.z).abs() < 1e-6, "normal continuation preserves the elevated base height");
-        }
-
-        let acquisition_cursor = ground_center + vec2(12.0, 0.0);
-        h.event(Event::PointerMoved(acquisition_cursor));
-        h.run_steps(2);
-        assert!(h.state().canvas.ground_target_acquired, "hovering inside the visible ground target acquires it");
         h.event(Event::PointerMoved(target_screen));
         h.run_steps(2);
-        assert!(h.state().canvas.ground_target_acquired, "leaving the 40 px acquisition ring must not release the acquired plane");
-        let resolved = h.state().canvas.cursor3.expect("camera ray intersects global Z=0");
-        assert!(resolved.dist(target) < 0.5, "resolved cursor {resolved:?} must match independent target {target:?}");
-        assert_eq!(resolved.z, 0.0);
-        assert_eq!(h.state().session.settings.orthomode, orthomode, "acquisition must not change ORTHO");
-        assert_eq!(h.state().session.settings.zlock, zlock, "acquisition must not change V");
-        assert!(
-            h.state().canvas.cursor3.is_some_and(|point| point.dist(target) < 0.5),
-            "cursor must follow the distant acquired plane point: {:?}",
-            h.state().canvas.cursor3
-        );
-        let preview = h.state().session.preview(h.state().canvas.cursor.unwrap());
-        assert!(
-            preview.iter().any(|entity| { matches!(&entity.kind, EntityKind::Line(line) if line.a == base && line.b.dist(target) < 0.5) }),
-            "preview must use the same resolved point as the cursor"
-        );
-        h.event(Event::PointerButton { pos: target_screen, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
-        h.run_steps(1);
-        h.event(Event::PointerButton { pos: target_screen, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
-        h.run_steps(3);
 
-        assert!(h.state().session.last_point3.dist(target) < 0.5, "click must accept the point resolved for the cursor");
-        let lines: Vec<_> = h
-            .state()
-            .session
-            .doc()
-            .unwrap()
-            .model
-            .iter()
-            .filter_map(|entity| match &entity.kind {
-                EntityKind::Line(line) => Some((line.a, line.b)),
+        if !orthomode && !zlock {
+            // Free point resolves to ground without ring acquisition
+            let resolved = h.state().canvas.cursor3.expect("free point resolves on global Z=0");
+            assert!(resolved.dist(target) < 0.5, "resolved cursor {resolved:?} matches target {target:?}");
+            assert_eq!(resolved.z, 0.0);
+
+            let preview = h.state().session.preview(h.state().canvas.cursor.unwrap());
+            assert!(preview.iter().any(|e| matches!(&e.kind, EntityKind::Line(l) if l.a == base && l.b.dist(target) < 0.5)));
+
+            click_at(&mut h, target_screen);
+            let saved = h.state().session.doc().unwrap().model.iter().find_map(|e| match &e.kind {
+                EntityKind::Line(l) if l.a.dist(base) < 0.5 => Some(l.b),
                 _ => None,
-            })
-            .collect();
-        let saved = lines.iter().find(|(a, _)| a.dist(base) < 0.5).map(|(_, b)| *b);
-        assert!(saved.is_some_and(|point| point.dist(target) < 0.5), "saved LINE endpoint must be {target:?}, got {saved:?} in {lines:?}");
-        assert!(!h.state().canvas.ground_target_acquired, "accepting the point clears the temporary target");
-        assert!(!h.state().session.current_prompt().unwrap().global_xy_zero, "automatic acquisition does not set the explicit mode");
-        assert_eq!(h.state().session.settings.orthomode, orthomode);
-        assert_eq!(h.state().session.settings.zlock, zlock, "V is restored after accepting the acquired point");
-
-        if !orthomode && !zlock && !axistrack {
-            let next = cadcraft_geom::Vec3::new(140.0, -90.0, 0.0);
-            let next_screen = h.state().canvas.xf.unwrap().to_screen3(next);
-            h.event(Event::PointerMoved(next_screen));
-            h.run_steps(2);
-            assert!(!h.state().canvas.ground_target_acquired, "the next segment starts at Z=0 and does not retain prior acquisition state");
-            assert!(h.state().canvas.cursor3.unwrap().dist(next) < 0.5, "the next segment returns to normal free continuation");
+            });
+            assert!(saved.is_some_and(|p| p.dist(target) < 0.5 && p.z == 0.0), "saved line forms diagonal to Z=0");
         } else if zlock {
-            let vertical = target + cadcraft_geom::Vec3::new(0.0, 0.0, 50.0);
-            let vertical_screen = h.state().canvas.xf.unwrap().to_screen3(vertical);
-            h.event(Event::PointerMoved(vertical_screen));
-            h.run_steps(2);
-            let cursor = h.state().canvas.cursor3.unwrap();
-            assert!((cursor.x - target.x).abs() < 0.5 && (cursor.y - target.y).abs() < 0.5, "V is restored for the next point");
-            assert!(cursor.z > target.z, "V still permits vertical continuation after the one-shot acquired point");
+            // V mode is strictly preserved, not bypassed for Z=0
+            let cursor = h.state().canvas.cursor3.expect("cursor under zlock");
+            assert_eq!(h.state().canvas.active_axis_3d, Some(cadcraft_geom::Axis3D::Z));
+            assert!((cursor.x - base.x).abs() < 1e-6);
+            assert!((cursor.y - base.y).abs() < 1e-6);
+        } else if orthomode {
+            // ORTHO mode is strictly preserved, not bypassed for Z=0
+            assert!(h.state().canvas.active_axis_3d.is_some(), "ORTHO active axis must be set");
+            let cursor = h.state().canvas.cursor3.expect("cursor under orthomode");
+            let diff_count = usize::from((cursor.x - base.x).abs() > 1e-4)
+                + usize::from((cursor.y - base.y).abs() > 1e-4)
+                + usize::from((cursor.z - base.z).abs() > 1e-4);
+            assert!(diff_count <= 1, "ORTHO motion must be along a single axis, diff_count={diff_count}");
         }
 
-        h.event(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
-        h.run_steps(1);
-        h.event(Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });
+        h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
         h.run_steps(2);
-        assert!(h.state().session.running.is_none());
-        assert!(!h.state().canvas.ground_target_acquired, "finishing LINE leaves no target state");
     }
 }
 
 #[test]
-fn test_line_ground_target_preserves_3d_endpoint_snaps_and_rejects_parallel_view() {
+fn test_regression_c_and_k_endpoint_snap_and_parallel_view() {
     let mut ui = UiState::default();
     ui.show_palettes = false;
     let _ = ui.docking.set_visible(Panel::Layers, false);
@@ -552,6 +538,8 @@ fn test_line_ground_target_preserves_3d_endpoint_snaps_and_rejects_parallel_view
     let mut camera = h.state().session.camera();
     camera.height = 1800.0;
     h.state_mut().session.set_camera(camera);
+
+    // Regression C: Elevated endpoint snap preserves its real WCS Z
     let elevated_endpoint = cadcraft_geom::Vec3::new(80.0, 50.0, 20.0);
     h.state_mut().session.execute("line", &json!({"points": [[80.0, 50.0, 20.0], [100.0, 50.0, 20.0]]})).unwrap();
     h.state_mut().session.settings.osmode = cadcraft_engine::snap::mode::END;
@@ -560,16 +548,30 @@ fn test_line_ground_target_preserves_3d_endpoint_snaps_and_rejects_parallel_view
 
     let xf = h.state().canvas.xf.unwrap();
     let endpoint_screen = xf.to_screen3(elevated_endpoint);
-    let ground_center = xf.to_screen3(cadcraft_geom::Vec3::ZERO);
-    assert!(endpoint_screen.distance(ground_center) < 40.0, "elevated snap is deliberately inside the ground-target zone");
     h.event(Event::PointerMoved(endpoint_screen));
     h.run_steps(2);
-    assert_eq!(h.state().canvas.cursor3, Some(elevated_endpoint), "real entity snaps retain their original WCS Z");
+    assert_eq!(h.state().canvas.cursor3, Some(elevated_endpoint), "real entity snap preserves its original WCS Z");
     assert_eq!(h.state().canvas.snap.map(|hit| hit.name), Some("Endpoint"));
-    assert!(!h.state().canvas.ground_target_acquired, "the ground target cannot override a real entity snap");
+
+    click_at(&mut h, endpoint_screen);
+    let saved_snap_line = h
+        .state()
+        .session
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Line(l) if l.a == cadcraft_geom::Vec3::new(0.0, 0.0, 100.0) => Some(l.clone()),
+            _ => None,
+        })
+        .expect("line from snap must exist");
+    assert_eq!(saved_snap_line.b, elevated_endpoint, "snapped endpoint preserves exact WCS Z=20.0");
+
     h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(2);
 
+    // Regression K: Parallel view, camera change, cancellation, canvas exit
     h.state_mut().session.settings.osmode = 0;
     type_and_submit(&mut h, "LINE");
     type_and_submit(&mut h, "0,0,100");
@@ -577,136 +579,453 @@ fn test_line_ground_target_preserves_3d_endpoint_snaps_and_rejects_parallel_view
     h.run_steps(2);
     let front_xf = h.state().canvas.xf.unwrap();
     let front_target = front_xf.to_screen3(cadcraft_geom::Vec3::ZERO);
-    assert!(
-        front_xf.to_world3_with_offset(front_target, cadcraft_geom::DrawingPlane::XY, 0.0).is_none(),
-        "the test view must have a camera ray parallel to global Z=0"
-    );
+    assert!(front_xf.to_world3_with_offset(front_target, cadcraft_geom::DrawingPlane::XY, 0.0).is_none(), "camera ray is parallel to global Z=0");
     let stale_cursor = cadcraft_geom::Vec3::new(999.0, 888.0, 777.0);
     h.state_mut().canvas.cursor3 = Some(stale_cursor);
     h.state_mut().session.cursor3 = stale_cursor;
     h.event(Event::PointerMoved(front_target));
     h.run_steps(2);
-    assert!(!h.state().canvas.ground_target_acquired, "a view parallel to Z=0 must not retain or fabricate an acquired point");
-    assert_ne!(h.state().canvas.cursor3, Some(stale_cursor), "parallel view must not reuse the previous cursor");
+    assert_ne!(h.state().canvas.cursor3, Some(stale_cursor), "parallel view must not reuse stale cursor");
 
+    // Camera change clears stale candidate
     h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
     h.run_steps(2);
-    let restored_xf = h.state().canvas.xf.unwrap();
-    let outside = restored_xf.to_screen3(cadcraft_geom::Vec3::new(350.0, 250.0, 100.0));
-    h.event(Event::PointerMoved(outside));
+
+    // Canvas exit clears cursor
+    let canvas_rect = h.state().canvas.rect.unwrap();
+    let outside_canvas = pos2(canvas_rect.left() - 50.0, canvas_rect.center().y);
+    h.event(Event::PointerMoved(outside_canvas));
     h.run_steps(2);
-    assert!(!h.state().canvas.ground_target_acquired, "changing camera clears the old target candidate");
+    assert!(h.state().canvas.cursor.is_none(), "moving pointer outside canvas clears cursor");
+    assert!(h.state().canvas.cursor3.is_none());
+
+    // Cancellation leaves no candidate
     h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(2);
-    assert!(!h.state().canvas.ground_target_acquired, "cancelling LINE leaves no target state");
+    assert!(h.state().session.running.is_none());
+    assert!(h.state().canvas.cursor.is_none());
+    assert!(!h.state().canvas.axis_track_z_zero);
 }
 
 #[test]
-fn test_line_ground_target_free_rearm_canvas_exit_and_camera_change() {
-    for use_options_menu in [false, true] {
-        let mut ui = UiState::default();
-        ui.show_palettes = false;
-        let _ = ui.docking.set_visible(Panel::Layers, false);
-        let _ = ui.docking.set_visible(Panel::Properties, false);
-        let mut h = harness(Some(ui), 1280.0, 760.0);
-        h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
-        let mut camera = h.state().session.camera();
-        camera.height = 1800.0;
-        h.state_mut().session.set_camera(camera);
-        h.state_mut().session.settings.osmode = 0;
-        h.state_mut().session.settings.axistrack = true;
-        type_and_submit(&mut h, "LINE");
-        type_and_submit(&mut h, "0,0,100");
+fn test_preference_vertical_drop_helper_persistence_and_reset() {
+    let mut ui = UiState::default();
+    ui.show_palettes = false;
+    let _ = ui.docking.set_visible(Panel::Layers, false);
+    let _ = ui.docking.set_visible(Panel::Properties, false);
+    let mut h = harness(Some(ui), 1280.0, 760.0);
 
-        let xf = h.state().canvas.xf.unwrap();
-        let center = xf.to_screen3(cadcraft_geom::Vec3::ZERO);
-        let acquire = center + vec2(12.0, 0.0);
-        h.event(Event::PointerMoved(acquire));
-        h.run_steps(2);
-        assert!(h.state().canvas.ground_target_acquired);
+    assert!(h.state().options.z_zero_drop_helper, "option is enabled by default");
+    h.state_mut().run("options", json!({"zZeroDropHelper": false})).unwrap();
+    assert!(!h.state().options.z_zero_drop_helper, "option can be disabled via options JSON");
+    let profile = h.state().profile_json();
+    assert!(profile.contains("\"zZeroDropHelper\":false"));
+    h.state_mut().options.z_zero_drop_helper = true;
+    h.state_mut().load_profile(&profile);
+    assert!(!h.state().options.z_zero_drop_helper, "load_profile restores disabled option");
+    h.state_mut().run("options", json!({"reset": true})).unwrap();
+    assert!(h.state().options.z_zero_drop_helper, "reset restores default true");
+}
 
-        if use_options_menu {
-            h.event(Event::Key { key: Key::ArrowDown, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
-            h.run_steps(2);
-            let (row, keyword) =
-                h.state().cmd.option_rows.iter().find(|(_, keyword)| keyword == "Free").cloned().expect("Free is available in prompt options");
-            let option_pos = row.center();
-            h.event(Event::PointerMoved(option_pos));
-            h.run_steps(1);
-            h.event(Event::PointerButton { pos: option_pos, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
-            h.run_steps(1);
-            h.event(Event::PointerButton { pos: option_pos, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
-            h.run_steps(2);
-            assert_eq!(keyword, "Free");
-        } else {
-            type_and_submit(&mut h, "F");
-        }
-        assert!(!h.state().canvas.ground_target_acquired, "Free/F releases the acquired target");
-        assert_eq!(h.state().session.doc().unwrap().model.len(), 0, "Free does not place an entity");
-        if !use_options_menu {
-            h.event(Event::PointerMoved(center));
-            h.run_steps(2);
-            assert!(!h.state().canvas.ground_target_acquired, "F leaves the ground suppressed until the cursor exits the acquisition area");
-            assert!(
-                h.state().canvas.axis_track_z_zero,
-                "Free still permits the local vertical Z=0 guide: cursor={:?}, axis={:?}, snap={:?}, base={:?}, axistrack={}",
-                h.state().canvas.cursor3,
-                h.state().canvas.active_axis_3d,
-                h.state().canvas.snap,
-                h.state().session.current_prompt().and_then(|prompt| prompt.base3),
-                h.state().session.settings.axistrack
-            );
-            assert!(h.state().canvas.cursor3.is_some_and(|point| point.dist(cadcraft_geom::Vec3::ZERO) < 0.1));
-        }
+#[test]
+fn test_oblique_free_first_point_resolves_to_z_zero_independent_of_camera_target() {
+    let mut ui = UiState::default();
+    ui.show_palettes = false;
+    let _ = ui.docking.set_visible(Panel::Layers, false);
+    let _ = ui.docking.set_visible(Panel::Properties, false);
+    let mut h = harness(Some(ui), 1280.0, 760.0);
 
-        h.event(Event::PointerMoved(acquire));
-        h.run_steps(2);
-        if use_options_menu {
-            assert!(h.state().canvas.ground_target_acquired, "moving from the prompt option back into the ring is a fresh entry");
-        } else {
-            assert!(!h.state().canvas.ground_target_acquired, "Free cannot reacquire while the cursor remains in the acquisition ring");
-        }
+    h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
+    let mut cam_b = h.state().session.camera();
+    cam_b.target = cadcraft_geom::Vec3::new(45.0, 25.0, 150.0);
+    h.state_mut().session.set_camera(cam_b);
+    type_and_submit(&mut h, "LINE");
+    let center_pt = h.state().canvas.rect.unwrap().center();
+    h.event(Event::PointerMoved(center_pt));
+    h.run_steps(2);
+    let first_pt3 = h.state().canvas.cursor3.expect("first point resolves on Z=0");
+    assert_eq!(first_pt3.z, 0.0, "first free point in oblique view must resolve on global Z=0 regardless of camera target height");
+    click_at(&mut h, center_pt);
+    assert_eq!(h.state().session.last_point3.z, 0.0);
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+}
 
-        h.event(Event::PointerMoved(center + vec2(60.0, 0.0)));
-        h.run_steps(2);
-        if use_options_menu {
-            assert!(h.state().canvas.ground_target_acquired, "acquisition persists after leaving the ring");
-        } else {
-            assert!(!h.state().canvas.ground_target_acquired, "leaving the ring rearms acquisition without capturing a point");
-            h.event(Event::PointerMoved(acquire));
-            h.run_steps(2);
-            assert!(h.state().canvas.ground_target_acquired, "re-entering the ring after leaving can acquire again");
-        }
+#[test]
+fn test_vertical_drop_helper_disabled_with_and_without_axistrack() {
+    let mut ui = UiState::default();
+    ui.show_palettes = false;
+    let _ = ui.docking.set_visible(Panel::Layers, false);
+    let _ = ui.docking.set_visible(Panel::Properties, false);
+    let mut h = harness(Some(ui), 1280.0, 760.0);
 
-        let canvas = h.state().canvas.rect.unwrap();
-        let outside = pos2(canvas.left() - 10.0, canvas.center().y);
-        h.event(Event::PointerMoved(outside));
-        h.run_steps(2);
-        assert!(!h.state().canvas.ground_target_acquired, "leaving the canvas invalidates the acquired target");
+    h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
+    let mut cam_e = h.state().session.camera();
+    cam_e.target = cadcraft_geom::Vec3::ZERO;
+    cam_e.height = 1600.0;
+    h.state_mut().session.set_camera(cam_e);
 
-        h.event(Event::PointerMoved(acquire));
-        h.run_steps(2);
-        assert!(h.state().canvas.ground_target_acquired, "re-entering the canvas can acquire a fresh target");
-        let mut changed_camera = h.state().session.camera();
-        changed_camera.azimuth += 0.3;
-        h.state_mut().session.set_camera(changed_camera);
-        h.run_steps(2);
-        assert!(!h.state().canvas.ground_target_acquired, "changing camera invalidates the prior target");
-        h.event(Event::PointerMoved(acquire));
-        h.run_steps(2);
-        assert!(!h.state().canvas.ground_target_acquired, "camera invalidation requires leaving and re-entering the new ring");
-        let new_center = h.state().canvas.xf.unwrap().to_screen3(cadcraft_geom::Vec3::ZERO);
-        h.event(Event::PointerMoved(new_center + vec2(60.0, 0.0)));
-        h.run_steps(2);
-        h.event(Event::PointerMoved(new_center + vec2(12.0, 0.0)));
-        h.run_steps(2);
-        assert!(h.state().canvas.ground_target_acquired, "a fresh entry after camera change acquires normally");
+    // Case A: Ayuda desactivada y AXISTRACK apagado:
+    // sin marcador ni captura auxiliar invisible; punto libre forma diagonal al suelo
+    h.state_mut().options.z_zero_drop_helper = false;
+    h.state_mut().session.settings.axistrack = false;
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "0,0,100");
+    let xf_e = h.state().canvas.xf.unwrap();
+    let ground_center = xf_e.to_screen3(cadcraft_geom::Vec3::ZERO);
+    let near_marker = ground_center + egui::vec2(2.0, 2.0);
+    h.event(Event::PointerMoved(near_marker));
+    h.run_steps(2);
+    assert!(!h.state().canvas.axis_track_z_zero, "when disabled, no vertical drop snap is active");
+    assert!(h.state().canvas.snap.is_none(), "no snap hit when helper is disabled");
+    let c3_e = h.state().canvas.cursor3.unwrap();
+    assert!(c3_e.dist(cadcraft_geom::Vec3::ZERO) > 0.1, "not locked to (0,0,0)");
+    assert_eq!(c3_e.z, 0.0, "fallback free point still resolves to Z=0");
 
-        h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
-        h.run_steps(2);
-        assert!(h.state().session.running.is_none());
-        assert!(!h.state().canvas.ground_target_acquired, "cancelling LINE clears the acquired target");
-    }
+    let diag_target = cadcraft_geom::Vec3::new(80.0, 50.0, 0.0);
+    let diag_screen = xf_e.to_screen3(diag_target);
+    click_at(&mut h, diag_screen);
+    let saved_e = h
+        .state()
+        .session
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Line(l) if l.a == cadcraft_geom::Vec3::new(0.0, 0.0, 100.0) && l.b.dist(diag_target) < 0.5 => Some(l.clone()),
+            _ => None,
+        })
+        .expect("diagonal line exists even with option disabled");
+    assert_eq!(saved_e.b.z, 0.0);
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+
+    // Case B: Ayuda desactivada y AXISTRACK encendido:
+    // rastreo puede seguir el eje Z, pero NO conserva captura especial exacta a Z=0
+    h.state_mut().options.z_zero_drop_helper = false;
+    h.state_mut().session.settings.axistrack = true;
+    h.state_mut().session.settings.osmode = 0;
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "0,0,100");
+    let xf_b = h.state().canvas.xf.unwrap();
+    // Point on the Z-axis ray at Z=50
+    let z_ray_screen = xf_b.to_screen3(cadcraft_geom::Vec3::new(0.0, 0.0, -50.0));
+    h.event(Event::PointerMoved(z_ray_screen + egui::vec2(2.0, 0.0)));
+    h.run_steps(2);
+    assert!(!h.state().canvas.axis_track_z_zero, "no axis_track_z_zero helper snap");
+    assert_eq!(h.state().canvas.active_axis_3d, Some(cadcraft_geom::Axis3D::Z), "AXISTRACK tracks 3D Z axis along vertical ray");
+    let c3_tracked = h.state().canvas.cursor3.unwrap();
+    assert_ne!(c3_tracked, cadcraft_geom::Vec3::ZERO, "must not lock to exact (0,0,0) without helper");
+    assert!((c3_tracked.z - (-50.0)).abs() < 5.0, "Z coordinate tracks vertical position, not forced to Z=0");
+
+    // Near the ground under base: no vertical drop helper snap to (0,0,0)
+    let ground_screen = xf_b.to_screen3(cadcraft_geom::Vec3::ZERO);
+    h.event(Event::PointerMoved(ground_screen + egui::vec2(1.0, 0.0)));
+    h.run_steps(2);
+    assert!(!h.state().canvas.axis_track_z_zero, "helper is disabled, no axis_track_z_zero snap");
+
+    // Move outside the AXISTRACK release radius (> 14px): axis releases to free diagonal fallback at Z=0
+    let outside_z_ray = z_ray_screen + egui::vec2(30.0, 0.0);
+    h.event(Event::PointerMoved(outside_z_ray));
+    h.run_steps(2);
+    assert_eq!(h.state().canvas.active_axis_3d, None, "outside tracking aperture, axis is cleared");
+    let c3_free = h.state().canvas.cursor3.unwrap();
+    assert_eq!(c3_free.z, 0.0, "released cursor resolves to free plane at Z=0");
+
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+}
+
+#[test]
+fn test_manual_drawing_plane_and_elevation_preserved() {
+    let mut ui = UiState::default();
+    ui.show_palettes = false;
+    let _ = ui.docking.set_visible(Panel::Layers, false);
+    let _ = ui.docking.set_visible(Panel::Properties, false);
+    let mut h = harness(Some(ui), 1280.0, 760.0);
+
+    h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
+    h.state_mut().session.settings.axistrack = false;
+    h.state_mut().session.set_drawing_plane(cadcraft_geom::DrawingPlane::XZ);
+    h.state_mut().session.set_drawing_plane_offset(25.0);
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "10,25,0");
+    let screen_h = h.state().canvas.rect.unwrap().center();
+    h.event(Event::PointerMoved(screen_h));
+    h.run_steps(2);
+    assert_eq!(h.state().canvas.cursor3.unwrap().y, 25.0, "manual XZ plane offset Y=25 is preserved");
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+
+    h.state_mut().session.set_drawing_plane(cadcraft_geom::DrawingPlane::XY);
+    h.state_mut().session.set_drawing_plane_offset(50.0);
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "10,10,50");
+    h.event(Event::PointerMoved(screen_h));
+    h.run_steps(2);
+    assert_eq!(h.state().canvas.cursor3.unwrap().z, 50.0, "manual XY elevation Z=50 is preserved");
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    h.state_mut().session.set_drawing_plane_automatic();
+    h.state_mut().session.set_drawing_plane_offset_automatic();
+}
+
+#[test]
+fn test_principal_views_allow_vertical_drawing_without_v() {
+    let mut ui = UiState::default();
+    ui.show_palettes = false;
+    let _ = ui.docking.set_visible(Panel::Layers, false);
+    let _ = ui.docking.set_visible(Panel::Properties, false);
+    let mut h = harness(Some(ui), 1280.0, 760.0);
+
+    h.state_mut().session.execute("view.front", &json!({})).unwrap();
+    h.run_steps(2);
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "10,0,10");
+    let front_screen = h.state().canvas.rect.unwrap().center() - egui::vec2(0.0, 80.0);
+    h.event(Event::PointerMoved(front_screen));
+    h.run_steps(2);
+    let front_c3 = h.state().canvas.cursor3.expect("front view cursor");
+    assert_eq!(front_c3.y, 0.0, "front view plane is XZ at Y=0");
+    assert!((front_c3.z - 10.0).abs() > 1.0, "vertical coordinate Z changes freely without V");
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+}
+
+#[test]
+fn test_principal_front_view_auto_vs_explicit_z0() {
+    let mut ui = UiState::default();
+    ui.show_palettes = false;
+    let _ = ui.docking.set_visible(Panel::Layers, false);
+    let _ = ui.docking.set_visible(Panel::Properties, false);
+    let mut h = harness(Some(ui), 1280.0, 760.0);
+
+    h.state_mut().session.execute("view.front", &json!({})).unwrap();
+    h.run_steps(2);
+
+    // Path 1: Auto mode in Front view resolves mouse points on XZ freely
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "0,0,50");
+    let front_target = h.state().canvas.rect.unwrap().center() + egui::vec2(60.0, -40.0);
+    h.event(Event::PointerMoved(front_target));
+    h.run_steps(2);
+    assert!(h.state().canvas.cursor3.is_some(), "Auto front view resolves mouse points on XZ");
+    assert_eq!(h.state().canvas.cursor3.unwrap().y, 0.0, "XZ drawing plane has depth Y=0");
+    assert!(!h.state().canvas.parallel_plane_warning, "no parallel warning in Auto front mode");
+    click_at(&mut h, front_target);
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    let line_front = h
+        .state()
+        .session
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Line(l) if l.a == cadcraft_geom::Vec3::new(0.0, 0.0, 50.0) => Some(l.clone()),
+            _ => None,
+        })
+        .expect("front view line created by mouse click");
+    assert_eq!(line_front.a.y, 0.0);
+    assert_eq!(line_front.b.y, 0.0);
+
+    // Path 2: Explicit Z0 in Front view cannot unproject onto global Z=0 because ray is parallel
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "0,0,50");
+    type_and_submit(&mut h, "Z=0"); // Activate explicit global Z=0 mode
+    h.event(Event::PointerMoved(front_target));
+    h.run_steps(2);
+    assert!(h.state().canvas.parallel_plane_warning, "warning shown when explicit Z=0 cannot intersect parallel ray");
+    assert!(h.state().canvas.cursor3.is_none(), "cursor cleared when explicit Z=0 cannot intersect parallel ray");
+
+    // Free disables Z=0 mode and restores normal drawing
+    type_and_submit(&mut h, "Free");
+    h.event(Event::PointerMoved(front_target));
+    h.run_steps(2);
+    assert!(!h.state().canvas.parallel_plane_warning, "Free disables Z=0 mode and warning");
+    assert!(h.state().canvas.cursor3.is_some(), "cursor restored after Free");
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+}
+
+#[test]
+fn test_coordinates_front_view_absolute_vs_relative() {
+    let mut ui = UiState::default();
+    ui.show_palettes = false;
+    let _ = ui.docking.set_visible(Panel::Layers, false);
+    let _ = ui.docking.set_visible(Panel::Properties, false);
+    let mut h = harness(Some(ui), 1280.0, 760.0);
+
+    h.state_mut().session.execute("view.front", &json!({})).unwrap();
+    h.run_steps(2);
+
+    // 1. Sin @: coordenadas absolutas en XZ
+    // primer punto: 100,200 -> WCS (100, 0, 200)
+    // segundo punto: 50,30  -> WCS (50, 0, 30) (NO sumado)
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "100,200");
+    type_and_submit(&mut h, "50,30");
+    type_and_submit(&mut h, ""); // Enter to finish
+    h.run_steps(2);
+
+    let doc = h.state().session.doc().unwrap();
+    let line_abs = doc
+        .model
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Line(l) if l.a == cadcraft_geom::Vec3::new(100.0, 0.0, 200.0) && l.b == cadcraft_geom::Vec3::new(50.0, 0.0, 30.0) => {
+                Some(l.clone())
+            }
+            _ => None,
+        })
+        .expect("line with absolute coordinates (100,0,200) -> (50,0,30) must exist");
+    assert_eq!(line_abs.a, cadcraft_geom::Vec3::new(100.0, 0.0, 200.0));
+    assert_eq!(line_abs.b, cadcraft_geom::Vec3::new(50.0, 0.0, 30.0));
+
+    // 2. Con @: desplazamiento relativo en XZ
+    // primer punto: 100,200 -> WCS (100, 0, 200)
+    // segundo punto: @50,30 -> WCS (100+50, 0, 200+30) = (150, 0, 230)
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "100,200");
+    type_and_submit(&mut h, "@50,30");
+    type_and_submit(&mut h, ""); // Enter to finish
+    h.run_steps(2);
+
+    let doc2 = h.state().session.doc().unwrap();
+    let line_rel = doc2
+        .model
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Line(l) if l.a == cadcraft_geom::Vec3::new(100.0, 0.0, 200.0) && l.b == cadcraft_geom::Vec3::new(150.0, 0.0, 230.0) => {
+                Some(l.clone())
+            }
+            _ => None,
+        })
+        .expect("line with relative coordinates (100,0,200) -> (150,0,230) must exist");
+    assert_eq!(line_rel.a, cadcraft_geom::Vec3::new(100.0, 0.0, 200.0));
+    assert_eq!(line_rel.b, cadcraft_geom::Vec3::new(150.0, 0.0, 230.0));
+}
+
+#[test]
+fn test_coordinates_xy_absolute_chain() {
+    let mut ui = UiState::default();
+    ui.show_palettes = false;
+    let _ = ui.docking.set_visible(Panel::Layers, false);
+    let _ = ui.docking.set_visible(Panel::Properties, false);
+    let mut h = harness(Some(ui), 1280.0, 760.0);
+
+    h.state_mut().session.execute("view.top", &json!({})).unwrap();
+    h.run_steps(2);
+
+    // 0,0 -> 100,0 -> 100,100 sin @ son coordenadas absolutas, no acumulativas
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "0,0");
+    type_and_submit(&mut h, "100,0");
+    type_and_submit(&mut h, "100,100");
+    type_and_submit(&mut h, ""); // Enter to finish
+    h.run_steps(2);
+
+    let doc = h.state().session.doc().unwrap();
+    let lines: Vec<_> = doc
+        .model
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EntityKind::Line(l) => Some(l.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        lines.iter().any(|l| l.a == cadcraft_geom::Vec3::new(0.0, 0.0, 0.0) && l.b == cadcraft_geom::Vec3::new(100.0, 0.0, 0.0)),
+        "segment 1 is (0,0,0) to (100,0,0)"
+    );
+    let seg2 = lines.iter().find(|l| l.a == cadcraft_geom::Vec3::new(100.0, 0.0, 0.0)).expect("segment 2 exists");
+    assert_eq!(seg2.b, cadcraft_geom::Vec3::new(100.0, 100.0, 0.0), "segment 2 ends at absolute (100,100,0) and NOT (200,100,0)");
+}
+
+#[test]
+fn test_coordinates_3d_explicit_and_relative_preserve_z() {
+    let mut ui = UiState::default();
+    ui.show_palettes = false;
+    let _ = ui.docking.set_visible(Panel::Layers, false);
+    let _ = ui.docking.set_visible(Panel::Properties, false);
+    let mut h = harness(Some(ui), 1280.0, 760.0);
+
+    h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
+    h.run_steps(2);
+
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "10,20,30");
+    type_and_submit(&mut h, "@5,5,10");
+    type_and_submit(&mut h, ""); // Enter to finish
+    h.run_steps(2);
+
+    let doc = h.state().session.doc().unwrap();
+    let line_3d = doc
+        .model
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Line(l) if l.a == cadcraft_geom::Vec3::new(10.0, 20.0, 30.0) => Some(l.clone()),
+            _ => None,
+        })
+        .expect("3D line exists");
+    assert_eq!(line_3d.a, cadcraft_geom::Vec3::new(10.0, 20.0, 30.0), "start Z is preserved as 30");
+    assert_eq!(line_3d.b, cadcraft_geom::Vec3::new(15.0, 25.0, 40.0), "end is (10+5, 20+5, 30+10) = (15,25,40), not replaced by Z=0");
+}
+
+#[test]
+fn test_coordinates_prefixes_hash_and_star() {
+    let mut ui = UiState::default();
+    ui.show_palettes = false;
+    let _ = ui.docking.set_visible(Panel::Layers, false);
+    let _ = ui.docking.set_visible(Panel::Properties, false);
+    let mut h = harness(Some(ui), 1280.0, 760.0);
+
+    h.state_mut().session.execute("view.front", &json!({})).unwrap();
+    h.run_steps(2);
+
+    // Prefix "#" explicitly forces absolute coordinates
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "100,200");
+    type_and_submit(&mut h, "#50,30");
+    type_and_submit(&mut h, "");
+    h.run_steps(2);
+
+    let doc = h.state().session.doc().unwrap();
+    let line_hash = doc
+        .model
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Line(l) if l.a == cadcraft_geom::Vec3::new(100.0, 0.0, 200.0) && l.b == cadcraft_geom::Vec3::new(50.0, 0.0, 30.0) => {
+                Some(l.clone())
+            }
+            _ => None,
+        })
+        .expect("# prefix forces absolute (50, 0, 30)");
+    assert_eq!(line_hash.b, cadcraft_geom::Vec3::new(50.0, 0.0, 30.0));
+
+    // Prefix "*" specifies world coordinates (WCS)
+    type_and_submit(&mut h, "LINE");
+    type_and_submit(&mut h, "*10,20,30");
+    type_and_submit(&mut h, "*@5,5,5");
+    type_and_submit(&mut h, "");
+    h.run_steps(2);
+
+    let doc2 = h.state().session.doc().unwrap();
+    let line_star = doc2
+        .model
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Line(l) if l.a == cadcraft_geom::Vec3::new(10.0, 20.0, 30.0) && l.b == cadcraft_geom::Vec3::new(15.0, 25.0, 35.0) => {
+                Some(l.clone())
+            }
+            _ => None,
+        })
+        .expect("* prefix creates line in WCS");
+    assert_eq!(line_star.a, cadcraft_geom::Vec3::new(10.0, 20.0, 30.0));
+    assert_eq!(line_star.b, cadcraft_geom::Vec3::new(15.0, 25.0, 35.0));
 }
 
 #[test]
@@ -983,10 +1302,15 @@ fn test_default_template_and_startup_options_roundtrip() {
     let mut app = CadApp::new(Session::default(), Services::default());
 
     // Set QNEWTEMPLATE and startupCreateDrawing
-    let res = app.run("options", json!({
-        "QNEWTEMPLATE": "/test/templates/office.dwt",
-        "startupCreateDrawing": true
-    })).unwrap();
+    let res = app
+        .run(
+            "options",
+            json!({
+                "QNEWTEMPLATE": "/test/templates/office.dwt",
+                "startupCreateDrawing": true
+            }),
+        )
+        .unwrap();
 
     assert_eq!(res["QNEWTEMPLATE"], "/test/templates/office.dwt");
     assert_eq!(res["startupCreateDrawing"], true);

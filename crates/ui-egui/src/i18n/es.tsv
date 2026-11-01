@@ -751,6 +751,7 @@
 	Show and hide the tools of this category	Mostrar y ocultar las herramientas de esta categoría
 	Show command prompting near the crosshairs	Mostrar las solicitudes de comandos junto al cursor en cruz
 	Show in Tool Sets	Mostrar en los conjuntos de herramientas
+	Show vertical drop helper to Z=0	Mostrar ayuda de bajada vertical a Z=0
 	Snap Overrides	Anulaciones de referencia a objetos
 	Snap type	Tipo de forzado de cursor
 	Snap, grid, polar tracking and Dynamic Input:	Forzar cursor, rejilla, rastreo polar y entrada dinámica:

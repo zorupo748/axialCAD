@@ -567,7 +567,7 @@ impl Interactive for LineM {
                     self.point_on_z0 = false;
                     s.echo("Global Z=0 point mode disabled.");
                 } else {
-                    s.echo("Automatic ground acquisition released; move outside its target before acquiring again.");
+                    s.echo("Free point mode active.");
                 }
                 Ok(Step::Continue)
             }

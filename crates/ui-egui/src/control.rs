@@ -361,17 +361,24 @@ pub fn handle(app: &mut CadApp, ctx: &egui::Context, req: &ControlRequest) -> Ou
             let (Some(x), Some(y)) = (f("x"), f("y")) else { return err("missing x/y") };
             let world = s("space").unwrap_or("world") == "world";
             let action = s("action").unwrap_or("click");
-            let plane = app.session.drawing_plane();
+            let is_auto_oblique_line = app.session.running.as_ref().is_some_and(|r| r.id == "line")
+                && !app.session.drawing_plane_is_manual()
+                && !app.session.drawing_plane_offset_is_manual()
+                && app.session.camera().principal_drawing_plane().is_none();
+            let plane = if is_auto_oblique_line { cadcraft_geom::DrawingPlane::XY } else { app.session.drawing_plane() };
             let wp3 = if world {
                 cadcraft_geom::Vec3::new(x, y, f("z").unwrap_or(0.0))
             } else {
                 let Some(xf) = app.canvas.xf else { return err("canvas transform is unavailable") };
-                let offset = app
-                    .session
-                    .current_prompt()
-                    .and_then(|p| p.base3)
-                    .map(|base| app.session.drawing_plane_offset_for(Some(base)))
-                    .unwrap_or_else(|| app.session.drawing_plane_offset_for(None));
+                let offset = if is_auto_oblique_line {
+                    0.0
+                } else {
+                    app.session
+                        .current_prompt()
+                        .and_then(|p| p.base3)
+                        .map(|base| app.session.drawing_plane_offset_for(Some(base)))
+                        .unwrap_or_else(|| app.session.drawing_plane_offset_for(None))
+                };
                 let Some(point) = xf.to_world3_with_offset(egui::pos2(x as f32, y as f32), plane, offset) else {
                     return err("pointer ray is parallel to the active drawing plane");
                 };

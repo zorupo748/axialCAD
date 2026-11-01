@@ -369,8 +369,7 @@ impl CubeGeometry {
         let screen =
             Vec3::new(f64::from(point.x - self.center.x) / f64::from(self.radius), -f64::from(point.y - self.center.y) / f64::from(self.radius), 0.0);
         let ray_origin = right * screen.x + up * screen.y;
-        let plane_offset = 1.0;
-        let plane = if normal.x + normal.y + normal.z < 0.0 { -plane_offset } else { plane_offset };
+        let plane = 1.0;
         (plane - normal.dot(ray_origin)) / normal.dot(self.camera.view_dir())
     }
 
@@ -419,9 +418,6 @@ fn point_in_polygon(point: Pos2, polygon: &[Pos2; 4]) -> bool {
 
 fn activate_part(app: &mut CadApp, part: Part) {
     match part {
-        Part::Face(face) if face == CubeFace::ZPositive && app.session.camera().is_plan() => {
-            let _ = app.run("view.bottom", json!({}));
-        }
         Part::Face(face) => {
             let _ = app.run(&format!("view.{}", face.preset()), json!({}));
         }
@@ -850,13 +846,13 @@ mod tests {
         let l = Layout::new(canvas(&app));
 
         click(&mut app, &ctx, l.center, egui::PointerButton::Primary);
-        assert_eq!(app.session.camera().view_name(), "BOTTOM", "the top face toggles to Bottom from Plan");
-        assert!(app.session.camera().view_dir().near(Vec3::new(0.0, 0.0, -1.0), 1e-6));
+        assert_eq!(app.session.camera().view_name(), "TOP", "clicking the top face keeps/activates the top view");
+        assert!(app.session.camera().view_dir().near(Vec3::new(0.0, 0.0, 1.0), 1e-6));
         assert!(app.session.pending_window.is_none());
         assert!(app.session.selection().is_empty());
 
         click(&mut app, &ctx, l.center, egui::PointerButton::Primary);
-        assert_eq!(app.session.camera().view_name(), "BOTTOM", "clicking the bottom face keeps the bottom view");
+        assert_eq!(app.session.camera().view_name(), "TOP", "clicking the top face keeps the top view");
 
         for (point, preset, expected) in [
             (l.center + vec2(0.0, l.ring), "front", Vec3::new(0.0, -1.0, 0.0)),
@@ -1072,5 +1068,94 @@ mod tests {
         assert!(app.session.camera().view_dir().near(Vec3::new(1.0, 0.0, 0.0), 1e-6), "CompassE activates Right view");
         activate_part(&mut app, Part::CompassW);
         assert!(app.session.camera().view_dir().near(Vec3::new(-1.0, 0.0, 0.0), 1e-6), "CompassW activates Left view");
+    }
+
+    #[test]
+    fn test_viewcube_independent_regressions_and_preset_expectations() {
+        let (mut app, ctx) = app_and_ctx();
+        let l = Layout::new(canvas(&app));
+
+        // 1. Presets: check expected face, signs, and center click does not invert
+        let presets = [
+            ("top", CubeFace::ZPositive, Vec3::new(0.0, 0.0, 1.0), "Superior (+Z)"),
+            ("bottom", CubeFace::ZNegative, Vec3::new(0.0, 0.0, -1.0), "Inferior (-Z)"),
+            ("front", CubeFace::YNegative, Vec3::new(0.0, -1.0, 0.0), "Frontal (-Y)"),
+            ("back", CubeFace::YPositive, Vec3::new(0.0, 1.0, 0.0), "Posterior (+Y)"),
+            ("right", CubeFace::XPositive, Vec3::new(1.0, 0.0, 0.0), "Derecha (+X)"),
+            ("left", CubeFace::XNegative, Vec3::new(-1.0, 0.0, 0.0), "Izquierda (-X)"),
+        ];
+
+        for (preset, expected_face, expected_dir, desc) in presets {
+            app.session.set_camera(camera(preset));
+            let cam = app.session.camera();
+            assert!(cam.view_dir().near(expected_dir, 1e-6), "{preset} ({desc}) view_dir must match expected direction");
+
+            let geom = CubeGeometry::new(&l, cam);
+            assert_eq!(geom.faces.len(), 1, "{preset} must show exactly 1 visible face");
+            assert_eq!(geom.faces[0].face, expected_face, "{preset} visible face must be {desc}");
+            assert_eq!(l.part_at(l.center, &geom), Some(Part::Face(expected_face)), "{preset} center hit must be {desc}");
+
+            // Center click must maintain/activate the expected preset, never the opposite face
+            click(&mut app, &ctx, l.center, egui::PointerButton::Primary);
+            assert_eq!(
+                app.session.camera().view_name(),
+                preset.to_ascii_uppercase(),
+                "clicking center in {preset} must remain in {preset}, never invert"
+            );
+            assert!(
+                app.session.camera().view_dir().near(expected_dir, 1e-6),
+                "camera direction must remain {expected_dir:?} after clicking center in {preset}"
+            );
+        }
+
+        // 2. Isometric view (SW ISO)
+        app.session.set_camera(camera("swiso"));
+        let cam = app.session.camera();
+        let geom = CubeGeometry::new(&l, cam);
+
+        // Exactly the 3 faces oriented towards the observer: Left (-X), Front (-Y), Top (+Z)
+        let visible_face_kinds: Vec<CubeFace> = geom.faces.iter().map(|f| f.face).collect();
+        assert_eq!(visible_face_kinds.len(), 3, "isometric view must show exactly 3 faces");
+        assert!(visible_face_kinds.contains(&CubeFace::XNegative), "SW ISO must show Left (-X)");
+        assert!(visible_face_kinds.contains(&CubeFace::YNegative), "SW ISO must show Front (-Y)");
+        assert!(visible_face_kinds.contains(&CubeFace::ZPositive), "SW ISO must show Top (+Z)");
+        assert!(!visible_face_kinds.contains(&CubeFace::XPositive), "SW ISO must NOT show Right (+X)");
+        assert!(!visible_face_kinds.contains(&CubeFace::YPositive), "SW ISO must NOT show Back (+Y)");
+        assert!(!visible_face_kinds.contains(&CubeFace::ZNegative), "SW ISO must NOT show Bottom (-Z)");
+
+        // Center of each visible face must detect that face
+        for face in &geom.faces {
+            let center = projected_center(*face);
+            assert_eq!(l.part_at(center, &geom), Some(Part::Face(face.face)), "center of visible face {:?} must detect that face", face.face);
+        }
+
+        // Visible corner (-1, -1, 1) and silhouette corners must be detected
+        let visible_corner = CubeCorner::At(-1, -1, 1);
+        let pt_vis = geom.corners.iter().find(|c| c.corner == visible_corner).unwrap().point;
+        assert_eq!(l.part_at(pt_vis, &geom), Some(Part::Corner(visible_corner)), "front-facing corner (-1, -1, 1) must be detected");
+
+        let front_bottom_corner = CubeCorner::At(-1, -1, -1);
+        let pt_fb = geom.corners.iter().find(|c| c.corner == front_bottom_corner).unwrap().point;
+        assert_eq!(l.part_at(pt_fb, &geom), Some(Part::Corner(front_bottom_corner)), "corner (-1, -1, -1) on front/left faces must be detected");
+
+        // Hidden corner (1, 1, -1) on the back MUST NOT be detected through the cube
+        let hidden_corner = CubeCorner::At(1, 1, -1);
+        let pt_hid = geom.corners.iter().find(|c| c.corner == hidden_corner).unwrap().point;
+        assert_ne!(
+            l.part_at(pt_hid, &geom),
+            Some(Part::Corner(hidden_corner)),
+            "hidden corner (1, 1, -1) on the back of the cube must NOT capture the click"
+        );
+
+        // 3. Arbitrary orientation and orbit
+        let mut arb_cam = OrbitCamera::default();
+        arb_cam.azimuth = 30.0f64.to_radians();
+        arb_cam.elevation = 20.0f64.to_radians();
+        let geom_arb = CubeGeometry::new(&l, arb_cam);
+        for f in &geom_arb.faces {
+            assert!(f.face.normal().dot(arb_cam.view_dir()) > 0.0);
+            let center = projected_center(*f);
+            assert_eq!(l.part_at(center, &geom_arb), Some(Part::Face(f.face)));
+        }
     }
 }

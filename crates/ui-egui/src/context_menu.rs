@@ -208,7 +208,6 @@ pub fn choose(app: &mut CadApp, id: &str) {
         app.cmdline(text);
     } else if let Some(k) = id.strip_prefix(KEYWORD) {
         app.cmd.buffer.clear();
-        crate::cmdline::note_ground_target_keyword(app, k);
         if let Err(e) = app.session.input(Input::Keyword(k.to_string())) {
             app.session.echo(e.to_string());
         }

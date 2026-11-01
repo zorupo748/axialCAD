@@ -157,11 +157,6 @@ pub struct CanvasState {
     pub active_axis_3d: Option<cadcraft_geom::Axis3D>,
     /// The soft Z-axis guide is snapping to the global Z = 0 crossing.
     pub axis_track_z_zero: bool,
-    /// The cursor acquired the visible ground target for a LINE continuation.
-    pub ground_target_acquired: bool,
-    /// Free/F released the target; require leaving the acquisition ring before it can re-arm.
-    ground_target_suppressed: bool,
-    ground_target_key: Option<GroundTargetKey>,
     /// Graphical height adjustment manipulator active.
     pub height_adjust: bool,
     pub height_adjust_anchor: Option<Vec3>,
@@ -217,8 +212,6 @@ pub struct CanvasState {
     /// What the cycling list and the Shift+Space highlight were made for (see [`CycleKey`]).
     cycle_key: Option<CycleKey>,
 }
-
-type GroundTargetKey = (Vec3, OrbitCamera, Rect, f64);
 
 /// The command, prompt, drawing (and its revision) and view that the objects under the cursor
 /// were listed for: when any of them changes, the list and the Shift+Space highlight are stale.
@@ -1928,11 +1921,6 @@ fn store_cursor_resolution(app: &mut CadApp, point: Option<(Vec2, Vec3)>) {
         app.session.cursor_deferred = app.canvas.snap.and_then(|hit| hit.deferred);
         app.canvas.parallel_plane_warning = false;
     } else {
-        if app.session.running.as_ref().is_some_and(|running| running.id == "line") {
-            clear_ground_target_acquisition(app);
-        } else {
-            clear_ground_target(app);
-        }
         app.canvas.cursor = None;
         app.canvas.cursor3 = None;
         app.canvas.snap = None;
@@ -1947,43 +1935,12 @@ fn z0_tolerance(point: Vec3) -> f64 {
     1e-9 * point.x.abs().max(point.y.abs()).max(1.0)
 }
 
-fn clear_ground_target(app: &mut CadApp) {
-    app.canvas.ground_target_acquired = false;
-    app.canvas.ground_target_suppressed = false;
-    app.canvas.ground_target_key = None;
-}
-
-fn clear_ground_target_acquisition(app: &mut CadApp) {
-    app.canvas.ground_target_acquired = false;
-    app.canvas.ground_target_key = None;
-}
-
-pub(crate) fn release_ground_target_until_exit(app: &mut CadApp) {
-    app.canvas.ground_target_acquired = false;
-    app.canvas.ground_target_suppressed = true;
-    app.canvas.ground_target_key = None;
-}
-
-fn with_ground_target_v_bypassed<T>(app: &mut CadApp, action: impl FnOnce(&mut CadApp) -> T) -> T {
-    let acquired = app.canvas.ground_target_acquired;
-    let zlock = app.session.settings.zlock;
-    if acquired {
-        app.session.settings.zlock = false;
-    }
-    let result = action(app);
-    if acquired {
-        app.session.settings.zlock = zlock;
-    }
-    result
-}
-
 fn global_z0_ray_point(xf: &Xf, hp: Pos2) -> Option<Vec3> {
     let point = xf.to_world3_with_offset(hp, cadcraft_geom::DrawingPlane::XY, 0.0)?;
     point.is_finite().then_some(Vec3::new(point.x, point.y, 0.0))
 }
 
 fn resolve_global_z0_point(app: &mut CadApp, hp: Pos2, xf: &Xf, dyn_frame: Option<crate::dyninput::Frame>) -> Option<(Vec2, Vec3)> {
-    clear_ground_target(app);
     app.session.tracking.clear();
     app.canvas.snap = None;
     app.canvas.track = None;
@@ -2031,63 +1988,14 @@ fn resolve_global_z0_point(app: &mut CadApp, hp: Pos2, xf: &Xf, dyn_frame: Optio
     raw.map(|p| (p.xy(), p))
 }
 
-const GROUND_TARGET_ACQUIRE_PIXELS: f32 = 40.0;
-
-/// Acquire around the visible projection of the base point on global Z=0, not around the
-/// cursor's own ground projection (which is always directly under the cursor).
-fn acquire_ground_target(app: &mut CadApp, hp: Pos2, xf: &Xf, base: Vec3, cam: OrbitCamera) -> Option<(Vec2, Vec3)> {
-    let base_key = (base, cam, xf.rect, xf.scale);
-    let ground_base = Vec3::new(base.x, base.y, 0.0);
-    let center = xf.to_screen3(ground_base);
-    let distance = hp.distance(center);
-    if base.z.abs() <= z0_tolerance(base) || !center.x.is_finite() || !center.y.is_finite() {
-        clear_ground_target(app);
-        return None;
-    }
-
-    if app.canvas.ground_target_acquired {
-        return global_z0_ray_point(xf, hp).map(|point| {
-            app.canvas.ground_target_key = Some(base_key);
-            app.session.tracking.clear();
-            app.canvas.snap = None;
-            app.canvas.track = None;
-            app.canvas.active_axis_3d = None;
-            app.canvas.axis_track_z_zero = false;
-            app.canvas.parallel_plane_warning = false;
-            (point.xy(), point)
-        });
-    }
-
-    if distance > GROUND_TARGET_ACQUIRE_PIXELS {
-        app.canvas.ground_target_suppressed = false;
-    }
-    if app.canvas.ground_target_suppressed || distance > GROUND_TARGET_ACQUIRE_PIXELS {
-        app.canvas.ground_target_key = None;
-        return None;
-    }
-
-    let Some(point) = global_z0_ray_point(xf, hp) else {
-        return None;
-    };
-    app.canvas.ground_target_acquired = true;
-    app.canvas.ground_target_suppressed = false;
-    app.canvas.ground_target_key = Some(base_key);
-    app.session.tracking.clear();
-    app.canvas.snap = None;
-    app.canvas.track = None;
-    app.canvas.active_axis_3d = None;
-    app.canvas.axis_track_z_zero = false;
-    app.canvas.parallel_plane_warning = false;
-    Some((point.xy(), point))
-}
+const VERTICAL_DROP_ACQUIRE_PIXELS: f32 = 8.0;
+const VERTICAL_DROP_RELEASE_PIXELS: f32 = 12.0;
 
 /// Acquire at the pick-box scale and release with a wider radius to prevent cursor flicker.
 const AXIS_TRACK_ACQUIRE_PIXELS: f64 = 8.0;
 const AXIS_TRACK_RELEASE_PIXELS: f64 = 14.0;
 /// Below five degrees from the view direction, depth error is too amplified to guide reliably.
 const AXIS_TRACK_MIN_VIEW_ANGLE: f64 = 5.0 * std::f64::consts::PI / 180.0;
-const AXIS_TRACK_Z_ZERO_ACQUIRE_PIXELS: f32 = 8.0;
-const AXIS_TRACK_Z_ZERO_RELEASE_PIXELS: f32 = 14.0;
 
 fn soft_axis_track(
     cam: &OrbitCamera,
@@ -2176,7 +2084,6 @@ fn resolve_effective_point(
     let c = xf.rect.center();
     let q = Vec2::new(f64::from(hp.x - c.x) / xf.scale, -f64::from(hp.y - c.y) / xf.scale);
     let cam = app.session.camera();
-    let plane = app.session.drawing_plane();
     let aperture = app.session.settings.aperture;
     let base_osmode = app.session.settings.osmode;
     let zlock = app.session.settings.zlock;
@@ -2186,17 +2093,15 @@ fn resolve_effective_point(
     let was_z_zero = app.canvas.axis_track_z_zero;
     let line_prompt = app.session.running.as_ref().is_some_and(|r| r.id == "line");
     let z0_mode = app.session.current_prompt().is_some_and(|p| p.global_xy_zero);
-    if !line_prompt || z0_mode || prompt_base3.is_none() {
-        clear_ground_target(app);
-    } else if app.canvas.ground_target_acquired && app.canvas.ground_target_key.as_ref() != Some(&(base3, cam, xf.rect, xf.scale)) {
-        app.canvas.ground_target_acquired = false;
-        app.canvas.ground_target_suppressed = true;
-        app.canvas.ground_target_key = None;
-    }
     if line_prompt && z0_mode {
         return resolve_global_z0_point(app, hp, xf, dyn_frame);
     }
-    let continuation_offset = app.session.drawing_plane_offset_for(prompt_base3);
+    let is_auto_oblique_line = line_prompt
+        && !app.session.drawing_plane_is_manual()
+        && !app.session.drawing_plane_offset_is_manual()
+        && cam.principal_drawing_plane().is_none();
+    let plane = if is_auto_oblique_line { cadcraft_geom::DrawingPlane::XY } else { app.session.drawing_plane() };
+    let continuation_offset = if is_auto_oblique_line { 0.0 } else { app.session.drawing_plane_offset_for(prompt_base3) };
     let plane_point = xf.to_world3_with_offset(hp, plane, continuation_offset);
     let raw2 = if line_prompt { plane_point.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
     let prompt_point = |p: Vec2| {
@@ -2208,20 +2113,23 @@ fn resolve_effective_point(
         && let Some(e) = crate::dyninput::parse(&app.cmd.buffer, &f)
         && e.first_locked().is_some()
     {
-        if line_prompt && plane_point.is_none() && !(app.cmd.second_locked() && e.second_value().is_some()) {
+        let dyn_continuation_offset = app.session.drawing_plane_offset_for(prompt_base3);
+        let dyn_plane_point = xf.to_world3_with_offset(hp, plane, dyn_continuation_offset);
+        if line_prompt && dyn_plane_point.is_none() && !(app.cmd.second_locked() && e.second_value().is_some()) {
             app.canvas.parallel_plane_warning = true;
             return None;
         }
-        let eff = crate::dyninput::constrain(&e, &f, raw2, app.cmd.second_locked());
+        let dyn_raw2 = if line_prompt { dyn_plane_point.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
+        let eff = crate::dyninput::constrain(&e, &f, dyn_raw2, app.cmd.second_locked());
         app.canvas.snap = None;
         app.canvas.track = None;
         app.canvas.active_axis_3d = None;
         app.canvas.axis_track_z_zero = false;
-        return Some((eff, prompt_point(eff)));
+        let dyn_p3 = plane.embed(eff, dyn_continuation_offset);
+        return Some((eff, dyn_p3));
     }
     let grip_held = crate::grip_dyn::constrain(app, raw2);
     if let Some(q_grip) = grip_held {
-        clear_ground_target(app);
         app.canvas.snap = None;
         app.canvas.track = None;
         app.canvas.active_axis_3d = None;
@@ -2276,56 +2184,7 @@ fn resolve_effective_point(
         return Some((eff, eff3));
     }
 
-    if line_prompt
-        && app.session.pending_window.is_none()
-        && app.canvas.ground_target_acquired
-        && let Some(base) = prompt_base3
-    {
-        return acquire_ground_target(app, hp, xf, base, cam);
-    }
-
-    // Find soft tracking before automatic ground acquisition so its existing vertical Z=0
-    // crossing remains a distinct, higher-priority capture.
-    let soft_candidate = if line_prompt
-        && prompt_base3.is_some()
-        && app.session.settings.axistrack
-        && !orthomode
-        && !zlock
-        && app.session.pending_window.is_none()
-        && cam.principal_drawing_plane().is_none()
-    {
-        soft_axis_track(&cam, q, base3, xf.scale, app.canvas.active_axis_3d)
-    } else {
-        None
-    };
-    if let Some((axis, _, _)) = soft_candidate {
-        let z_zero = Vec3::new(base3.x, base3.y, 0.0);
-        let z_zero_distance = xf.to_screen3(z_zero).distance(hp);
-        let z_zero_limit = if was_z_zero { AXIS_TRACK_Z_ZERO_RELEASE_PIXELS } else { AXIS_TRACK_Z_ZERO_ACQUIRE_PIXELS };
-        if axis == cadcraft_geom::Axis3D::Z && z_zero_distance <= z_zero_limit {
-            clear_ground_target_acquisition(app);
-            app.canvas.active_axis_3d = Some(axis);
-            app.canvas.axis_track_z_zero = true;
-            app.canvas.parallel_plane_warning = false;
-            app.canvas.track = None;
-            app.canvas.snap =
-                Some(SnapHit { point: plane.coordinates(z_zero), point3: Some(z_zero), mode: 0, name: "Z=0", viewport: None, deferred: None });
-            return Some((plane.coordinates(z_zero), z_zero));
-        }
-    }
-
-    // The ring acquires the plane outside the overlapping local vertical snap zone.
-    if line_prompt
-        && app.session.pending_window.is_none()
-        && let Some(base) = prompt_base3
-        && let Some(point) = acquire_ground_target(app, hp, xf, base, cam)
-    {
-        return Some(point);
-    } else if line_prompt {
-        clear_ground_target_acquisition(app);
-    }
-
-    // Priority 5: 3D Axis Snapping (ORTHO 3D) or legacy Z-LOCK
+    // Priority 3: 3D Axis Snapping (ORTHO 3D) or legacy Z-LOCK
     if prompt_base.is_some() && !cam.is_plan() {
         if zlock {
             let z = cam.unproject_vertical_z(q, base3);
@@ -2348,7 +2207,45 @@ fn resolve_effective_point(
         }
     }
 
-    // Priority 6: Remaining soft spatial axis tracking, below explicit constraints.
+    // Priority 4: Vertical drop helper to Z=0 for elevated base point in LINE.
+    if line_prompt
+        && app.options.z_zero_drop_helper
+        && !app.session.drawing_plane_is_manual()
+        && !app.session.drawing_plane_offset_is_manual()
+        && cam.principal_drawing_plane().is_none()
+        && app.session.pending_window.is_none()
+        && let Some(base) = prompt_base3
+        && base.z.abs() > z0_tolerance(base)
+    {
+        let drop_pt = Vec3::new(base.x, base.y, 0.0);
+        let center = xf.to_screen3(drop_pt);
+        if center.x.is_finite() && center.y.is_finite() && xf.rect.contains(center) {
+            let limit = if was_z_zero { VERTICAL_DROP_RELEASE_PIXELS } else { VERTICAL_DROP_ACQUIRE_PIXELS };
+            if hp.distance(center) <= limit {
+                app.canvas.active_axis_3d = Some(cadcraft_geom::Axis3D::Z);
+                app.canvas.axis_track_z_zero = true;
+                app.canvas.parallel_plane_warning = false;
+                app.canvas.track = None;
+                app.canvas.snap =
+                    Some(SnapHit { point: plane.coordinates(drop_pt), point3: Some(drop_pt), mode: 0, name: "Z=0", viewport: None, deferred: None });
+                return Some((plane.coordinates(drop_pt), drop_pt));
+            }
+        }
+    }
+
+    // Priority 5: Soft spatial axis tracking, below explicit constraints.
+    let soft_candidate = if line_prompt
+        && prompt_base3.is_some()
+        && app.session.settings.axistrack
+        && !orthomode
+        && !zlock
+        && app.session.pending_window.is_none()
+        && cam.principal_drawing_plane().is_none()
+    {
+        soft_axis_track(&cam, q, base3, xf.scale, app.canvas.active_axis_3d)
+    } else {
+        None
+    };
     if let Some((axis, axis_point, _)) = soft_candidate {
         app.canvas.active_axis_3d = Some(axis);
         app.canvas.parallel_plane_warning = false;
@@ -2357,7 +2254,7 @@ fn resolve_effective_point(
         return Some((plane.coordinates(axis_point), axis_point));
     }
 
-    // Priority 7: Free plane unprojection
+    // Priority 6: Free plane unprojection
     app.canvas.active_axis_3d = None;
     app.canvas.axis_track_z_zero = false;
     match plane_point {
@@ -2680,13 +2577,12 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                     app.session.echo("Point coordinates must be finite.");
                     continue;
                 }
-                let result = with_ground_target_v_bypassed(app, |app| match app.canvas.snap {
+                let result = match app.canvas.snap {
                     Some(hit) => app.session.input_snapped(hit),
                     None => app.session.input(Input::Point3(pt3)),
-                });
+                };
                 match result {
                     Ok(_) => {
-                        clear_ground_target(app);
                         app.canvas.active_axis_3d = None;
                         app.canvas.axis_track_z_zero = false;
                     }
@@ -2808,7 +2704,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             let result = if let Some(handle) = spatial_pick {
                 app.session.pick_cycled(handle, false)
             } else {
-                with_ground_target_v_bypassed(app, |app| match app.canvas.snap {
+                match app.canvas.snap {
                     Some(hit) => app.session.input_snapped(hit),
                     None => {
                         let pt3 = app.canvas.cursor3.unwrap_or_else(|| point_on_plane(p, plane, plane_offset));
@@ -2819,12 +2715,11 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                             Ok(())
                         }
                     }
-                })
+                }
             };
 
             match result {
                 Ok(_) => {
-                    clear_ground_target(app);
                     app.canvas.active_axis_3d = None;
                     app.canvas.axis_track_z_zero = false;
                 }
@@ -3212,11 +3107,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         draw_tracking(&painter, &xf, &app.session.tracking.acquired, app.canvas.track.as_ref(), view.height * 4.0);
     }
     if let (Some(hit), Some(_)) = (app.canvas.snap, app.canvas.cursor) {
-        let marker_pos = if let Some(p3) = hit.point3 {
-            xf.to_screen3(p3)
-        } else {
-            xf.to_screen(hit.point)
-        };
+        let marker_pos = if let Some(p3) = hit.point3 { xf.to_screen3(p3) } else { xf.to_screen(hit.point) };
         draw_snap_marker(&painter, marker_pos, &hit);
     }
     // 3D axis guide and coordinate readout; it sits below the dynamic-input prompt.
@@ -3269,24 +3160,15 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         );
     }
     if !z0_point_mode
+        && app.options.z_zero_drop_helper
         && app.session.running.as_ref().is_some_and(|r| r.id == "line")
+        && !app.session.drawing_plane_is_manual()
+        && !app.session.drawing_plane_offset_is_manual()
+        && app.session.camera().principal_drawing_plane().is_none()
         && let Some(base3) = app.session.current_prompt().and_then(|p| p.base3)
         && base3.z.abs() > z0_tolerance(base3)
     {
-        draw_ground_target(&painter, &xf, base3, app.canvas.ground_target_acquired, &t);
-    }
-    if app.canvas.ground_target_acquired {
-        let locked_dynamic = crate::cmdline::dyn_frame(app)
-            .and_then(|frame| crate::dyninput::parse(&app.cmd.buffer, &frame))
-            .is_some_and(|entries| entries.first_locked().is_some());
-        let status = if locked_dynamic {
-            crate::tl!("Locked Dynamic Input has priority over acquired Z=0.").to_string()
-        } else if let Some(hit) = app.canvas.snap {
-            crate::tf!("{snap} snap has priority over acquired Z=0.", snap = hit.name)
-        } else {
-            crate::tl!("Z=0 acquired; Free/F releases it. ORTHO/V and axis tracking are bypassed.").to_string()
-        };
-        tooltip(&painter, pos2(rect.center().x, rect.top() + 24.0), &status);
+        draw_vertical_drop_marker(&painter, &xf, base3, app.canvas.axis_track_z_zero, &t);
     }
     if app.canvas.parallel_plane_warning || adjust_axis_hidden {
         let warn_pos = pos2(rect.center().x, rect.top() + if z0_point_mode { 48.0 } else { 24.0 });
@@ -3531,19 +3413,12 @@ fn tooltip(p: &egui::Painter, at: Pos2, text: &str) {
     p.galley(r.min + vec2(4.0, 2.0), galley, Color32::BLACK);
 }
 
-fn draw_ground_target(painter: &egui::Painter, xf: &Xf, base: Vec3, acquired: bool, tokens: &Tokens) {
+fn draw_vertical_drop_marker(painter: &egui::Painter, xf: &Xf, base: Vec3, captured: bool, tokens: &Tokens) {
     let center = xf.to_screen3(Vec3::new(base.x, base.y, 0.0));
-    if !center.x.is_finite() || !center.y.is_finite() || !xf.rect.expand(GROUND_TARGET_ACQUIRE_PIXELS).contains(center) {
+    if !center.x.is_finite() || !center.y.is_finite() || !xf.rect.contains(center) {
         return;
     }
-    let available = global_z0_ray_point(xf, xf.rect.center()).is_some();
-    let color = if !available {
-        tokens.text_faint
-    } else if acquired {
-        tokens.toggle_on
-    } else {
-        tokens.snap
-    };
+    let color = if captured { tokens.toggle_on } else { tokens.snap };
     let p = painter.with_clip_rect(xf.rect);
     p.circle_stroke(center, 6.0, Stroke::new(1.5, color));
     p.circle_filled(center, 1.5, color);
@@ -4545,7 +4420,7 @@ mod hatch_pick_tests {
         }
 
         #[test]
-        fn locked_dynamic_input_precedes_the_ground_target() {
+        fn locked_dynamic_input_precedes_the_vertical_drop_helper() {
             let base = Vec3::new(4.0, -3.0, 100.0);
             let mut app = oblique_line_from(base);
             app.session.settings.dynpi_cartesian = true;
@@ -4556,7 +4431,7 @@ mod hatch_pick_tests {
             let frame = crate::cmdline::dyn_frame(&app);
             let resolved =
                 resolve_effective_point(&mut app, screen, &xf, &Context::default(), Some(base.xy()), frame).expect("locked input resolves");
-            assert!(!app.canvas.ground_target_acquired, "locked dynamic input must prevent automatic ground acquisition");
+            assert!(!app.canvas.axis_track_z_zero, "locked dynamic input must prevent vertical drop snap");
             assert!((resolved.1.z - base.z).abs() < 1e-6, "dynamic input keeps the current continuation plane");
         }
 
@@ -4998,14 +4873,14 @@ mod hatch_pick_tests {
             assert_eq!(after_target_move.1.z, 0.0, "unreferenced free-point depth stays at the origin");
 
             app.session.input(Input::Point3(Vec3::new(3.0, 4.0, 12.0))).unwrap();
-            let referenced = resolve_at_center(&mut app).expect("continuation uses the captured base plane");
-            assert_eq!(referenced.1.z, 12.0);
+            let referenced = resolve_at_center(&mut app).expect("continuation resolves on global Z=0");
+            assert_eq!(referenced.1.z, 0.0, "free oblique continuation falls back to global Z=0");
 
             let mut moved_camera = app.session.camera();
             moved_camera.target.z = 120.0;
             app.session.set_camera(moved_camera);
             let after_camera_move = resolve_at_center(&mut app).expect("reference plane survives camera movement");
-            assert_eq!(after_camera_move.1.z, 12.0, "continuation depth comes from the LINE base, not camera target");
+            assert_eq!(after_camera_move.1.z, 0.0, "free oblique continuation stays at global Z=0");
         }
 
         #[test]
@@ -5023,8 +4898,8 @@ mod hatch_pick_tests {
             assert_eq!(resolved.1, endpoint);
             let hit = app.canvas.snap.expect("captured endpoint remains an OSNAP");
             app.session.input_snapped(hit).unwrap();
-            let free_next = resolve_at(&mut app, Vec3::new(6.0, 9.0, endpoint.z)).expect("free continuation resolves on capture depth");
-            assert!((free_next.1.z - endpoint.z).abs() < 1e-5);
+            let free_next = resolve_at(&mut app, Vec3::new(6.0, 9.0, endpoint.z)).expect("free continuation resolves on global Z=0");
+            assert_eq!(free_next.1.z, 0.0, "free continuation forms diagonal to ground Z=0");
             super::super::store_cursor_resolution(&mut app, Some(free_next));
             let preview = app
                 .session
@@ -5765,11 +5640,11 @@ mod hatch_pick_tests {
         let target_pos = center + egui::vec2(120.0, -80.0);
         frame(&mut app, vec![egui::Event::PointerMoved(target_pos)]);
 
-        // Verify cursor3 is on plane Z = 10.0
+        // In the simplified Z=0 model, free mouse points resolve on global Z=0 forming a diagonal
         let c3 = app.canvas.cursor3.expect("cursor3 must be set");
-        assert!((c3.z - 10.0).abs() < 1e-6, "cursor3.z must be 10.0, got {}", c3.z);
+        assert_eq!(c3.z, 0.0, "free cursor3.z must be 0.0, got {}", c3.z);
 
-        // Verify reprojection: unprojected point on Z = 10.0 reprojects to mouse pointer
+        // Verify reprojection: unprojected point on Z = 0.0 reprojects to mouse pointer
         let screen_pos = app.canvas.xf.expect("xf").to_screen3(c3);
         assert!((screen_pos.x - target_pos.x).abs() < 1.0, "screen_pos.x {} != target {}", screen_pos.x, target_pos.x);
         assert!((screen_pos.y - target_pos.y).abs() < 1.0, "screen_pos.y {} != target {}", screen_pos.y, target_pos.y);
@@ -5782,7 +5657,7 @@ mod hatch_pick_tests {
             other => panic!("expected Line, got {:?}", other),
         };
         assert!((preview_line.a.z - 10.0).abs() < 1e-6);
-        assert!((preview_line.b.z - 10.0).abs() < 1e-6);
+        assert_eq!(preview_line.b.z, 0.0);
         assert!((preview_line.b.x - c3.x).abs() < 1e-6);
         assert!((preview_line.b.y - c3.y).abs() < 1e-6);
 
@@ -5803,7 +5678,7 @@ mod hatch_pick_tests {
             .expect("line entity must exist");
 
         assert!((line_ent.a.z - 10.0).abs() < 1e-6, "start Z must be 10.0, got {}", line_ent.a.z);
-        assert!((line_ent.b.z - 10.0).abs() < 1e-6, "end Z must be 10.0, got {}", line_ent.b.z);
+        assert_eq!(line_ent.b.z, 0.0, "diagonal end Z must be 0.0, got {}", line_ent.b.z);
         assert!((line_ent.b.x - preview_line.b.x).abs() < 1e-6, "stored end X must match preview");
         assert!((line_ent.b.y - preview_line.b.y).abs() < 1e-6, "stored end Y must match preview");
         assert!((line_ent.b.z - preview_line.b.z).abs() < 1e-6, "stored end Z must match preview");
@@ -5840,7 +5715,7 @@ mod hatch_pick_tests {
         frame(&mut app, vec![egui::Event::PointerMoved(target_pos)]);
 
         let c3 = app.canvas.cursor3.expect("cursor3 must be set");
-        assert!((c3.z - (-15.0)).abs() < 1e-6, "cursor3.z must be -15.0, got {}", c3.z);
+        assert_eq!(c3.z, 0.0, "cursor3.z must be 0.0, got {}", c3.z);
 
         frame(&mut app, vec![button(target_pos, true), button(target_pos, false)]);
         frame(&mut app, Vec::new());
@@ -5857,7 +5732,7 @@ mod hatch_pick_tests {
             .expect("line entity must exist");
 
         assert!((line_ent.a.z - (-15.0)).abs() < 1e-6);
-        assert!((line_ent.b.z - (-15.0)).abs() < 1e-6);
+        assert_eq!(line_ent.b.z, 0.0);
     }
 
     #[test]
@@ -5908,12 +5783,12 @@ mod hatch_pick_tests {
         app.cmdline("V");
         assert!(!app.session.settings.zlock);
 
-        // 5. Move horizontally by 100px
+        // 5. Move freely by 100px: in the new model, free continuation resolves to global Z=0
         let p_horiz = p_vert + egui::vec2(100.0, 0.0);
         frame(&mut app, vec![egui::Event::PointerMoved(p_horiz)]);
 
-        let c3_horiz = app.canvas.cursor3.expect("cursor3 for horizontal move");
-        assert!((c3_horiz.z - elevated_z).abs() < 1e-6, "Horizontal continuation must retain elevated Z={elevated_z}, got {}", c3_horiz.z);
+        let c3_horiz = app.canvas.cursor3.expect("cursor3 for free move");
+        assert_eq!(c3_horiz.z, 0.0, "Free continuation resolves on global Z=0 forming diagonal");
 
         // Preview matches
         let preview = app.session.preview(app.canvas.cursor.expect("cursor"));
@@ -5923,7 +5798,7 @@ mod hatch_pick_tests {
             other => panic!("expected Line, got {:?}", other),
         };
         assert!((preview_line.a.z - elevated_z).abs() < 1e-6);
-        assert!((preview_line.b.z - elevated_z).abs() < 1e-6);
+        assert_eq!(preview_line.b.z, 0.0);
 
         // 6. Click P3 and finish
         frame(&mut app, vec![button(p_horiz, true), button(p_horiz, false)]);
@@ -5948,9 +5823,9 @@ mod hatch_pick_tests {
         assert!((lines[0].a.z - 0.0).abs() < 1e-6);
         assert!((lines[0].b.z - elevated_z).abs() < 1e-6);
 
-        // Segment 2 is horizontal at elevated_z
+        // Segment 2 is diagonal from elevated_z to Z=0
         assert!((lines[1].a.z - elevated_z).abs() < 1e-6);
-        assert!((lines[1].b.z - elevated_z).abs() < 1e-6);
+        assert_eq!(lines[1].b.z, 0.0);
         assert!((lines[1].b.x - preview_line.b.x).abs() < 1e-6);
         assert!((lines[1].b.y - preview_line.b.y).abs() < 1e-6);
     }
@@ -6040,8 +5915,8 @@ mod hatch_pick_tests {
         frame(&mut app, Vec::new());
         app.session.input(cadcraft_engine::Input::Enter).unwrap();
 
-        // Verify last_point3 was at 25.0
-        assert!((app.session.last_point3.z - 25.0).abs() < 1e-6);
+        // Under the simplified Z=0 rule, a free continuation forms a diagonal to ground (Z=0.0)
+        assert!((app.session.last_point3.z - 0.0).abs() < 1e-6);
 
         // 2. Start a completely NEW LINE command with free mouse clicking
         app.session.cmdline("line").unwrap();

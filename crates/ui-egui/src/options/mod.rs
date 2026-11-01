@@ -72,6 +72,8 @@ pub struct UiOptions {
     pub time_sensitive_right_click: bool,
     /// The size of every menu, palette, dialog and the command line (1: the system's own).
     pub interface_scale: f32,
+    /// Show vertical drop helper to Z=0 for elevated base points in LINE.
+    pub z_zero_drop_helper: bool,
 }
 
 impl Default for UiOptions {
@@ -83,6 +85,7 @@ impl Default for UiOptions {
             selection_color: None,
             time_sensitive_right_click: true,
             interface_scale: 1.0,
+            z_zero_drop_helper: true,
         }
     }
 }
@@ -150,6 +153,7 @@ struct UiChanges {
     time_sensitive_right_click: Option<bool>,
     interface_scale: Option<f32>,
     startup_create_drawing: Option<bool>,
+    z_zero_drop_helper: Option<bool>,
 }
 
 fn color_param(key: &str, v: &Value) -> Result<Option<Color32>, String> {
@@ -173,6 +177,9 @@ fn parse_ui(key: &str, v: &Value, c: &mut UiChanges) -> Result<bool, String> {
         "saveFormat" => c.save_format = Some(crate::SaveFormat::parse(text()?).ok_or("saveFormat must be dxf or dwg")?),
         "systemCursor" => c.system_cursor = Some(v.as_bool().ok_or("systemCursor must be true or false")?),
         "startupCreateDrawing" => c.startup_create_drawing = Some(v.as_bool().ok_or("startupCreateDrawing must be true or false")?),
+        k if k.eq_ignore_ascii_case("zZeroDropHelper") || k.eq_ignore_ascii_case("showZZeroDropHelper") => {
+            c.z_zero_drop_helper = Some(v.as_bool().ok_or("zZeroDropHelper must be a boolean")?);
+        }
         "historyLines" => {
             let n = v.as_u64().filter(|n| *n <= crate::cmdline::MAX_LINES as u64).ok_or("historyLines must be a whole number from 0 to 12")?;
             c.history_lines = Some(n as usize);
@@ -230,6 +237,7 @@ fn ui_json(app: &CadApp) -> Map<String, Value> {
     m.insert("SAVEFILEPATH".into(), json!(cadcraft_engine::autosave::savefilepath()));
     m.insert("timeSensitiveRightClick".into(), json!(o.time_sensitive_right_click));
     m.insert("startupCreateDrawing".into(), json!(app.ui.startup_create_drawing));
+    m.insert("zZeroDropHelper".into(), json!(o.z_zero_drop_helper));
     m
 }
 
@@ -306,6 +314,9 @@ fn run_json(app: &mut CadApp, params: &Value) -> Result<Value, String> {
     if let Some(b) = ui.startup_create_drawing {
         app.ui.startup_create_drawing = b;
     }
+    if let Some(b) = ui.z_zero_drop_helper {
+        app.options.z_zero_drop_helper = b;
+    }
     Ok(report(app))
 }
 
@@ -339,6 +350,7 @@ impl CadApp {
             "timeSensitiveRightClick": self.options.time_sensitive_right_click,
             "interfaceScale": self.options.interface_scale,
             "startupCreateDrawing": self.ui.startup_create_drawing,
+            "zZeroDropHelper": self.options.z_zero_drop_helper,
         })
         .to_string()
     }
@@ -354,9 +366,17 @@ impl CadApp {
             cadcraft_engine::cmd::options::restore(&mut self.session, vars);
         }
         let mut c = UiChanges::default();
-        for key in
-            ["systemCursor", "modelBackground", "paperBackground", "selectionColor", "snapMarkerSize", "timeSensitiveRightClick", "interfaceScale", "startupCreateDrawing"]
-        {
+        for key in [
+            "systemCursor",
+            "modelBackground",
+            "paperBackground",
+            "selectionColor",
+            "snapMarkerSize",
+            "timeSensitiveRightClick",
+            "interfaceScale",
+            "startupCreateDrawing",
+            "zZeroDropHelper",
+        ] {
             if let Some(value) = v.get(key) {
                 let _ = parse_ui(key, value, &mut c);
             }
@@ -385,6 +405,9 @@ impl CadApp {
         }
         if let Some(b) = c.startup_create_drawing {
             self.ui.startup_create_drawing = b;
+        }
+        if let Some(b) = c.z_zero_drop_helper {
+            self.options.z_zero_drop_helper = b;
         }
     }
 }
