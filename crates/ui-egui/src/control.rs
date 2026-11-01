@@ -366,8 +366,12 @@ pub fn handle(app: &mut CadApp, ctx: &egui::Context, req: &ControlRequest) -> Ou
                 cadcraft_geom::Vec3::new(x, y, f("z").unwrap_or(0.0))
             } else {
                 let Some(xf) = app.canvas.xf else { return err("canvas transform is unavailable") };
-                let offset =
-                    app.session.current_prompt().and_then(|p| p.base3).map_or(app.session.drawing_plane_offset(), |base| plane.normal_offset(base));
+                let offset = app
+                    .session
+                    .current_prompt()
+                    .and_then(|p| p.base3)
+                    .map(|base| app.session.drawing_plane_offset_for(Some(base)))
+                    .unwrap_or_else(|| app.session.drawing_plane_offset_for(None));
                 let Some(point) = xf.to_world3_with_offset(egui::pos2(x as f32, y as f32), plane, offset) else {
                     return err("pointer ray is parallel to the active drawing plane");
                 };

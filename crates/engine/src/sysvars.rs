@@ -9,6 +9,8 @@ mod table;
 const SESSION_VARS: &[&str] = &[
     "AUDITCTL",
     "ELEVATION",
+    "ELEVATIONMODE",
+    "WORKPLANEMODE",
     "OSMODE",
     "OSNAPHATCH",
     "ANNOAUTOSCALE",
@@ -77,7 +79,9 @@ pub fn get(s: &Session, name: &str) -> Option<Value> {
     let n = name.trim().to_ascii_uppercase();
     let st = &s.settings;
     let v = match n.as_str() {
-        "ELEVATION" => json!(st.drawing_plane_offset),
+        "ELEVATION" => json!(s.effective_drawing_plane_offset()),
+        "ELEVATIONMODE" => json!(if s.drawing_plane_offset_is_manual() { "manual" } else { "automatic" }),
+        "WORKPLANEMODE" => json!(if s.drawing_plane_is_manual() { "manual" } else { "automatic" }),
         "OSMODE" => json!(st.osmode),
         "OSNAPHATCH" => json!(i32::from(st.osnaphatch)),
         // AutoCAD's values: positive on, negative off (4 = every annotative object).
@@ -300,7 +304,20 @@ pub fn set(s: &mut Session, name: &str, v: &Value) -> Result<()> {
             st.polarmode = bits & 8 != 0;
             st.otrack = bits & 16 != 0;
         }
-        "ELEVATION" => st.drawing_plane_offset = as_f64(v).filter(|f| f.is_finite()).ok_or_else(bad)?,
+        "ELEVATION" => {
+            st.drawing_plane_offset = as_f64(v).filter(|f| f.is_finite()).ok_or_else(bad)?;
+            st.drawing_plane_offset_manual = true;
+        }
+        "ELEVATIONMODE" => match v.as_str().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("automatic" | "auto") => st.drawing_plane_offset_manual = false,
+            Some("manual") => st.drawing_plane_offset_manual = true,
+            _ => return Err(bad()),
+        },
+        "WORKPLANEMODE" => match v.as_str().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("automatic" | "auto") => st.drawing_plane_manual = false,
+            Some("manual") => st.drawing_plane_manual = true,
+            _ => return Err(bad()),
+        },
         "QNEWTEMPLATE" => crate::cmd::file::set_qnew_template(v.as_str().ok_or_else(bad)?),
         "POLARANG" => st.polarang = as_f64(v).filter(|a| *a > 0.0).ok_or_else(bad)?.to_radians(),
         "GRIDMODE" => st.gridmode = as_bool(v).ok_or_else(bad)?,

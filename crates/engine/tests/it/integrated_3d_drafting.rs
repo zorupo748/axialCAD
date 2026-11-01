@@ -157,6 +157,72 @@ fn test_first_point_at_chosen_elevation_plane_offset() {
 }
 
 #[test]
+fn test_automatic_plane_offset_tracks_view_target_and_manual_offset_is_optional() {
+    let mut s = Session::new();
+    let mut camera = s.camera();
+    camera.set_preset("front");
+    camera.target.y = 24.0;
+    s.set_camera(camera);
+
+    assert!(!s.drawing_plane_offset_is_manual());
+    assert_eq!(s.drawing_plane(), DrawingPlane::XZ);
+    assert_eq!(s.effective_drawing_plane_offset(), 0.0, "automatic free points use the view plane through the origin");
+    assert_eq!(cadcraft_engine::sysvars::get(&s, "ELEVATIONMODE"), Some(json!("automatic")));
+    assert_eq!(cadcraft_engine::sysvars::get(&s, "WORKPLANEMODE"), Some(json!("automatic")));
+
+    s.set_drawing_plane(DrawingPlane::YZ);
+    assert!(s.drawing_plane_is_manual());
+    assert_eq!(s.drawing_plane(), DrawingPlane::YZ, "explicit plane selection overrides camera-derived mode");
+    s.execute("plane.auto", &json!({})).unwrap();
+    assert_eq!(s.drawing_plane(), DrawingPlane::XZ, "Auto restores the front-view plane");
+
+    s.execute("line", &json!({"points": [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]})).unwrap();
+    let existing = last_line(&s);
+
+    s.set_drawing_plane_offset(42.0);
+    assert!(s.drawing_plane_offset_is_manual());
+    assert_eq!(s.effective_drawing_plane_offset(), 42.0);
+    s.execute("plane.auto", &json!({})).unwrap();
+    assert!(!s.drawing_plane_offset_is_manual());
+    assert_eq!(s.effective_drawing_plane_offset(), 0.0, "automatic mode returns free points to the global origin plane");
+    assert!(!s.drawing_plane_is_manual());
+    assert_eq!(cadcraft_engine::sysvars::get(&s, "ELEVATIONMODE"), Some(json!("automatic")));
+    assert_eq!(cadcraft_engine::sysvars::get(&s, "WORKPLANEMODE"), Some(json!("automatic")));
+    let profile = cadcraft_engine::cmd::options::profile(&s);
+    assert_eq!(profile["ELEVATIONMODE"], "automatic");
+    assert_eq!(profile["WORKPLANEMODE"], "automatic");
+    let mut restored = Session::new();
+    cadcraft_engine::cmd::options::restore(&mut restored, &profile);
+    assert!(!restored.drawing_plane_offset_is_manual(), "profile restore preserves automatic mode");
+    assert!(!restored.drawing_plane_is_manual(), "profile restore preserves automatic plane selection");
+    let unchanged = s
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .next()
+        .and_then(|entity| match &entity.kind {
+            EntityKind::Line(line) => Some(line.clone()),
+            _ => None,
+        })
+        .expect("existing line remains");
+    assert_eq!(unchanged, existing);
+
+    s.cmdline("line 10,20 30,40").unwrap();
+    s.cmdline("").unwrap();
+    let automatic_line = last_line(&s);
+    assert_eq!(automatic_line.a, Vec3::new(10.0, 0.0, 20.0));
+    assert_eq!(automatic_line.b, Vec3::new(30.0, 0.0, 40.0));
+
+    s.set_drawing_plane_offset(7.0);
+    s.cmdline("line 10,20 30,40").unwrap();
+    s.cmdline("").unwrap();
+    let manual_line = last_line(&s);
+    assert_eq!(manual_line.a, Vec3::new(10.0, 7.0, 20.0));
+    assert_eq!(manual_line.b, Vec3::new(30.0, 7.0, 40.0), "manual elevation applies without entering a Z for each line");
+}
+
+#[test]
 fn test_line_point_coordinates_follow_xy_xz_yz_planes() {
     let mut s = Session::new();
     for (plane, offset, first, next) in [

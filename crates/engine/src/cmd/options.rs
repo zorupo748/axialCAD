@@ -55,6 +55,8 @@ pub const PROFILE_VARS: &[&str] = &[
     "MEASUREINIT",
     "QNEWTEMPLATE",
     "ELEVATION",
+    "ELEVATIONMODE",
+    "WORKPLANEMODE",
 ];
 
 /// The most profile entries [`restore`] reads (a saved profile is untrusted input).
@@ -151,6 +153,7 @@ pub fn reset(s: &mut Session) {
     st.pickdrag = d.pickdrag;
     st.maxarray = d.maxarray;
     st.drawing_plane_offset = d.drawing_plane_offset;
+    st.drawing_plane_offset_manual = d.drawing_plane_offset_manual;
     crate::cmd::file::set_qnew_template("");
 }
 

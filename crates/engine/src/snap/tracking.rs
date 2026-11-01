@@ -780,8 +780,22 @@ impl crate::Session {
     /// acquires it for tracking), then grid snap, then tracking paths (polar, object snap
     /// tracking, Extension, Parallel, Apparent Intersection), then ortho.
     pub fn snap_cursor(&mut self, raw: Vec2, q: &CursorQuery) -> CursorSnap {
+        self.snap_cursor_with_object_snaps(raw, q, true)
+    }
+
+    /// Like [`Session::snap_cursor`], but without 2D object snaps or object-derived tracking.
+    /// Used when a command's coordinate plane does not match the XY coordinates of those snaps.
+    pub fn snap_cursor_without_object_snaps(&mut self, raw: Vec2, q: &CursorQuery) -> CursorSnap {
+        self.snap_cursor_with_object_snaps(raw, q, false)
+    }
+
+    fn snap_cursor_with_object_snaps(&mut self, raw: Vec2, q: &CursorQuery, object_snaps: bool) -> CursorSnap {
         // Snap and grid spacing are the drawing's (SNAPUNIT/GRIDUNIT live in its header).
         let mut s = self.drafting_settings();
+        if !object_snaps {
+            s.osmode = 0;
+            s.otrack = false;
+        }
         // Holding Shift overrides ortho while it is held: on when ORTHOMODE is off, off when it
         // is on (ORTHOMODE itself is unchanged). Ortho on also turns polar tracking off.
         s.orthomode ^= q.shift;
@@ -793,13 +807,21 @@ impl crate::Session {
         }
         // Polar angles relative to the last segment when the base point is where it ends.
         let last = self.last_segment.filter(|(_, b)| q.base.is_some_and(|base| base.near(*b, 1e-9 * (1.0 + b.len())))).map(|(a, b)| a.angle_to(b));
-        let cfg = TrackConfig::relative_to(&s, angbase, last);
+        let mut cfg = TrackConfig::relative_to(&s, angbase, last);
+        if !object_snaps {
+            cfg.track_angles.clear();
+        }
         let osmode = s.osmode | if s.osnaphatch { mode::HATCH } else { 0 };
-        let ix = crate::spatial::index(&doc, &space);
-        let (hit, near_prims) = super::osnap_with_neighborhood(&doc, &space, &ix, raw, q.aperture, osmode, q.base, q.deferred);
-        let cand = match (osmode & mode::HATCH, near_prims.as_deref()) {
-            (0, Some(prims)) => candidate_with_prims(raw, hit.as_ref(), q.aperture, &cfg, q.base, prims),
-            _ => candidate(&doc, &space, raw, hit.as_ref(), q.aperture, &cfg, q.base),
+        let ix = if object_snaps { crate::spatial::index(&doc, &space) } else { None };
+        let (hit, near_prims) =
+            if object_snaps { super::osnap_with_neighborhood(&doc, &space, &ix, raw, q.aperture, osmode, q.base, q.deferred) } else { (None, None) };
+        let cand = if !object_snaps {
+            None
+        } else {
+            match (osmode & mode::HATCH, near_prims.as_deref()) {
+                (0, Some(prims)) => candidate_with_prims(raw, hit.as_ref(), q.aperture, &cfg, q.base, prims),
+                _ => candidate(&doc, &space, raw, hit.as_ref(), q.aperture, &cfg, q.base),
+            }
         };
         let wait = self.tracking.hover(cand, q.now, cfg.shift_acquire, q.shift);
         if let Some(h) = hit {

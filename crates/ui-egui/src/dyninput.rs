@@ -7,8 +7,9 @@
 //!   value holds the cursor.
 //! - Tab types the separator for the format on show, so `40` Tab `90` reads `40<90`; Tab after the
 //!   second value locks it too (both boxes show a lock and the cursor sits on the point).
-//! - Enter sends the entry with `@` in front when it is measured from the last point (relative is
-//!   the default; DYNPICOORDS = 1 makes it absolute), and fills an empty box from the cursor.
+//! - Enter sends an incomplete entry with `@` in front when it is measured from the last point
+//!   (relative is the default; DYNPICOORDS = 1 makes it absolute), and fills an empty box from the
+//!   cursor. A complete Cartesian `x,y` point is absolute unless it has an explicit `@` prefix.
 //! - A plain number and Enter stays direct distance entry; `@`/`#` entries, keywords and command
 //!   names go through untouched.
 //!
@@ -46,7 +47,7 @@ pub struct Frame {
     pub base: Option<Vec2>,
     /// DYNPIFORMAT = 1: second and next points start Cartesian instead of polar.
     pub cartesian: bool,
-    /// DYNPICOORDS = 1: second and next points are absolute instead of relative.
+    /// DYNPICOORDS = 1: incomplete second and next entries are absolute instead of relative.
     pub absolute: bool,
 }
 
@@ -146,6 +147,14 @@ pub fn can_lock_second(text: &str, frame: &Frame) -> bool {
 pub fn constrain(entry: &Entry<'_>, frame: &Frame, p: Vec2, second_locked: bool) -> Vec2 {
     let Some(v) = entry.first_locked() else { return p };
     let o = frame.origin();
+    if entry.format == Format::Cartesian
+        && let Some(w) = entry.second_value()
+    {
+        let q = Vec2::new(v, w);
+        if q.is_finite() {
+            return q;
+        }
+    }
     if second_locked && let Some(w) = entry.second_value() {
         let q = match entry.format {
             Format::Cartesian => o + Vec2::new(v, w),
@@ -174,6 +183,9 @@ pub fn constrain(entry: &Entry<'_>, frame: &Frame, p: Vec2, second_locked: bool)
 /// specified entries do not need a cursor position.
 pub fn complete(entry: &Entry<'_>, frame: &Frame, cursor: Option<Vec2>, last: Vec2) -> Option<String> {
     if !entry.split {
+        return None;
+    }
+    if entry.format == Format::Cartesian && entry.first_locked().is_some() && entry.second_value().is_some() {
         return None;
     }
     let first = entry.first_locked();
@@ -243,7 +255,7 @@ mod tests {
 
     fn sent(text: &str, frame: &Frame, cursor: Vec2, last: Vec2) -> Option<Vec2> {
         let e = parse(text, frame)?;
-        let t = complete(&e, frame, Some(cursor), last)?;
+        let t = complete(&e, frame, Some(cursor), last).unwrap_or_else(|| text.to_string());
         cadcraft_engine::prompt::parse_point(&t, last)
     }
 
@@ -252,11 +264,11 @@ mod tests {
     }
 
     #[test]
-    fn rectangle_corner_with_comma_is_relative() {
-        // Corner snapped at (0,60); `40,40` Enter -> (40,100).
+    fn complete_cartesian_point_is_absolute_unless_prefixed() {
         let base = Vec2::new(0.0, 60.0);
         let f = second_point(base);
-        assert!(close(sent("40,40", &f, Vec2::ZERO, base), Vec2::new(40.0, 100.0)));
+        assert!(close(sent("40,40", &f, Vec2::ZERO, base), Vec2::new(40.0, 40.0)));
+        assert!(close(cadcraft_engine::prompt::parse_point("@40,40", base), Vec2::new(40.0, 100.0)));
     }
 
     #[test]
@@ -325,7 +337,7 @@ mod tests {
         assert!(close(Some(constrain(&e, &f, Vec2::new(100.0, 1.0), false)), Vec2::new(6.0, 1.0)));
         assert!(close(Some(constrain(&e, &f, Vec2::new(100.0, 1.0), true)), Vec2::new(1.0, 6.0)));
         let e = parse("3,4", &f).unwrap();
-        assert_eq!(constrain(&e, &f, Vec2::new(-7.0, 9.0), true), Vec2::new(4.0, 5.0));
+        assert_eq!(constrain(&e, &f, Vec2::new(-7.0, 9.0), true), Vec2::new(3.0, 4.0));
     }
 
     #[test]
@@ -360,14 +372,14 @@ mod tests {
         let base = Vec2::new(0.0, 60.0);
         let f = second_point(base);
         let e = parse("40,40", &f).unwrap();
-        assert_eq!(complete(&e, &f, Some(Vec2::ZERO), base).as_deref(), Some("@40,40"));
+        assert_eq!(complete(&e, &f, Some(Vec2::ZERO), base), None, "a complete Cartesian point is passed through");
+        assert_eq!(constrain(&e, &f, Vec2::ZERO, false), Vec2::new(40.0, 40.0));
         // A prompt whose base is not the last point: send the finished point itself.
         let other_last = Vec2::new(500.0, 500.0);
-        let t = complete(&e, &f, Some(Vec2::ZERO), other_last).unwrap();
-        assert!(t.starts_with('#'), "{t}");
-        assert!(close(cadcraft_engine::prompt::parse_point(&t, other_last), Vec2::new(40.0, 100.0)));
+        assert_eq!(complete(&e, &f, Some(Vec2::ZERO), other_last), None);
         // Polar too.
         let e = parse("40<90", &f).unwrap();
+        assert!(close(Some(constrain(&e, &f, Vec2::ZERO, true)), Vec2::new(0.0, 100.0)));
         let t = complete(&e, &f, Some(Vec2::ZERO), other_last).unwrap();
         assert!(close(cadcraft_engine::prompt::parse_point(&t, other_last), Vec2::new(0.0, 100.0)));
     }
@@ -376,7 +388,7 @@ mod tests {
     fn fully_entered_values_complete_without_a_cursor_but_live_values_do_not() {
         let frame = second_point(Vec2::new(10.0, 20.0));
         let full = parse("3,4", &frame).unwrap();
-        assert_eq!(complete(&full, &frame, None, frame.base.unwrap()).as_deref(), Some("@3,4"));
+        assert_eq!(complete(&full, &frame, None, frame.base.unwrap()), None);
         let partial = parse("3,", &frame).unwrap();
         assert_eq!(complete(&partial, &frame, None, frame.base.unwrap()), None);
     }

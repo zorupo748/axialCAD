@@ -8,7 +8,7 @@ use cadcraft_doc::EntityKind;
 use cadcraft_engine::Session;
 use cadcraft_ui_egui::{CadApp, Services, UiState, docking::Panel};
 use egui::{Event, Key, Modifiers, PointerButton, pos2, vec2};
-use egui_kittest::Harness;
+use egui_kittest::{Harness, kittest::Queryable};
 use serde_json::json;
 use std::sync::Mutex;
 
@@ -111,6 +111,8 @@ fn test_graphical_height_adjustment_escape_cancels_without_altering_drawing() {
     h.state_mut().canvas.height_adjust = true;
     h.state_mut().canvas.height_adjust_anchor = Some(cadcraft_geom::Vec3::new(0.0, 20.0, 0.0));
     h.state_mut().canvas.height_adjust_start_offset = 20.0;
+    h.state_mut().canvas.height_adjust_start_manual = true;
+    h.state_mut().canvas.height_adjust_start_plane_manual = true;
 
     let target = h.state().canvas.xf.unwrap().to_screen3(cadcraft_geom::Vec3::new(0.0, 35.0, 0.0));
     h.event(Event::PointerMoved(target));
@@ -126,6 +128,74 @@ fn test_graphical_height_adjustment_escape_cancels_without_altering_drawing() {
     assert!(!h.state().canvas.height_adjust, "Escape must exit height adjust mode");
     assert_eq!(h.state().session.drawing_plane_offset(), 20.0, "Offset must revert to start offset");
     assert_eq!(h.state().session.doc().unwrap().model.len(), initial_entities, "Drawing must remain untouched");
+}
+
+#[test]
+fn test_graphical_height_adjustment_escape_restores_automatic_mode() {
+    let mut h = harness(None, 1280.0, 760.0);
+    h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
+    let mut camera = h.state().session.camera();
+    camera.target.z = 20.0;
+    h.state_mut().session.set_camera(camera);
+    h.run_steps(2);
+    assert!(!h.state().session.drawing_plane_offset_is_manual());
+    assert!(!h.state().session.drawing_plane_is_manual());
+
+    let active_plane = h.state().session.drawing_plane();
+    h.state_mut().session.set_drawing_plane(active_plane);
+    h.state_mut().session.set_drawing_plane_offset(0.0);
+    h.state_mut().canvas.height_adjust = true;
+    h.state_mut().canvas.height_adjust_anchor = Some(cadcraft_geom::Vec3::ZERO);
+    let stored_offset = h.state().session.drawing_plane_offset();
+    h.state_mut().canvas.height_adjust_start_offset = stored_offset;
+    h.state_mut().canvas.height_adjust_start_manual = false;
+    h.state_mut().canvas.height_adjust_start_plane_manual = false;
+
+    let target = h.state().canvas.xf.unwrap().to_screen3(cadcraft_geom::Vec3::new(0.0, 0.0, 35.0));
+    h.event(Event::PointerMoved(target));
+    h.run_steps(3);
+    assert!(h.state().session.drawing_plane_offset_is_manual(), "adjusting opts into manual mode");
+    assert!(h.state().session.drawing_plane_is_manual(), "adjusting pins the automatically selected plane");
+    assert!((h.state().session.effective_drawing_plane_offset() - 35.0).abs() < 1e-6);
+
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+
+    assert!(!h.state().canvas.height_adjust, "Escape exits manual adjustment");
+    assert!(!h.state().session.drawing_plane_offset_is_manual(), "Escape restores automatic mode");
+    assert!(!h.state().session.drawing_plane_is_manual(), "Escape restores automatic plane selection");
+    assert_eq!(h.state().session.effective_drawing_plane_offset(), 0.0);
+    assert_eq!(h.state().session.drawing_plane(), cadcraft_geom::DrawingPlane::XY);
+}
+
+#[test]
+fn test_elevation_status_right_click_returns_to_automatic_mode() {
+    let mut h = harness(None, 1280.0, 760.0);
+    h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
+    h.state_mut().session.set_drawing_plane(cadcraft_geom::DrawingPlane::XZ);
+    let mut camera = h.state().session.camera();
+    camera.target.y = 20.0;
+    h.state_mut().session.set_camera(camera);
+    h.state_mut().session.set_drawing_plane_offset(35.0);
+    h.run_steps(2);
+    assert!(h.state().session.drawing_plane_offset_is_manual());
+
+    let elev = h.get_by_role_and_label(egui::accesskit::Role::Button, "Elev: +35.00");
+    let elev_rect = elev.rect();
+    let plane_rect = h.get_by_role_and_label(egui::accesskit::Role::Button, "Plane: XZ").rect();
+    let vlock_rect = h.get_by_role_and_label(egui::accesskit::Role::Button, "V-LOCK").rect();
+    assert!(elev_rect.width() >= 70.0, "elevation widget bounds are too narrow: {elev_rect:?}");
+    assert!(!elev_rect.intersects(plane_rect), "elevation label must not overlap the plane control");
+    assert!(!elev_rect.intersects(vlock_rect), "elevation label must not overlap V-LOCK");
+    elev.click_button(PointerButton::Secondary);
+    h.run_steps(3);
+
+    assert!(!h.state().session.drawing_plane_offset_is_manual());
+    assert!(!h.state().session.drawing_plane_is_manual());
+    assert_eq!(h.state().session.drawing_plane(), cadcraft_geom::DrawingPlane::XY);
+    assert_eq!(h.state().session.effective_drawing_plane_offset(), 0.0);
 }
 
 #[test]

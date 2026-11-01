@@ -34,13 +34,19 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("plane.offset", "Drawing Plane Offset", run_plane_offset)
             .alias(&["elev", "elevation", "cota"])
             .menu(&["Tools", "Work Plane", "Set Elevation Offset"])
-            .params("{offset?: number}; sets or queries the elevation offset of the active drawing plane")
+            .params("{offset?: number}; setting an offset enables manual mode; without one, reports the active offset and mode")
             .noundo()
             .transparent(),
         CommandSpec::new("plane.origin", "Drawing Plane Origin", run_plane_origin)
             .alias(&["elev.origin", "cota.origen"])
-            .menu(&["Tools", "Work Plane", "Return to Origin (Z=0)"])
-            .params("{}; resets drawing plane elevation offset to 0.0")
+            .menu(&["Tools", "Work Plane", "Set Manual Zero Offset"])
+            .params("{}; sets a manual zero offset; use plane.auto to return to automatic mode")
+            .noundo()
+            .transparent(),
+        CommandSpec::new("plane.auto", "Automatic Plane Elevation", run_plane_auto)
+            .alias(&["elevation.auto"])
+            .menu(&["Tools", "Work Plane", "Automatic Elevation"])
+            .params("{}; derives the active plane offset from the view target")
             .noundo()
             .transparent(),
         CommandSpec::new("plane.pick", "Pick Plane Elevation", run_plane_pick)
@@ -119,19 +125,32 @@ pub(crate) fn run_plane_offset(s: &mut Session, p: &Value) -> Result<Value> {
         if !off.is_finite() {
             return Err(EngineError::Other("Elevation offset must be finite.".into()));
         }
+        let plane = s.drawing_plane();
+        s.set_drawing_plane(plane);
         s.set_drawing_plane_offset(off);
         s.echo(format!("Drawing plane elevation offset set to {off}."));
         return Ok(json!({ "status": "ok", "offset": off }));
     }
-    let cur = s.drawing_plane_offset();
-    s.echo(format!("Current drawing plane elevation offset is {cur}."));
-    Ok(json!({ "offset": cur }))
+    let cur = s.effective_drawing_plane_offset();
+    let automatic = !s.drawing_plane_offset_is_manual();
+    let mode = if automatic { "automatic" } else { "manual" };
+    s.echo(format!("Current {mode} drawing plane elevation offset is {cur}."));
+    Ok(json!({ "offset": cur, "automatic": automatic }))
 }
 
 pub(crate) fn run_plane_origin(s: &mut Session, _p: &Value) -> Result<Value> {
+    let plane = s.drawing_plane();
+    s.set_drawing_plane(plane);
     s.set_drawing_plane_offset(0.0);
-    s.echo("Drawing plane elevation offset reset to origin (0.0).");
-    Ok(json!({ "status": "ok", "offset": 0.0 }))
+    s.echo("Drawing plane elevation offset fixed at the origin (0.0).");
+    Ok(json!({ "status": "ok", "offset": 0.0, "automatic": false }))
+}
+
+pub(crate) fn run_plane_auto(s: &mut Session, _p: &Value) -> Result<Value> {
+    s.set_drawing_plane_automatic();
+    s.set_drawing_plane_offset_automatic();
+    s.echo("Drawing plane and free-point depth returned to automatic mode.");
+    Ok(json!({ "status": "ok", "offset": 0.0, "automatic": true }))
 }
 
 pub(crate) fn run_plane_pick(s: &mut Session, p: &Value) -> Result<Value> {
@@ -148,6 +167,8 @@ pub(crate) fn run_plane_pick(s: &mut Session, p: &Value) -> Result<Value> {
             DrawingPlane::XZ => y,
             DrawingPlane::YZ => x,
         };
+        let plane = s.drawing_plane();
+        s.set_drawing_plane(plane);
         s.set_drawing_plane_offset(off);
         s.echo(format!("Drawing plane elevation offset set to {off}."));
         return Ok(json!({ "status": "ok", "offset": off }));
@@ -172,10 +193,12 @@ impl Interactive for PlanePickM {
         match i {
             Input::Point(p) => {
                 let off = match s.drawing_plane() {
-                    DrawingPlane::XY => s.settings.drawing_plane_offset,
+                    DrawingPlane::XY => s.effective_drawing_plane_offset(),
                     DrawingPlane::XZ => p.y,
                     DrawingPlane::YZ => p.x,
                 };
+                let plane = s.drawing_plane();
+                s.set_drawing_plane(plane);
                 s.set_drawing_plane_offset(off);
                 s.echo(format!("Drawing plane elevation offset set to {off}."));
                 Ok(Step::Done)

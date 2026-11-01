@@ -424,14 +424,17 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
         coord_right = br_plane.left() - 6.0;
 
         // Elevation / Cota button with mouse adjust and origin return
-        let elev_offset = app.session.drawing_plane_offset();
-        let elev_active = elev_offset.abs() > 1e-6 || app.canvas.height_adjust;
-        let elev_text = if elev_offset.abs() < 1e-6 {
-            crate::tl!("Elevation: 0.00").to_string()
+        let elev_offset = app.session.effective_drawing_plane_offset();
+        let elev_manual = app.session.drawing_plane_offset_is_manual();
+        let elev_active = elev_manual || app.canvas.height_adjust;
+        let elev_text = if !elev_manual {
+            crate::tl!("Elev: Auto").to_string()
+        } else if elev_offset.abs() < 1e-6 {
+            crate::tl!("Elev: 0.00").to_string()
         } else {
-            crate::tf!("Elevation: {offset}", offset = format!("{elev_offset:+.2}"))
+            crate::tf!("Elev: {offset}", offset = format!("{elev_offset:+.2}"))
         };
-        let br_elev = Rect::from_min_max(pos2(coord_right - 78.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
+        let br_elev = Rect::from_min_max(pos2(coord_right - 88.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
         let resp_elev = ui.interact(br_elev, ui.id().with("drawing_plane_elev_toggle"), Sense::click());
         let elev_hovered = resp_elev.hovered();
         icons::describe_control(ui, &resp_elev, &elev_text, Some(elev_active), false);
@@ -479,25 +482,29 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
         let elev_clicked = resp_elev.clicked();
         let elev_sec_clicked = resp_elev.secondary_clicked();
         let _ = resp_elev.on_hover_text(crate::tf!(
-            "Drawing plane offset: {offset} (Click: adjust with mouse, right-click: reset to 0.0)",
-            offset = format!("{elev_offset:.2}")
+            "Drawing plane offset: {offset} (Click: adjust manually, right-click: return to automatic)",
+            offset = if elev_manual { format!("{elev_offset:.2}") } else { crate::tl!("Automatic").to_string() }
         ));
         if elev_clicked {
             app.canvas.height_adjust = !app.canvas.height_adjust;
             if app.canvas.height_adjust {
                 let plane = app.session.drawing_plane();
                 app.canvas.height_adjust_anchor = Some(plane.embed(plane.coordinates(app.session.last_point3), elev_offset));
-                app.canvas.height_adjust_start_offset = elev_offset;
+                app.canvas.height_adjust_start_offset = app.session.drawing_plane_offset();
+                app.canvas.height_adjust_start_manual = elev_manual;
+                app.canvas.height_adjust_start_plane_manual = app.session.drawing_plane_is_manual();
+                if !app.canvas.height_adjust_start_plane_manual {
+                    app.session.set_drawing_plane(plane);
+                }
+                app.session.set_drawing_plane_offset(elev_offset);
                 app.session.echo(crate::tl!("Graphical plane offset adjustment started (move the mouse, click to fix, Esc to cancel)."));
             }
         }
         if elev_sec_clicked {
-            if elev_offset.abs() > 1e-6 {
-                app.session.set_drawing_plane_offset(0.0);
-                app.session.echo(crate::tl!("Plane offset reset to the origin (0.0)."));
-            } else {
-                app.start("plane.pick");
-            }
+            app.canvas.height_adjust = false;
+            app.session.set_drawing_plane_automatic();
+            app.session.set_drawing_plane_offset_automatic();
+            app.session.echo(crate::tl!("Drawing plane elevation returned to automatic mode."));
         }
         coord_right = br_elev.left() - 6.0;
 

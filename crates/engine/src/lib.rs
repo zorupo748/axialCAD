@@ -382,8 +382,9 @@ pub struct Settings {
     /// DYNPIFORMAT = 1: Dynamic Input shows second and next points as Cartesian `x,y` instead of
     /// polar `distance<angle` (the default).
     pub dynpi_cartesian: bool,
-    /// DYNPICOORDS = 1: second and next points typed into Dynamic Input are absolute instead of
-    /// relative to the last point (the default).
+    /// DYNPICOORDS = 1: incomplete second and next Dynamic Input entries are absolute instead of
+    /// relative to the last point (the default). Complete Cartesian pairs are absolute unless
+    /// prefixed with `@`.
     pub dynpi_absolute: bool,
     /// DYNPROMPT: Dynamic Input shows the prompt beside the cursor, and Down Arrow opens the
     /// prompt's options there (on by default).
@@ -473,8 +474,12 @@ pub struct Settings {
     /// AUDITCTL: 1 creates an audit report (.adt) file when AUDIT is run (default: 0).
     pub auditctl: bool,
     pub drawing_plane: cadcraft_geom::DrawingPlane,
-    /// Elevation offset of the active drawing plane (along its normal axis).
+    /// Whether `drawing_plane` overrides the view-derived automatic principal plane.
+    pub drawing_plane_manual: bool,
+    /// Elevation offset of the active drawing plane when manually set.
     pub drawing_plane_offset: f64,
+    /// Whether `drawing_plane_offset` overrides the automatically derived plane offset.
+    pub drawing_plane_offset_manual: bool,
     /// Explicit Z-Axis vertical constraint (locks next point to vertical axis through base point).
     pub zlock: bool,
 }
@@ -485,6 +490,8 @@ impl Default for Settings {
             osmode: 4133,
             orthomode: false,
             drawing_plane_offset: 0.0,
+            drawing_plane_offset_manual: false,
+            drawing_plane_manual: false,
             zlock: false,
             polarmode: true,
             polarang: std::f64::consts::FRAC_PI_2,
@@ -845,21 +852,56 @@ impl Session {
         }
     }
     pub fn drawing_plane(&self) -> cadcraft_geom::DrawingPlane {
-        self.state().map(|st| st.drawing_plane).unwrap_or(self.settings.drawing_plane)
+        if self.settings.drawing_plane_manual {
+            self.state().map(|st| st.drawing_plane).unwrap_or(self.settings.drawing_plane)
+        } else {
+            self.camera().principal_drawing_plane().unwrap_or(cadcraft_geom::DrawingPlane::XY)
+        }
     }
     pub fn set_drawing_plane(&mut self, plane: cadcraft_geom::DrawingPlane) {
         if let Ok(st) = self.state_mut() {
             st.drawing_plane = plane;
         }
         self.settings.drawing_plane = plane;
+        self.settings.drawing_plane_manual = true;
+    }
+    pub fn drawing_plane_is_manual(&self) -> bool {
+        self.settings.drawing_plane_manual
+    }
+    pub fn set_drawing_plane_automatic(&mut self) {
+        self.settings.drawing_plane_manual = false;
     }
     pub fn drawing_plane_offset(&self) -> f64 {
         self.settings.drawing_plane_offset
     }
     pub fn set_drawing_plane_offset(&mut self, offset: f64) {
         if offset.is_finite() {
+            if !self.settings.drawing_plane_manual {
+                let plane = self.drawing_plane();
+                self.set_drawing_plane(plane);
+            }
             self.settings.drawing_plane_offset = offset;
+            self.settings.drawing_plane_offset_manual = true;
         }
+    }
+    /// The active offset for a new free point: manual elevation or the global origin.
+    pub fn effective_drawing_plane_offset(&self) -> f64 {
+        if self.settings.drawing_plane_offset_manual { self.settings.drawing_plane_offset } else { 0.0 }
+    }
+    /// The automatic free-point depth is the reference point's coordinate along the plane
+    /// normal, or zero when no reference exists. Manual elevation overrides both.
+    pub fn drawing_plane_offset_for(&self, reference: Option<cadcraft_geom::Vec3>) -> f64 {
+        if self.settings.drawing_plane_offset_manual {
+            self.settings.drawing_plane_offset
+        } else {
+            reference.map_or(0.0, |point| self.drawing_plane().normal_offset(point))
+        }
+    }
+    pub fn drawing_plane_offset_is_manual(&self) -> bool {
+        self.settings.drawing_plane_offset_manual
+    }
+    pub fn set_drawing_plane_offset_automatic(&mut self) {
+        self.settings.drawing_plane_offset_manual = false;
     }
     pub fn zlock(&self) -> bool {
         self.settings.zlock

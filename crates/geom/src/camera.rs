@@ -84,6 +84,9 @@ impl Axis3D {
 /// upside-down camera flipping during turntable orbit navigation.
 pub const MAX_ORBIT_ELEVATION: f64 = 89.5 * std::f64::consts::PI / 180.0;
 
+/// Maximum angular deviation from a world axis for automatic principal-view drafting (10°).
+pub const PRINCIPAL_VIEW_TOLERANCE: f64 = 10.0 * std::f64::consts::PI / 180.0;
+
 /// 3D Orbit Camera (turntable navigation model compatible with AutoCAD 3DORBIT).
 ///
 /// Orientates the view around a stable reference target point in WCS.
@@ -119,6 +122,29 @@ impl OrbitCamera {
     pub fn is_plan(&self) -> bool {
         (self.elevation - std::f64::consts::FRAC_PI_2).abs() < 1e-3
             && (norm_angle(self.azimuth) - norm_angle(-std::f64::consts::FRAC_PI_2)).abs() < 1e-3
+    }
+
+    /// The work plane for a view within [`PRINCIPAL_VIEW_TOLERANCE`] of a world axis.
+    ///
+    /// Top/bottom use XY, front/back use XZ, and left/right use YZ. Oblique views return `None`
+    /// rather than deriving a free-point depth from the camera target.
+    pub fn principal_drawing_plane(&self) -> Option<DrawingPlane> {
+        let direction = self.view_dir();
+        if !(direction.x.is_finite() && direction.y.is_finite() && direction.z.is_finite()) {
+            return None;
+        }
+        let tolerance_cos = PRINCIPAL_VIEW_TOLERANCE.cos();
+        let (axis, alignment) = [(Axis3D::X, direction.x.abs()), (Axis3D::Y, direction.y.abs()), (Axis3D::Z, direction.z.abs())]
+            .into_iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+        if alignment < tolerance_cos {
+            return None;
+        }
+        Some(match axis {
+            Axis3D::X => DrawingPlane::YZ,
+            Axis3D::Y => DrawingPlane::XZ,
+            Axis3D::Z => DrawingPlane::XY,
+        })
     }
 
     /// Line-of-sight unit vector pointing from target towards the camera eye.
@@ -521,6 +547,47 @@ impl OrbitCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn principal_views_use_the_observed_camera_axes_and_documented_tolerance() {
+        let cases = [
+            ("top", DrawingPlane::XY, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+            ("bottom", DrawingPlane::XY, Vec3::new(0.0, 0.0, -1.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, -1.0, 0.0)),
+            ("front", DrawingPlane::XZ, Vec3::new(0.0, -1.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+            ("back", DrawingPlane::XZ, Vec3::new(0.0, 1.0, 0.0), Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+            ("left", DrawingPlane::YZ, Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+            ("right", DrawingPlane::YZ, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+        ];
+        for (preset, plane, view, screen_right, screen_up) in cases {
+            let mut camera = OrbitCamera::default();
+            camera.set_preset(preset);
+            assert_eq!(camera.principal_drawing_plane(), Some(plane), "{preset}");
+            assert!(camera.view_dir().near(view, 1e-6), "{preset} view direction: {:?}", camera.view_dir());
+            assert!(camera.right_dir().near(screen_right, 1e-6), "{preset} screen-right: {:?}", camera.right_dir());
+            assert!(camera.up_dir().near(screen_up, 1e-6), "{preset} screen-up: {:?}", camera.up_dir());
+            for direction in [screen_right, screen_up] {
+                let expected_axis = if direction.x.abs() > 0.5 {
+                    Axis3D::X
+                } else if direction.y.abs() > 0.5 {
+                    Axis3D::Y
+                } else {
+                    Axis3D::Z
+                };
+                let screen = camera.project_point(direction * 10.0);
+                let (point, axis, _) = camera.closest_axis_3d_with_prev(screen, Vec3::ZERO, None);
+                assert_eq!(axis, expected_axis, "{preset} constrained axis for {direction:?}");
+                assert!(point.near(direction * 10.0, 1e-5), "{preset} constrained sign: {point:?}");
+            }
+        }
+
+        let mut near_front = OrbitCamera::default();
+        near_front.set_preset("front");
+        near_front.elevation = 5.0f64.to_radians();
+        assert_eq!(near_front.principal_drawing_plane(), Some(DrawingPlane::XZ));
+        near_front.elevation = 15.0f64.to_radians();
+        assert_eq!(near_front.principal_drawing_plane(), None);
+        assert!((PRINCIPAL_VIEW_TOLERANCE.to_degrees() - 10.0).abs() < 1e-12);
+    }
 
     #[test]
     fn test_plan_view_basis_and_projection() {

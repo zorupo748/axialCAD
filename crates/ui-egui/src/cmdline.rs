@@ -361,15 +361,22 @@ pub fn submit(app: &mut CadApp) {
     if crate::grip_dyn::submit(app) {
         return;
     }
-    // Dynamic Input: a split entry (`40,30`, `40<90`, `40,`) is completed from the cursor and
-    // measured from the last point.
+    // Dynamic Input: polar entries (`40<90`) and incomplete Cartesian entries (`40,`) are
+    // completed from the cursor when needed. A complete Cartesian pair is a point, so only an
+    // explicit `@` makes it relative.
     if let Some(f) = dyn_frame(app) {
         let last = app.session.last_point;
-        let done = if app.session.settings.zlock
+        let entry = crate::dyninput::parse(&app.cmd.buffer, &f);
+        let complete_cartesian_point = entry
+            .as_ref()
+            .is_some_and(|e| e.format == crate::dyninput::Format::Cartesian && e.first_locked().is_some() && e.second_value().is_some());
+        let done = if complete_cartesian_point {
+            None
+        } else if app.session.settings.zlock
             && let Some(c3) = app.canvas.cursor3
         {
             let dz = c3.z - app.session.last_point3.z;
-            crate::dyninput::parse(&app.cmd.buffer, &f).and_then(|e| {
+            entry.and_then(|e| {
                 if !e.split {
                     return None;
                 }
@@ -379,7 +386,7 @@ pub fn submit(app: &mut CadApp) {
                 Some(format!("@0,0,{val}"))
             })
         } else {
-            crate::dyninput::parse(&app.cmd.buffer, &f).and_then(|e| crate::dyninput::complete(&e, &f, app.canvas.cursor, last))
+            entry.and_then(|e| crate::dyninput::complete(&e, &f, app.canvas.cursor, last))
         };
         if let Some(text) = done {
             app.cmd.buffer = text;
@@ -679,6 +686,42 @@ mod tests {
         assert!(z.lines.is_some_and(|r| canvas.contains_rect(r)));
         assert!(canvas.contains_rect(z.grip));
         assert_eq!(app.ui.history_lines, 12);
+    }
+
+    #[test]
+    fn line_command_line_submit_keeps_complete_points_absolute_and_at_points_relative() {
+        let mut app = CadApp::new(Session::new(), crate::Services::default());
+        app.cmdline("line");
+        for text in ["0,0", "100,0", "100,100", "@100,100", "#50,25"] {
+            app.cmd.buffer = text.into();
+            submit(&mut app);
+        }
+        app.canvas.cursor = Some(cadcraft_geom::Vec2::new(90.0, 65.0));
+        app.cmd.buffer = "40,".into();
+        submit(&mut app);
+        app.cmd.buffer.clear();
+        submit(&mut app);
+
+        let doc = app.session.doc().unwrap();
+        let lines: Vec<_> = doc
+            .model
+            .iter()
+            .filter_map(|entity| match &entity.kind {
+                cadcraft_doc::EntityKind::Line(line) => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0].a, cadcraft_geom::Vec3::ZERO);
+        assert_eq!(lines[0].b, cadcraft_geom::Vec3::new(100.0, 0.0, 0.0));
+        assert_eq!(lines[1].a, lines[0].b);
+        assert_eq!(lines[1].b, cadcraft_geom::Vec3::new(100.0, 100.0, 0.0));
+        assert_eq!(lines[2].a, lines[1].b);
+        assert_eq!(lines[2].b, cadcraft_geom::Vec3::new(200.0, 200.0, 0.0));
+        assert_eq!(lines[3].a, lines[2].b);
+        assert_eq!(lines[3].b, cadcraft_geom::Vec3::new(50.0, 25.0, 0.0));
+        assert_eq!(lines[4].a, lines[3].b);
+        assert_eq!(lines[4].b, cadcraft_geom::Vec3::new(90.0, 65.0, 0.0));
     }
 
     fn frame(app: &mut CadApp, ctx: &egui::Context, events: Vec<Event>) {

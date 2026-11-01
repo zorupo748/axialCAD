@@ -406,7 +406,7 @@ impl LineM {
             return Err(crate::EngineError::Other(format!("No {what} line through that point; pick another point.")));
         };
         let plane = s.drawing_plane();
-        let offset = s.drawing_plane_offset();
+        let offset = s.effective_drawing_plane_offset();
         let a3 = plane.embed(a, offset);
         let b3 = plane.embed(b, offset);
         self.handles.push(s.add_entity(line3(a3, b3))?);
@@ -424,7 +424,7 @@ impl LineM {
         {
             let e = t + Vec2::new(ang.cos(), ang.sin()) * dist;
             let plane = s.drawing_plane();
-            let offset = captured.map_or(s.drawing_plane_offset(), |p3| plane.normal_offset(p3));
+            let offset = captured.map_or(s.effective_drawing_plane_offset(), |p3| plane.normal_offset(p3));
             let t3 = plane.embed(t, offset);
             let e3 = captured.unwrap_or_else(|| plane.embed(e, offset));
             self.handles.push(s.add_entity(line3(t3, e3))?);
@@ -439,7 +439,7 @@ impl LineM {
             return Err(crate::EngineError::Other(format!("No {what} line through that point; pick another point.")));
         };
         let plane = s.drawing_plane();
-        let offset = captured.map_or(s.drawing_plane_offset(), |p3| plane.normal_offset(p3));
+        let offset = captured.map_or(s.effective_drawing_plane_offset(), |p3| plane.normal_offset(p3));
         let a3 = plane.embed(a, offset);
         let b3 = captured.unwrap_or_else(|| plane.embed(b, offset));
         self.handles.push(s.add_entity(line3(a3, b3))?);
@@ -516,7 +516,7 @@ impl Interactive for LineM {
                 } else if let Some(last) = self.pts.last() {
                     self.push_point(s, s.drawing_plane().embed(p, s.drawing_plane().normal_offset(*last)))
                 } else {
-                    self.push_point(s, s.drawing_plane().embed(p, s.settings.drawing_plane_offset))
+                    self.push_point(s, s.drawing_plane().embed(p, s.effective_drawing_plane_offset()))
                 }
             }
             Input::Point3(p3) => {
