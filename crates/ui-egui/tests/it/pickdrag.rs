@@ -74,6 +74,8 @@ fn drag_is_disabled_but_two_clicks_still_complete_the_window() {
         let b = xf.to_screen(Vec2::new(12.0, 2.0));
         drag(&mut h, a, b);
         assert!(h.state().session.selection().is_empty(), "drag must not complete selection");
+        assert!(h.state().canvas.selection_window.is_none(), "drag must not open a selection window when pickdrag is disabled");
+        assert!(h.state().session.pending_window.is_none());
         h.state_mut().session.cancel();
         h.state_mut().session.set_selection(Vec::new());
         if prompting {
@@ -82,14 +84,17 @@ fn drag_is_disabled_but_two_clicks_still_complete_the_window() {
         h.run_steps(2);
         button(&mut h, a, true);
         button(&mut h, a, false);
-        assert!(h.state().session.pending_window.is_some());
+        assert!(h.state().canvas.selection_window.is_some(), "first click starts screen selection window");
+        assert!(h.state().session.pending_window.is_none(), "canvas handles window selection in screen space");
         // A held-button movement after the first click must not consume the second corner.
         drag(&mut h, a, b);
-        assert!(h.state().session.pending_window.is_some());
+        assert!(h.state().canvas.selection_window.is_some(), "drag after first click must not consume the window");
+        assert!(h.state().session.pending_window.is_none());
         assert!(h.state().session.selection().is_empty());
         h.run_steps(30); // Separate deliberate clicks from egui's double-click interval.
         button(&mut h, b, true);
         button(&mut h, b, false);
+        assert!(h.state().canvas.selection_window.is_none(), "second click completes the window");
         assert!(h.state().session.pending_window.is_none());
         assert_eq!(h.state().session.selection().len(), 1);
     }
@@ -100,6 +105,7 @@ fn default_mode_keeps_drag_selection_available() {
     let mut h = harness();
     let xf = h.state().canvas.xf.unwrap();
     drag(&mut h, xf.to_screen(Vec2::new(-2.0, -2.0)), xf.to_screen(Vec2::new(12.0, 2.0)));
+    assert!(h.state().canvas.selection_window.is_none());
     assert!(h.state().session.pending_window.is_none());
     assert_eq!(h.state().session.selection().len(), 1);
 }

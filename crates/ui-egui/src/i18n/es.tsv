@@ -81,6 +81,7 @@
 	Automatic save file location	Ubicación de los archivos de guardado automático
 	Axis, End	Eje, extremo
 	B	N
+	Back	Posterior
 	Base	Base
 	Baseline	Línea base
 	Batch Publish	Publicar en lote
@@ -99,6 +100,7 @@
 	Blue	Azul
 	Bold	Negrita
 	Boolean	Operaciones booleanas
+	Bottom	Inferior
 	Boundary	Contorno
 	Boundary...	Contorno...
 	Box	Prisma rectangular
@@ -390,6 +392,7 @@
 	Freeze/Thaw in the current viewport	Inutilizar/reutilizar en la ventana gráfica actual
 	From	Desde
 	From Template...	Desde plantilla...
+	Front	Frontal
 	General	General
 	Geometric Center	Centro geométrico
 	Geometric Constraint	Restricción geométrica
@@ -765,6 +768,7 @@
 	Time-sensitive right-click: a quick click is Enter, holding opens the menu	Clic derecho según duración: un clic rápido equivale a Intro; mantenerlo abre el menú
 	To	A
 	Tolerance...	Tolerancia...
+	Top	Superior
 	Track orthogonally only	Rastrear solo ortogonalmente
 	Track using all polar angle settings	Rastrear con todos los ángulos polares configurados
 	Turn On Layer	Activar capa

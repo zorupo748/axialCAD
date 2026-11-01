@@ -98,9 +98,9 @@ pub(crate) fn point_on_plane(p: Vec2, plane: cadcraft_geom::DrawingPlane, offset
     plane.embed(p, offset)
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct SelectionWindow {
-    anchor: Pos2,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SelectionWindow {
+    pub anchor: Pos2,
 }
 
 #[derive(Default)]
@@ -199,7 +199,7 @@ pub struct CanvasState {
     /// A selection window opened by a press-and-drag, to close where the button is let go.
     drag_window: bool,
     /// Selection windows are defined in viewport pixels, independently of the drawing plane.
-    pub(crate) selection_window: Option<SelectionWindow>,
+    pub selection_window: Option<SelectionWindow>,
     /// The right-click that opened the shortcut menu held Shift or Ctrl: it is the object snap
     /// menu ([`crate::context_menu`]).
     pub snap_menu: bool,
@@ -2444,7 +2444,12 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // or a floating palette lives on a layer above the canvas, where `hovered()` alone still
     // counts the canvas. Over those the OS cursor stays visible and the crosshair stays put, as
     // over the menu bar (#1701).
-    let inside = hover_pos.is_some_and(|p| rect.contains(p) && ui.ctx().layer_id_at(p) == Some(ui.layer_id()) && resp.hovered());
+    let inside = hover_pos.is_some_and(|p| {
+        rect.contains(p)
+            && ui.ctx().layer_id_at(p) == Some(ui.layer_id())
+            && resp.hovered()
+            && !crate::viewcube::Layout::blocks_canvas_pointer(rect, p)
+    });
     if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         app.canvas.selection_window = None;
         app.canvas.drag_window = false;

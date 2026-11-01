@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-22 · **Change:** minor (distinct polyline midpoint grips) · **Target:** Autodesk AutoCAD 2027 for Mac (26.0)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-01 · **Change:** minor (camera-synchronized ViewCube) · **Target:** Autodesk AutoCAD 2027 for Mac (26.0)
 
 How CADCraft's interaction compares with AutoCAD's: point entry, object snaps, tracking, dynamic
 input, grips, selection, the command line, chrome and navigation. A drafter's speed in AutoCAD
@@ -163,7 +163,7 @@ down-arrow options menu (DYNPROMPT), and DYNDIM.
 | Layer Properties Manager (filters, states, VP overrides) | yes | yes |
 | Blocks palette, Content | yes | Blocks window (click to insert, #28) |
 | Status bar toggles | ~25 | most toggles; Annotation Visibility and Workspace do nothing |
-| ViewCube | interactive 3D | clickable for 2D (Top/Home → extents); dragging does nothing (#7) |
+| ViewCube | interactive 3D | camera-oriented cube; visible face/edge/corner clicks set views, drag or compass ring orbits |
 | Navigation bar, SteeringWheels | yes | no |
 | Workspaces | Drafting & Annotation, 3D Modeling | no |
 | Options / Preferences dialog | many tabs | **no** (issue #23) |
@@ -182,7 +182,7 @@ down-arrow options menu (DYNPROMPT), and DYNDIM.
 | Trackpad two-finger pan, pinch zoom (macOS) | yes | yes (#58) |
 | Named views (VIEW) | yes | **no** (VIEW table not read or written) |
 | Tiled model-space viewports (VPORTS) | yes | not confirmed: VPORTS maps to paper-space MVIEW |
-| 3D orbit, ViewCube drag, SteeringWheels | yes | no (M11) |
+| 3D orbit, ViewCube drag, SteeringWheels | yes | orbit by Shift+middle-drag; camera-oriented ViewCube faces/edges/corners and ring drag; no SteeringWheels |
 
 ## Keyboard and context menus (≈ 25%)
 
@@ -203,6 +203,7 @@ down-arrow options menu (DYNPROMPT), and DYNDIM.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Camera-oriented ViewCube: projected faces, edges and corners track OrbitCamera; visible-part clicks change views, drag orbits, and widget input is isolated from canvas picks |
 | 2026-10-22 | minor | Polyline segment midpoint grips use rectangles, distinct from square vertex grips, with matching hover and pick bounds (#1950) |
 | 2026-10-13 | minor | Filled-region highlight boundaries are traversed in deterministic coordinate order, fixing dash-phase jumps on CPU hover/selection redraws and GPU highlight rebuilds; CPU dash-position, pixel and GPU mesh regressions |
 | 2026-10-14 | minor | Selection cycling (#1143): the list and badge of SELECTIONCYCLING, Shift+Space through overlapping objects (#1145) |
