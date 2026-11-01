@@ -288,6 +288,15 @@ pub fn t(source: &str) -> &str {
     CURRENT.with(|l| tr(l.get(), source))
 }
 
+/// Display labels for interactive prompt keywords; the returned text is never sent as input.
+pub fn prompt_keyword_label(keyword: &str) -> String {
+    match keyword {
+        "Z=0" => t("Point at Z=0").to_string(),
+        "Free" => t("Free point").to_string(),
+        _ => keyword.to_string(),
+    }
+}
+
 /// Menu headings can differ from command or object labels (e.g. Czech Kótování / Kóta).
 /// Catalogs without a `menu` entry retain their ordinary translation.
 pub fn tr_menu<'a>(language: &str, source: &'a str) -> &'a str {

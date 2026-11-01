@@ -380,6 +380,7 @@
 	Fix	Fijar
 	Flatten Objects	Aplanar objetos
 	Format	Formato
+	Free point	Punto libre
 	Freehand	Mano alzada
 	Freeze	Inutilizar
 	Freeze Layer	Inutilizar capa
@@ -408,6 +409,9 @@
 	Grid On (F7)	Activar rejilla (F7)
 	Grid snap	Forzar cursor a la rejilla
 	Grid spacing	Espaciado de rejilla
+	Z=0 acquired; Free/F releases it. ORTHO/V and axis tracking are bypassed.	Suelo Z=0 adquirido; Punto libre/F lo libera. ORTO/V y el rastreo de ejes se omiten.
+	Locked Dynamic Input has priority over acquired Z=0.	La entrada dinámica bloqueada tiene prioridad sobre el Z=0 adquirido.
+	{snap} snap has priority over acquired Z=0.	La referencia {snap} tiene prioridad sobre el Z=0 adquirido.
 	Grip Edit	Editar con pinzamientos
 	Grip Mirror	Simetría con pinzamientos
 	Grip Option	Opción de pinzamiento
@@ -757,6 +761,7 @@
 	Text Objects Only	Solo objetos de texto
 	Thaw Layer	Reutilizar capa
 	The aperture is how near the cursor must come to a point for an object snap to find it.	La apertura indica cuánto debe acercarse el cursor a un punto para que la referencia a objetos lo encuentre.
+	The camera ray is parallel to global Z=0; orbit the view or choose Free.	El rayo de la cámara es paralelo a Z=0 global; orbite la vista o elija Punto libre.
 	Time-sensitive right-click: a quick click is Enter, holding opens the menu	Clic derecho según duración: un clic rápido equivale a Intro; mantenerlo abre el menú
 	To	A
 	Tolerance...	Tolerancia...
@@ -789,6 +794,8 @@
 	Named	Por nombre
 	Plus/minus	Más/menos
 	Point	Punto
+	Point at Z=0	Punto en Z=0
+	Point at Z=0 active; ORTHO, V and soft tracking are bypassed. Only actual LINE endpoints on Z=0 can snap.	Punto en Z=0 activo; ORTHO, V y el rastreo suave se omiten. Solo se ajustan extremos reales de LINE en Z=0.
 	Point Filters	Filtros de puntos
 	Point Style...	Estilo de punto...
 	Polar Array	Matriz polar
@@ -1057,6 +1064,7 @@
 	Specify new location for marked vertex	Indica la nueva posición del vértice marcado
 	Specify new width for all segments	Indica la nueva anchura de todos los segmentos
 	Specify next point	Indica el siguiente punto
+	Specify next point on global Z=0	Indica el siguiente punto sobre Z=0 global
 	Specify offset distance	Indica la distancia de desfase
 	Specify offset distance or	Indica la distancia de desfase o
 	Specify opposite corner	Indica la esquina opuesta

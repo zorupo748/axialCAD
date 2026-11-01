@@ -482,6 +482,8 @@ pub struct Settings {
     pub drawing_plane_offset_manual: bool,
     /// Explicit Z-Axis vertical constraint (locks next point to vertical axis through base point).
     pub zlock: bool,
+    /// Softly track global X/Y/Z directions while drawing LINE in oblique views.
+    pub axistrack: bool,
 }
 
 impl Default for Settings {
@@ -493,6 +495,7 @@ impl Default for Settings {
             drawing_plane_offset_manual: false,
             drawing_plane_manual: false,
             zlock: false,
+            axistrack: true,
             polarmode: true,
             polarang: std::f64::consts::FRAC_PI_2,
             gridmode: true,
@@ -941,6 +944,24 @@ impl Session {
             let mut seen = std::collections::HashSet::new();
             st.selection = sel.into_iter().filter(|h| seen.insert(*h)).collect();
         }
+    }
+
+    /// Apply handles selected by a viewport-space window, preserving group expansion and the
+    /// same PICKADD/Shift behavior as a drawing-space selection window.
+    pub fn select_window_handles(&mut self, handles: Vec<Handle>, shift: bool) -> Result<()> {
+        let handles = cmd::groups::expand(self, handles);
+        if self.running.is_some() {
+            return self.input(Input::Pick(handles));
+        }
+        let pickadd = self.settings.pickadd;
+        let mut selection = if pickadd || shift { self.selection() } else { Vec::new() };
+        if shift && pickadd {
+            selection.retain(|handle| !handles.contains(handle));
+        } else {
+            selection.extend(handles);
+        }
+        self.set_selection(selection);
+        Ok(())
     }
 
     /// Message on the command line history.

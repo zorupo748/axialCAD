@@ -48,6 +48,9 @@ pub struct Prompt {
     /// does not bend the opposite corner, so the rectangle keeps its area.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub corner: bool,
+    /// LINE's temporary one-point override: resolve free cursor points on the global XY plane.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub global_xy_zero: bool,
     /// The grip this prompt stretches (one hot grip at the STRETCH prompt), as (object, grip
     /// index): Dynamic Input shows its dimensions ([`crate::grip_dims`]).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -129,6 +132,11 @@ impl Prompt {
     pub fn corner(mut self, p: Vec2) -> Self {
         self.base = Some(p);
         self.corner = true;
+        self
+    }
+    /// Resolves free points on the global XY plane for this prompt.
+    pub fn global_xy_zero(mut self) -> Self {
+        self.global_xy_zero = true;
         self
     }
     /// Asks for a distance from the base (the `distance` field).

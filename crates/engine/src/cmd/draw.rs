@@ -396,6 +396,8 @@ struct LineM {
     handles: Vec<cadcraft_doc::Handle>,
     /// A first point picked as a deferred tangent/perpendicular, resolved by the next point.
     first: Option<snap::Deferred>,
+    /// Resolve exactly one free continuation point on global Z=0.
+    point_on_z0: bool,
 }
 
 impl LineM {
@@ -473,14 +475,26 @@ impl Interactive for LineM {
         Ok(Step::Continue)
     }
     fn prompt(&self, s: &Session) -> Prompt {
-        let base = self.pts.last().map(|p| s.drawing_plane().coordinates(*p));
+        let base = self.pts.last().map(|p| if self.point_on_z0 { p.xy() } else { s.drawing_plane().coordinates(*p) });
         let base3 = self.pts.last().copied();
         let kw_v = if s.settings.zlock { "NoVertical" } else { "Vertical" };
+        let message = if self.point_on_z0 { "Specify next point on global Z=0" } else { "Specify next point" };
+        let point_options = if self.point_on_z0 { vec!["Free", kw_v, "Undo"] } else { vec!["Z=0", "Free", kw_v, "Undo"] };
         match self.pts.len() {
             0 if self.first.is_some() => Prompt::new("Specify next point", Accept::POINT).kw(&["Undo"]).deferred(),
             0 => Prompt::new("Specify first point", Accept::POINT).deferred(),
-            1 | 2 => Prompt::new("Specify next point", Accept::POINT).kw(&[kw_v, "Undo"]).base3_opt(base3).base_opt(base),
-            _ => Prompt::new("Specify next point", Accept::POINT).kw(&["Close", kw_v, "Undo"]).base3_opt(base3).base_opt(base),
+            1 | 2 => {
+                let mut prompt = Prompt::new(message, Accept::POINT).kw(&point_options).base3_opt(base3).base_opt(base);
+                prompt.global_xy_zero = self.point_on_z0;
+                prompt
+            }
+            _ => {
+                let mut options = vec!["Close"];
+                options.extend(point_options);
+                let mut prompt = Prompt::new(message, Accept::POINT).kw(&options).base3_opt(base3).base_opt(base);
+                prompt.global_xy_zero = self.point_on_z0;
+                prompt
+            }
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
@@ -508,6 +522,10 @@ impl Interactive for LineM {
                 None => Ok(Step::Continue),
             },
             Input::Point(p) => {
+                if self.point_on_z0 {
+                    self.point_on_z0 = false;
+                    s.echo("Z=0 point mode disabled for explicit 2D coordinates; normal LINE coordinates are unchanged.");
+                }
                 if s.settings.zlock
                     && let Some(last) = self.pts.last()
                 {
@@ -520,14 +538,38 @@ impl Interactive for LineM {
                 }
             }
             Input::Point3(p3) => {
+                if self.point_on_z0 && p3.z != 0.0 {
+                    return Err(crate::EngineError::Other(
+                        "The point is not on global Z=0. Choose Free to enter this 3D point without changing its coordinates.".into(),
+                    ));
+                }
+                let point_on_z0 = self.point_on_z0;
+                if point_on_z0 {
+                    self.point_on_z0 = false;
+                }
                 if s.settings.zlock
                     && let Some(last) = self.pts.last()
+                    && !point_on_z0
                 {
                     self.push_point(s, Vec3::new(last.x, last.y, p3.z))
                 } else {
                     // A 3D endpoint snap is an intentional WCS capture, not a 2D plane point.
-                    self.push_point(s, p3)
+                    self.push_point(s, if point_on_z0 { Vec3::new(p3.x, p3.y, 0.0) } else { p3 })
                 }
+            }
+            Input::Keyword(k) if k == "Z=0" => {
+                self.point_on_z0 = true;
+                s.echo("Next free LINE point: global Z=0. ORTHO, V and soft axis tracking are bypassed; only actual Z=0 LINE endpoints can snap.");
+                Ok(Step::Continue)
+            }
+            Input::Keyword(k) if k == "Free" => {
+                if self.point_on_z0 {
+                    self.point_on_z0 = false;
+                    s.echo("Global Z=0 point mode disabled.");
+                } else {
+                    s.echo("Automatic ground acquisition released; move outside its target before acquiring again.");
+                }
+                Ok(Step::Continue)
             }
             Input::Keyword(k) | Input::Text(k)
                 if k.eq_ignore_ascii_case("Vertical")

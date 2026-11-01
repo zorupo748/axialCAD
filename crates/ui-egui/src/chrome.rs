@@ -355,6 +355,7 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
             (Icon::Grid, s.gridmode, "grid", "Grid (F7)"),
             (Icon::Snap, s.snapmode, "snap", "Snap Mode (F9)"),
             (Icon::Ortho, s.orthomode, "ortho", "Ortho Mode (F8)"),
+            (Icon::AxisTrack, s.axistrack, "axistrack", "3D Axis Tracking"),
             (Icon::Polar, s.polarmode, "polar", "Polar Tracking (F10)"),
             (Icon::Isodraft, s.isodraft, "isodraft", "Isometric Drafting"),
             (Icon::OTrack, s.otrack, "otrack", "Object Snap Tracking (F11)"),

@@ -26,6 +26,20 @@ fn line_via_command_line() {
 }
 
 #[test]
+fn axis_tracking_has_an_independent_toggle_and_system_variable() {
+    let mut s = Session::new();
+    assert!(s.settings.axistrack);
+    assert_eq!(crate::sysvars::get(&s, "AXISTRACK"), Some(json!(1)));
+
+    s.execute("axistrack", &json!({ "on": false })).unwrap();
+    assert!(!s.settings.axistrack);
+    assert_eq!(crate::sysvars::get(&s, "AXISTRACK"), Some(json!(0)));
+
+    crate::sysvars::set(&mut s, "AXISTRACK", &json!(true)).unwrap();
+    assert!(s.settings.axistrack);
+}
+
+#[test]
 fn edits_while_a_command_runs_redraw() {
     // The canvas rebuilds when (revision, doc pointer) changes; each new segment must change it (issue #4).
     fn key(s: &Session) -> (u64, usize) {

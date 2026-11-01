@@ -98,6 +98,11 @@ pub(crate) fn point_on_plane(p: Vec2, plane: cadcraft_geom::DrawingPlane, offset
     plane.embed(p, offset)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SelectionWindow {
+    anchor: Pos2,
+}
+
 #[derive(Default)]
 pub struct CanvasState {
     pub list: Option<DisplayList>,
@@ -150,6 +155,13 @@ pub struct CanvasState {
     pub track: Option<snap::tracking::Track>,
     /// Active 3D axis under ORTHO constraint (X, Y, or Z).
     pub active_axis_3d: Option<cadcraft_geom::Axis3D>,
+    /// The soft Z-axis guide is snapping to the global Z = 0 crossing.
+    pub axis_track_z_zero: bool,
+    /// The cursor acquired the visible ground target for a LINE continuation.
+    pub ground_target_acquired: bool,
+    /// Free/F released the target; require leaving the acquisition ring before it can re-arm.
+    ground_target_suppressed: bool,
+    ground_target_key: Option<GroundTargetKey>,
     /// Graphical height adjustment manipulator active.
     pub height_adjust: bool,
     pub height_adjust_anchor: Option<Vec3>,
@@ -186,6 +198,8 @@ pub struct CanvasState {
     pub param: crate::parametric::Cache,
     /// A selection window opened by a press-and-drag, to close where the button is let go.
     drag_window: bool,
+    /// Selection windows are defined in viewport pixels, independently of the drawing plane.
+    pub(crate) selection_window: Option<SelectionWindow>,
     /// The right-click that opened the shortcut menu held Shift or Ctrl: it is the object snap
     /// menu ([`crate::context_menu`]).
     pub snap_menu: bool,
@@ -204,9 +218,11 @@ pub struct CanvasState {
     cycle_key: Option<CycleKey>,
 }
 
+type GroundTargetKey = (Vec3, OrbitCamera, Rect, f64);
+
 /// The command, prompt, drawing (and its revision) and view that the objects under the cursor
 /// were listed for: when any of them changes, the list and the Shift+Space highlight are stale.
-type CycleKey = (Option<String>, Option<String>, u64, u64, Vec2, f64);
+type CycleKey = (Option<String>, Option<String>, u64, u64, Vec2, f64, Option<OrbitCamera>);
 
 impl CanvasState {
     /// The active MSPACE viewport's contents when they are drawn apart from the layout's list
@@ -726,7 +742,8 @@ impl VpHighlight {
         };
         if self.key != Some(key) {
             let ents = handles.iter().filter_map(|h| st.doc.model.get(*h)).map(|e| e.as_ref());
-            self.list = cadcraft_render::build_entities(&st.doc, ents, &cadcraft_render::Options { tolerance, ..Default::default() });
+            self.list =
+                cadcraft_render::build_entities(&st.doc, ents, &cadcraft_render::Options { tolerance, skip_spatial: true, ..Default::default() });
             self.key = Some(key);
             self.list_gen = self.list_gen.wrapping_add(1);
         }
@@ -848,11 +865,167 @@ fn draw_iso_grid(app: &CadApp, p: &egui::Painter, xf: &Xf) {
     );
 }
 
+fn spatial_line_at_screen(doc: &cadcraft_doc::Drawing, space: &cadcraft_doc::Space, xf: &Xf, at: Pos2, aperture: f32) -> Option<Handle> {
+    let store = doc.space(space)?;
+    let mut best: Option<(f32, Handle)> = None;
+    for e in store.iter() {
+        if !doc.is_visible(e) {
+            continue;
+        }
+        let cadcraft_doc::EntityKind::Line(line) = &e.kind else { continue };
+        if line.a.z == 0.0 && line.b.z == 0.0 {
+            continue;
+        }
+        let a = xf.to_screen3(line.a);
+        let b = xf.to_screen3(line.b);
+        let segment = b - a;
+        let t = if segment.length_sq() > 0.0 { ((at - a).dot(segment) / segment.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+        let distance = at.distance(a + segment * t);
+        if distance <= aperture && best.is_none_or(|(best_distance, _)| distance <= best_distance) {
+            best = Some((distance, e.handle));
+        }
+    }
+    best.map(|(_, handle)| handle)
+}
+
+fn spatial_line_pick_at(app: &CadApp, xf: &Xf, at: Pos2) -> Option<Handle> {
+    let st = app.session.state().ok()?;
+    spatial_line_at_screen(&st.doc, &st.edit_space(), xf, at, (app.session.settings.pickbox.max(1.0) * 1.5) as f32)
+}
+
+fn screen_entity_polylines(doc: &cadcraft_doc::Drawing, entity: &cadcraft_doc::Entity, xf: &Xf) -> Vec<Vec<Pos2>> {
+    let paths = match &entity.kind {
+        cadcraft_doc::EntityKind::Line(line) if line.a.z != 0.0 || line.b.z != 0.0 => {
+            vec![vec![line.a, line.b].into_iter().map(|point| xf.to_screen3(point)).collect()]
+        }
+        _ => cadcraft_engine::select::hit_polylines(doc, entity, (0.5 / xf.scale.max(1e-12)).max(1e-9))
+            .into_iter()
+            .map(|path| path.into_iter().map(|point| xf.to_screen3(Vec3::new(point.x, point.y, 0.0))).collect())
+            .collect(),
+    };
+    paths
+        .into_iter()
+        .map(|path: Vec<Pos2>| path.into_iter().filter(|point| point.x.is_finite() && point.y.is_finite()).collect())
+        .filter(|path: &Vec<Pos2>| !path.is_empty())
+        .collect()
+}
+
+fn filled_for_screen_pick(entity: &cadcraft_doc::Entity) -> bool {
+    matches!(
+        entity.kind,
+        cadcraft_doc::EntityKind::Text(_)
+            | cadcraft_doc::EntityKind::MText(_)
+            | cadcraft_doc::EntityKind::Insert(_)
+            | cadcraft_doc::EntityKind::Dimension(_)
+            | cadcraft_doc::EntityKind::AttDef(_)
+            | cadcraft_doc::EntityKind::Table(_)
+            | cadcraft_doc::EntityKind::Tolerance(_)
+            | cadcraft_doc::EntityKind::MLeader(_)
+            | cadcraft_doc::EntityKind::Image(_)
+            | cadcraft_doc::EntityKind::Solid(_)
+            | cadcraft_doc::EntityKind::Trace(_)
+            | cadcraft_doc::EntityKind::Hatch(_)
+    )
+}
+
+fn screen_polyline_contains(path: &[Pos2], point: Pos2) -> bool {
+    if path.len() < 4 || path.first().zip(path.last()).is_none_or(|(a, b)| a.distance(*b) > 0.01) {
+        return false;
+    }
+    let polygon: Vec<Vec2> = path.iter().map(|point| Vec2::new(f64::from(point.x), f64::from(point.y))).collect();
+    cadcraft_geom::point_in_polygon(&polygon, Vec2::new(f64::from(point.x), f64::from(point.y)))
+}
+
+fn screen_segment_intersects(a: Pos2, b: Pos2, c: Pos2, d: Pos2) -> bool {
+    let orient = |p: Pos2, q: Pos2, r: Pos2| f64::from(q.x - p.x) * f64::from(r.y - p.y) - f64::from(q.y - p.y) * f64::from(r.x - p.x);
+    let on_segment = |p: Pos2, q: Pos2, r: Pos2| {
+        f64::from(r.x.min(p.x)) - 1e-4 <= f64::from(q.x)
+            && f64::from(q.x) <= f64::from(r.x.max(p.x)) + 1e-4
+            && f64::from(r.y.min(p.y)) - 1e-4 <= f64::from(q.y)
+            && f64::from(q.y) <= f64::from(r.y.max(p.y)) + 1e-4
+    };
+    let (o1, o2, o3, o4) = (orient(a, b, c), orient(a, b, d), orient(c, d, a), orient(c, d, b));
+    (o1.signum() != o2.signum() && o3.signum() != o4.signum())
+        || (o1.abs() <= 1e-8 && on_segment(a, c, b))
+        || (o2.abs() <= 1e-8 && on_segment(a, d, b))
+        || (o3.abs() <= 1e-8 && on_segment(c, a, d))
+        || (o4.abs() <= 1e-8 && on_segment(c, b, d))
+}
+
+fn screen_segment_intersects_rect(a: Pos2, b: Pos2, rect: Rect) -> bool {
+    if rect.contains(a) || rect.contains(b) {
+        return true;
+    }
+    let corners = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()];
+    (0..4).any(|index| screen_segment_intersects(a, b, corners[index], corners[(index + 1) % 4]))
+}
+
+fn screen_projected_pick_at(app: &CadApp, xf: &Xf, at: Pos2) -> Option<Handle> {
+    let st = app.session.state().ok()?;
+    let store = st.doc.space(&st.edit_space())?;
+    let aperture = (app.session.settings.pickbox.max(1.0) * 1.5) as f32;
+    let mut best: Option<(f32, Handle)> = None;
+    for entity in store.iter().filter(|entity| st.doc.is_visible(entity)) {
+        let paths = screen_entity_polylines(&st.doc, entity, xf);
+        let mut distance = paths
+            .iter()
+            .flat_map(|path| {
+                if path.len() == 1 {
+                    path.first().map(|point| vec![at.distance(*point)]).unwrap_or_default()
+                } else {
+                    path.windows(2)
+                        .filter_map(|segment| Some((*segment.first()?, *segment.get(1)?)))
+                        .map(|(a, b)| {
+                            let delta = b - a;
+                            let t = if delta.length_sq() > 0.0 { ((at - a).dot(delta) / delta.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+                            at.distance(a + delta * t)
+                        })
+                        .collect()
+                }
+            })
+            .fold(f32::INFINITY, f32::min);
+        if filled_for_screen_pick(entity) && paths.iter().any(|path| screen_polyline_contains(path, at)) {
+            distance = 0.0;
+        }
+        if distance <= aperture && best.is_none_or(|(nearest, _)| distance <= nearest) {
+            best = Some((distance, entity.handle));
+        }
+    }
+    best.map(|(_, handle)| handle)
+}
+
+fn screen_window_selection(app: &CadApp, xf: &Xf, start: Pos2, end: Pos2) -> Vec<Handle> {
+    let Some(st) = app.session.state().ok() else { return Vec::new() };
+    let Some(store) = st.doc.space(&st.edit_space()) else { return Vec::new() };
+    let rect = Rect::from_two_pos(start, end);
+    let crossing = end.x < start.x;
+    let corners = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()];
+    store
+        .iter()
+        .filter(|entity| st.doc.is_visible(entity))
+        .filter_map(|entity| {
+            let paths = screen_entity_polylines(&st.doc, entity, xf);
+            let complete = !paths.is_empty() && paths.iter().flatten().all(|point| rect.contains(*point));
+            let crosses = paths.iter().any(|path| {
+                path.iter().any(|point| rect.contains(*point))
+                    || path
+                        .windows(2)
+                        .any(|segment| segment.first().zip(segment.get(1)).is_some_and(|(a, b)| screen_segment_intersects_rect(*a, *b, rect)))
+                    || (filled_for_screen_pick(entity) && corners.iter().any(|corner| screen_polyline_contains(path, *corner)))
+            });
+            (if crossing { crosses } else { complete }).then_some(entity.handle)
+        })
+        .collect()
+}
+
 fn draw_spatial_lines(app: &CadApp, painter: &egui::Painter, xf: &Xf) {
     let Ok(st) = app.session.state() else { return };
     let space = app.session.space();
     let Some(store) = st.doc.space(&space) else { return };
     let sel = app.session.selection();
+    let t = Tokens::get();
+    let selection_look = Look::selection(&app.session.settings);
+    let preview_look = Look::preview(&app.session.settings);
     for e in store.iter() {
         if !st.doc.is_visible(e) {
             continue;
@@ -863,15 +1036,32 @@ fn draw_spatial_lines(app: &CadApp, painter: &egui::Painter, xf: &Xf) {
             let p1 = xf.to_screen3(l.a);
             let p2 = xf.to_screen3(l.b);
             let is_sel = sel.contains(&e.handle);
-            let color = if is_sel {
-                Color32::from_rgb(0x33, 0x99, 0xff)
+            let look = if is_sel {
+                selection_look
+            } else if app.canvas.hover == Some(e.handle) {
+                Some(preview_look)
+            } else {
+                None
+            };
+            let color = if is_sel && look.is_some() {
+                t.selection
+            } else if !is_sel && look.is_some() {
+                t.hover
             } else {
                 let layer_color = st.doc.layer(&e.common.layer).map_or(cadcraft_color::Color::WHITE, |layer| layer.color);
                 let rgb = e.common.color.resolve(layer_color, cadcraft_color::Color::WHITE);
                 Color32::from_rgb(rgb.0, rgb.1, rgb.2)
             };
-            let stroke = Stroke::new(if is_sel { 2.0 } else { 1.0 }, color);
-            painter.line_segment([p1, p2], stroke);
+            if let Some(look) = look {
+                let stroke = Stroke::new(look.width, color);
+                if look.dashed {
+                    painter.extend(Shape::dashed_line(&[p1, p2], stroke, 6.0, 4.0));
+                } else {
+                    painter.line_segment([p1, p2], stroke);
+                }
+            } else {
+                painter.line_segment([p1, p2], Stroke::new(1.0, color));
+            }
         }
     }
 }
@@ -986,20 +1176,25 @@ fn draw_highlight_gpu(
         *hl_origin = origin;
     }
     let center = xf.rect.center();
+    let (xform, offset) = highlight_gpu_view(xf, *hl_origin);
     p.add(egui_wgpu::Callback::new_paint_callback(
         xf.rect,
         crate::gpu::CanvasCallback {
             key,
             slot: hl_slot.clone(),
-            offset: [(hl_origin.x - xf.center.x) as f32, (hl_origin.y - xf.center.y) as f32],
+            offset,
             scale: xf.scale as f32,
             center: [center.x, center.y],
             layer: crate::gpu::LAYER_HIGHLIGHT,
-            xform: crate::gpu::IDENTITY_XFORM,
+            xform,
             dash: if look.dashed { 10.0 } else { 0.0 },
             stencil,
         },
     ));
+}
+
+fn highlight_gpu_view(xf: &Xf, origin: Vec2) -> ([f32; 6], [f32; 2]) {
+    gpu_mesh_xform(origin, xf.center, xf.camera.as_ref())
 }
 
 /// Draw a MOVE/COPY/ROTATE/SCALE preview the way the drawing itself is drawn: the dragged
@@ -1249,6 +1444,21 @@ mod highlight_stability_tests {
         segments
     }
 
+    fn uniform_screen(xf: &Xf, origin: Vec2, point: Vec2, view: ([f32; 6], [f32; 2])) -> Pos2 {
+        let (xform, offset) = view;
+        let local = point - origin;
+        let qx = xform[0] * local.x as f32 + xform[2] * local.y as f32 + xform[4] + offset[0];
+        let qy = xform[1] * local.x as f32 + xform[3] * local.y as f32 + xform[5] + offset[1];
+        let center = xf.rect.center();
+        pos2(center.x + qx * xf.scale as f32, center.y - qy * xf.scale as f32)
+    }
+
+    fn camera_screen(xf: &Xf, point: Vec3) -> Pos2 {
+        let projected = xf.camera.as_ref().map_or(point.xy() - xf.center, |cam| cam.project_point(point));
+        let center = xf.rect.center();
+        pos2(center.x + (projected.x * xf.scale) as f32, center.y - (projected.y * xf.scale) as f32)
+    }
+
     #[test]
     fn moving_the_pointer_does_not_move_cpu_fill_highlight_dashes() {
         let p = |x, y| Vec2::new(x, y);
@@ -1279,6 +1489,7 @@ mod highlight_stability_tests {
                 }
             }
         }
+
         if let Some(dir) = std::env::var_os("CADCRAFT_HIGHLIGHT_SHOTS") {
             let dir = std::path::PathBuf::from(dir);
             std::fs::create_dir_all(&dir).unwrap();
@@ -1303,6 +1514,250 @@ mod highlight_stability_tests {
             let changed = first.pixels().zip(second.pixels()).filter(|(a, b)| a != b).count();
             assert_eq!(changed, 0, "moving the pointer cannot change any highlight pixels");
         }
+    }
+
+    #[test]
+    fn gpu_selection_highlight_tracks_multiple_entities_through_camera_changes() {
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
+        let origin = Vec2::new(4.0, 3.0);
+        let vertices = [Vec2::new(0.0, 0.0), Vec2::new(8.0, 0.0), Vec2::new(8.0, 5.0), Vec2::new(0.0, 5.0), Vec2::new(12.0, 2.0)];
+        for preset in ["top", "front", "swiso"] {
+            let mut camera = cadcraft_geom::OrbitCamera::default();
+            camera.set_preset(preset);
+            let before = Xf { rect, center: camera.target.xy(), scale: 24.0, camera: Some(camera) };
+            let view = highlight_gpu_view(&before, origin);
+            for point in vertices {
+                let actual = uniform_screen(&before, origin, point, view);
+                let expected = camera_screen(&before, Vec3::new(point.x, point.y, 0.0));
+                assert!(actual.distance(expected) < 1e-3, "{preset} selection vertex {point:?}: {actual:?} != {expected:?}");
+            }
+
+            camera.azimuth += 0.37;
+            camera.elevation += if camera.elevation > 0.3 { -0.19 } else { 0.19 };
+            let after = Xf { rect, center: camera.target.xy(), scale: 24.0, camera: Some(camera) };
+            let view_after_orbit = highlight_gpu_view(&after, origin);
+            for point in vertices {
+                let actual = uniform_screen(&after, origin, point, view_after_orbit);
+                let expected = camera_screen(&after, Vec3::new(point.x, point.y, 0.0));
+                assert!(actual.distance(expected) < 1e-3, "{preset} after orbit, {point:?}: {actual:?} != {expected:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn grip_centers_and_hit_areas_follow_real_3d_line_points() {
+        let cases = [
+            (
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(2.0, 3.0, 4.0), b: Vec3::new(2.0, 3.0, 12.0) }),
+                [Vec3::new(2.0, 3.0, 4.0), Vec3::new(2.0, 3.0, 8.0), Vec3::new(2.0, 3.0, 12.0)],
+            ),
+            (
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(1.0, 2.0, -3.0), b: Vec3::new(7.0, 8.0, 9.0) }),
+                [Vec3::new(1.0, 2.0, -3.0), Vec3::new(4.0, 5.0, 3.0), Vec3::new(7.0, 8.0, 9.0)],
+            ),
+            (
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(0.0, 0.0, 11.0), b: Vec3::new(10.0, 0.0, 11.0) }),
+                [Vec3::new(0.0, 0.0, 11.0), Vec3::new(5.0, 0.0, 11.0), Vec3::new(10.0, 0.0, 11.0)],
+            ),
+            (
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(10.0, 0.0, 11.0), b: Vec3::new(10.0, 5.0, 11.0) }),
+                [Vec3::new(10.0, 0.0, 11.0), Vec3::new(10.0, 2.5, 11.0), Vec3::new(10.0, 5.0, 11.0)],
+            ),
+            (
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(10.0, 5.0, 11.0), b: Vec3::new(0.0, 5.0, 11.0) }),
+                [Vec3::new(10.0, 5.0, 11.0), Vec3::new(5.0, 5.0, 11.0), Vec3::new(0.0, 5.0, 11.0)],
+            ),
+            (
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(0.0, 5.0, 11.0), b: Vec3::new(0.0, 0.0, 11.0) }),
+                [Vec3::new(0.0, 5.0, 11.0), Vec3::new(0.0, 2.5, 11.0), Vec3::new(0.0, 0.0, 11.0)],
+            ),
+            (
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(0.0, 0.0, 0.0), b: Vec3::new(10.0, 0.0, 0.0) }),
+                [Vec3::new(0.0, 0.0, 0.0), Vec3::new(5.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0)],
+            ),
+            (
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(10.0, 0.0, 0.0), b: Vec3::new(10.0, 5.0, 0.0) }),
+                [Vec3::new(10.0, 0.0, 0.0), Vec3::new(10.0, 2.5, 0.0), Vec3::new(10.0, 5.0, 0.0)],
+            ),
+            (
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(10.0, 5.0, 0.0), b: Vec3::new(0.0, 5.0, 0.0) }),
+                [Vec3::new(10.0, 5.0, 0.0), Vec3::new(5.0, 5.0, 0.0), Vec3::new(0.0, 5.0, 0.0)],
+            ),
+            (
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(0.0, 5.0, 0.0), b: Vec3::new(0.0, 0.0, 0.0) }),
+                [Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, 2.5, 0.0), Vec3::new(0.0, 0.0, 0.0)],
+            ),
+            (
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(0.0, 0.0, 0.0), b: Vec3::new(4.0, 0.0, 8.0) }),
+                [Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 4.0), Vec3::new(4.0, 0.0, 8.0)],
+            ),
+            (
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(0.0, 0.0, 0.0), b: Vec3::new(0.0, 5.0, 8.0) }),
+                [Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 2.5, 4.0), Vec3::new(0.0, 5.0, 8.0)],
+            ),
+        ];
+        let rect = Rect::from_min_size(pos2(20.0, 30.0), vec2(800.0, 600.0));
+        let mut cameras = Vec::new();
+        for preset in ["top", "front", "swiso"] {
+            let mut camera = cadcraft_geom::OrbitCamera::default();
+            camera.set_preset(preset);
+            cameras.push(camera);
+        }
+        let mut orbited = cameras[2];
+        orbited.azimuth += 0.41;
+        orbited.elevation -= 0.23;
+        cameras.push(orbited);
+
+        for camera in cameras {
+            let xf = Xf { rect, center: camera.target.xy(), scale: 30.0, camera: Some(camera) };
+            for (kind, expected_points) in &cases {
+                let centers = screen_grips(kind, &xf);
+                assert_eq!(centers.len(), expected_points.len());
+                for (i, point) in expected_points.iter().enumerate() {
+                    let expected = camera_screen(&xf, *point);
+                    let actual = centers[i];
+                    assert!(actual.distance(expected) < 1e-3, "grip {i} at {point:?}: {actual:?} != {expected:?}");
+                    let clickable = grip_rect(kind, centers.len(), i, actual, 6.0).expand(3.0);
+                    assert!(clickable.contains(expected), "visible grip center {expected:?} is outside hit area {clickable:?}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod grip_projection_tests {
+    use super::*;
+
+    #[test]
+    fn visible_3d_grip_is_clickable_and_selection_clears_the_overlays() {
+        let mut app = CadApp::new(cadcraft_engine::Session::new(), crate::Services::default());
+        let handle = app
+            .session
+            .doc_mut()
+            .unwrap()
+            .add(
+                &cadcraft_doc::Space::Model,
+                cadcraft_doc::Common::default(),
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(1.0, 2.0, 4.0), b: Vec3::new(8.0, 5.0, 10.0) }),
+            )
+            .unwrap();
+        app.session.set_selection(vec![handle]);
+
+        let mut camera = cadcraft_geom::OrbitCamera::default();
+        camera.set_preset("swiso");
+        let xf = Xf { rect: Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0)), center: camera.target.xy(), scale: 30.0, camera: Some(camera) };
+        let projected = camera.project_point(Vec3::new(1.0, 2.0, 4.0));
+        let visible_center = pos2(xf.rect.center().x + (projected.x * xf.scale) as f32, xf.rect.center().y - (projected.y * xf.scale) as f32);
+        assert_eq!(grip_at(&app, &xf, Some(visible_center)), Some((handle, 0)));
+        click_grip(&mut app, (handle, 0), false);
+        assert_eq!(app.session.running.as_ref().map(|r| r.id.as_str()), Some("grip"));
+        let preview = app.session.preview(Vec2::new(3.0, 2.0));
+        let moved = preview.iter().find_map(|entity| match &entity.kind {
+            cadcraft_doc::EntityKind::Line(line) if line.a.z == 4.0 => Some(line),
+            _ => None,
+        });
+        assert_eq!(moved.map(|line| (line.a, line.b)), Some((Vec3::new(3.0, 2.0, 4.0), Vec3::new(8.0, 5.0, 10.0))));
+        app.session.cancel();
+
+        let doc = app.session.doc().unwrap();
+        let entity = doc.entity(handle).unwrap();
+        let list = cadcraft_render::build_entities(doc, std::iter::once(entity.as_ref()), &cadcraft_render::Options::default());
+        let mut index = PrimIndex::default();
+        assert!(!index.prims(1, &list, &[handle]).is_empty());
+
+        app.session.set_selection(Vec::new());
+        assert_eq!(grip_at(&app, &xf, Some(visible_center)), None);
+        assert!(index.prims(1, &list, &[]).is_empty());
+    }
+
+    #[test]
+    fn spatial_line_hit_testing_uses_the_visible_projected_position() {
+        let mut app = CadApp::new(cadcraft_engine::Session::new(), crate::Services::default());
+        let handle = app
+            .session
+            .doc_mut()
+            .unwrap()
+            .add(
+                &cadcraft_doc::Space::Model,
+                cadcraft_doc::Common::default(),
+                cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(1.0, 2.0, 4.0), b: Vec3::new(8.0, 5.0, 10.0) }),
+            )
+            .unwrap();
+        let doc = app.session.doc().unwrap();
+        let midpoint = Vec3::new(4.5, 3.5, 7.0);
+        let mut cameras = Vec::new();
+        for preset in ["top", "front", "swiso"] {
+            let mut camera = cadcraft_geom::OrbitCamera::default();
+            camera.set_preset(preset);
+            cameras.push(camera);
+        }
+        let mut orbited = cameras[2];
+        orbited.azimuth += 0.41;
+        orbited.elevation -= 0.23;
+        cameras.push(orbited);
+
+        for camera in cameras {
+            let xf = Xf { rect: Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0)), center: camera.target.xy(), scale: 30.0, camera: Some(camera) };
+            let visible = xf.to_screen3(midpoint);
+            assert_eq!(spatial_line_at_screen(doc, &cadcraft_doc::Space::Model, &xf, visible, 4.0), Some(handle));
+            assert_eq!(spatial_line_at_screen(doc, &cadcraft_doc::Space::Model, &xf, visible + vec2(0.0, 20.0), 4.0), None);
+        }
+
+        app.session.pick_cycled(handle, false).unwrap();
+        assert_eq!(app.session.selection(), vec![handle]);
+    }
+
+    #[test]
+    fn spatial_line_highlights_follow_geometry_and_clear_when_deselected() {
+        let mut app = CadApp::new(cadcraft_engine::Session::new(), crate::Services::default());
+        let add_line = |app: &mut CadApp, a, b| {
+            app.session
+                .doc_mut()
+                .unwrap()
+                .add(&cadcraft_doc::Space::Model, cadcraft_doc::Common::default(), cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a, b }))
+                .unwrap()
+        };
+        let selected = add_line(&mut app, Vec3::new(1.0, 2.0, 4.0), Vec3::new(8.0, 5.0, 10.0));
+        let hovered = add_line(&mut app, Vec3::new(1.0, 2.0, 8.0), Vec3::new(8.0, 5.0, 14.0));
+        app.session.set_selection(vec![selected]);
+        app.canvas.hover = Some(hovered);
+        app.session.settings.selectioneffect = 1;
+        app.session.settings.previeweffect = 1;
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 600.0));
+        let ctx = egui::Context::default();
+
+        let draw = |app: &CadApp, xf: &Xf| {
+            let input = egui::RawInput { screen_rect: Some(xf.rect), ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| draw_spatial_lines(app, ui.painter(), xf));
+            output.textures_delta.clear();
+            output
+        };
+        let has_segment = |shapes: &[egui::epaint::ClippedShape], a: Pos2, b: Pos2| {
+            shapes.iter().any(|shape| matches!(&shape.shape, Shape::LineSegment { points, .. } if *points == [a, b] || *points == [b, a]))
+        };
+        let camera_frame = |camera: cadcraft_geom::OrbitCamera| Xf { rect, center: camera.target.xy(), scale: 30.0, camera: Some(camera) };
+        let mut camera = cadcraft_geom::OrbitCamera::default();
+        camera.set_preset("swiso");
+        let before = camera_frame(camera);
+        let output = draw(&app, &before);
+        assert!(has_segment(&output.shapes, before.to_screen3(Vec3::new(1.0, 2.0, 4.0)), before.to_screen3(Vec3::new(8.0, 5.0, 10.0))));
+        assert!(has_segment(&output.shapes, before.to_screen3(Vec3::new(1.0, 2.0, 8.0)), before.to_screen3(Vec3::new(8.0, 5.0, 14.0))));
+
+        camera.azimuth += 0.41;
+        camera.elevation -= 0.23;
+        let after = camera_frame(camera);
+        let output = draw(&app, &after);
+        assert!(has_segment(&output.shapes, after.to_screen3(Vec3::new(1.0, 2.0, 4.0)), after.to_screen3(Vec3::new(8.0, 5.0, 10.0))));
+        assert!(has_segment(&output.shapes, after.to_screen3(Vec3::new(1.0, 2.0, 8.0)), after.to_screen3(Vec3::new(8.0, 5.0, 14.0))));
+
+        app.session.set_selection(Vec::new());
+        app.canvas.hover = None;
+        let output = draw(&app, &after);
+        assert!(output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, Shape::LineSegment { points, stroke } if *points == [after.to_screen3(Vec3::new(1.0, 2.0, 4.0)), after.to_screen3(Vec3::new(8.0, 5.0, 10.0))] && stroke.width == 1.0)
+        }));
     }
 }
 
@@ -1473,21 +1928,237 @@ fn store_cursor_resolution(app: &mut CadApp, point: Option<(Vec2, Vec3)>) {
         app.session.cursor_deferred = app.canvas.snap.and_then(|hit| hit.deferred);
         app.canvas.parallel_plane_warning = false;
     } else {
+        if app.session.running.as_ref().is_some_and(|running| running.id == "line") {
+            clear_ground_target_acquisition(app);
+        } else {
+            clear_ground_target(app);
+        }
         app.canvas.cursor = None;
         app.canvas.cursor3 = None;
         app.canvas.snap = None;
         app.canvas.active_axis_3d = None;
+        app.canvas.axis_track_z_zero = false;
         app.session.cursor_deferred = None;
         // The canvas option gates preview and click handling; session cursor fields stay last-valid.
     }
+}
+
+fn z0_tolerance(point: Vec3) -> f64 {
+    1e-9 * point.x.abs().max(point.y.abs()).max(1.0)
+}
+
+fn clear_ground_target(app: &mut CadApp) {
+    app.canvas.ground_target_acquired = false;
+    app.canvas.ground_target_suppressed = false;
+    app.canvas.ground_target_key = None;
+}
+
+fn clear_ground_target_acquisition(app: &mut CadApp) {
+    app.canvas.ground_target_acquired = false;
+    app.canvas.ground_target_key = None;
+}
+
+pub(crate) fn release_ground_target_until_exit(app: &mut CadApp) {
+    app.canvas.ground_target_acquired = false;
+    app.canvas.ground_target_suppressed = true;
+    app.canvas.ground_target_key = None;
+}
+
+fn with_ground_target_v_bypassed<T>(app: &mut CadApp, action: impl FnOnce(&mut CadApp) -> T) -> T {
+    let acquired = app.canvas.ground_target_acquired;
+    let zlock = app.session.settings.zlock;
+    if acquired {
+        app.session.settings.zlock = false;
+    }
+    let result = action(app);
+    if acquired {
+        app.session.settings.zlock = zlock;
+    }
+    result
+}
+
+fn global_z0_ray_point(xf: &Xf, hp: Pos2) -> Option<Vec3> {
+    let point = xf.to_world3_with_offset(hp, cadcraft_geom::DrawingPlane::XY, 0.0)?;
+    point.is_finite().then_some(Vec3::new(point.x, point.y, 0.0))
+}
+
+fn resolve_global_z0_point(app: &mut CadApp, hp: Pos2, xf: &Xf, dyn_frame: Option<crate::dyninput::Frame>) -> Option<(Vec2, Vec3)> {
+    clear_ground_target(app);
+    app.session.tracking.clear();
+    app.canvas.snap = None;
+    app.canvas.track = None;
+    app.canvas.active_axis_3d = None;
+    app.canvas.axis_track_z_zero = false;
+
+    let c = xf.rect.center();
+    let q = Vec2::new(f64::from(hp.x - c.x) / xf.scale, -f64::from(hp.y - c.y) / xf.scale);
+    let cam = app.session.camera();
+    let raw = global_z0_ray_point(xf, hp);
+    if let (Some(frame), Some(raw)) = (dyn_frame, raw)
+        && let Some(entries) = crate::dyninput::parse(&app.cmd.buffer, &frame)
+        && entries.first_locked().is_some()
+    {
+        let point = crate::dyninput::constrain(&entries, &frame, raw.xy(), app.cmd.second_locked());
+        let point3 = Vec3::new(point.x, point.y, 0.0);
+        app.canvas.parallel_plane_warning = false;
+        return point3.is_finite().then_some((point, point3));
+    }
+
+    let osmode = app.session.snap_override().unwrap_or(app.session.settings.osmode);
+    if osmode & snap::mode::END != 0
+        && osmode & snap::mode::OFF == 0
+        && let Ok(st) = app.session.state()
+        && let Some(mut hit) = snap::snap_3d_line_endpoints(
+            &st.doc,
+            &st.edit_space(),
+            &cam,
+            q,
+            app.session.settings.aperture / xf.scale,
+            app.canvas.snap_cycle.map_or(0, |cycle| cycle.index),
+        )
+        && let Some(point) = hit.point3
+        && point.z.abs() <= z0_tolerance(point)
+    {
+        let point = Vec3::new(point.x, point.y, 0.0);
+        hit.point = point.xy();
+        hit.point3 = Some(point);
+        app.canvas.snap = Some(hit);
+        app.canvas.parallel_plane_warning = false;
+        return Some((point.xy(), point));
+    }
+
+    app.canvas.parallel_plane_warning = raw.is_none();
+    raw.map(|p| (p.xy(), p))
+}
+
+const GROUND_TARGET_ACQUIRE_PIXELS: f32 = 40.0;
+
+/// Acquire around the visible projection of the base point on global Z=0, not around the
+/// cursor's own ground projection (which is always directly under the cursor).
+fn acquire_ground_target(app: &mut CadApp, hp: Pos2, xf: &Xf, base: Vec3, cam: OrbitCamera) -> Option<(Vec2, Vec3)> {
+    let base_key = (base, cam, xf.rect, xf.scale);
+    let ground_base = Vec3::new(base.x, base.y, 0.0);
+    let center = xf.to_screen3(ground_base);
+    let distance = hp.distance(center);
+    if base.z.abs() <= z0_tolerance(base) || !center.x.is_finite() || !center.y.is_finite() {
+        clear_ground_target(app);
+        return None;
+    }
+
+    if app.canvas.ground_target_acquired {
+        return global_z0_ray_point(xf, hp).map(|point| {
+            app.canvas.ground_target_key = Some(base_key);
+            app.session.tracking.clear();
+            app.canvas.snap = None;
+            app.canvas.track = None;
+            app.canvas.active_axis_3d = None;
+            app.canvas.axis_track_z_zero = false;
+            app.canvas.parallel_plane_warning = false;
+            (point.xy(), point)
+        });
+    }
+
+    if distance > GROUND_TARGET_ACQUIRE_PIXELS {
+        app.canvas.ground_target_suppressed = false;
+    }
+    if app.canvas.ground_target_suppressed || distance > GROUND_TARGET_ACQUIRE_PIXELS {
+        app.canvas.ground_target_key = None;
+        return None;
+    }
+
+    let Some(point) = global_z0_ray_point(xf, hp) else {
+        return None;
+    };
+    app.canvas.ground_target_acquired = true;
+    app.canvas.ground_target_suppressed = false;
+    app.canvas.ground_target_key = Some(base_key);
+    app.session.tracking.clear();
+    app.canvas.snap = None;
+    app.canvas.track = None;
+    app.canvas.active_axis_3d = None;
+    app.canvas.axis_track_z_zero = false;
+    app.canvas.parallel_plane_warning = false;
+    Some((point.xy(), point))
+}
+
+/// Acquire at the pick-box scale and release with a wider radius to prevent cursor flicker.
+const AXIS_TRACK_ACQUIRE_PIXELS: f64 = 8.0;
+const AXIS_TRACK_RELEASE_PIXELS: f64 = 14.0;
+/// Below five degrees from the view direction, depth error is too amplified to guide reliably.
+const AXIS_TRACK_MIN_VIEW_ANGLE: f64 = 5.0 * std::f64::consts::PI / 180.0;
+const AXIS_TRACK_Z_ZERO_ACQUIRE_PIXELS: f32 = 8.0;
+const AXIS_TRACK_Z_ZERO_RELEASE_PIXELS: f32 = 14.0;
+
+fn soft_axis_track(
+    cam: &OrbitCamera,
+    q: Vec2,
+    base: Vec3,
+    scale: f64,
+    previous: Option<cadcraft_geom::Axis3D>,
+) -> Option<(cadcraft_geom::Axis3D, Vec3, f64)> {
+    let view = cam.view_dir();
+    let screen_base = cam.project_point(base);
+    let delta = q - screen_base;
+    let min_axis_view_cos = AXIS_TRACK_MIN_VIEW_ANGLE.cos();
+    let axes = [
+        (cadcraft_geom::Axis3D::X, Vec3::new(1.0, 0.0, 0.0)),
+        (cadcraft_geom::Axis3D::Y, Vec3::new(0.0, 1.0, 0.0)),
+        (cadcraft_geom::Axis3D::Z, Vec3::new(0.0, 0.0, 1.0)),
+    ];
+    let mut candidates = Vec::new();
+    for (axis, direction) in axes {
+        if direction.dot(view).abs() >= min_axis_view_cos {
+            continue;
+        }
+        let screen_axis = cam.project_point(base + direction) - screen_base;
+        let axis_len = screen_axis.len();
+        // Cursor travel below is measured in pixels; a per-unit pixel threshold breaks visible
+        // guides when zoomed out.
+        if !axis_len.is_finite() || axis_len < 1e-12 {
+            continue;
+        }
+        let along_pixels = delta.dot(screen_axis) / axis_len * scale;
+        if along_pixels.abs() < 2.0 {
+            continue;
+        }
+        let distance_pixels = (delta.x * screen_axis.y - delta.y * screen_axis.x).abs() / axis_len * scale;
+        let Some(coordinate) = cam.unproject_axis_coordinate(q, base, direction) else { continue };
+        let point = match axis {
+            cadcraft_geom::Axis3D::X => Vec3::new(coordinate, base.y, base.z),
+            cadcraft_geom::Axis3D::Y => Vec3::new(base.x, coordinate, base.z),
+            cadcraft_geom::Axis3D::Z => Vec3::new(base.x, base.y, coordinate),
+        };
+        if point.is_finite() && distance_pixels.is_finite() {
+            candidates.push((axis, point, distance_pixels));
+        }
+    }
+
+    if let Some(previous) = previous
+        && let Some(candidate) = candidates.iter().find(|candidate| candidate.0 == previous)
+        && candidate.2 <= AXIS_TRACK_RELEASE_PIXELS
+    {
+        return Some(*candidate);
+    }
+    let order = |axis| match axis {
+        cadcraft_geom::Axis3D::X => 0,
+        cadcraft_geom::Axis3D::Y => 1,
+        cadcraft_geom::Axis3D::Z => 2,
+    };
+    candidates
+        .into_iter()
+        .filter(|candidate| candidate.2 <= AXIS_TRACK_ACQUIRE_PIXELS)
+        .min_by(|a, b| a.2.total_cmp(&b.2).then_with(|| order(a.0).cmp(&order(b.0))))
 }
 
 /// Unified 3D effective point resolution for hover, dynamic input, previews, and click confirmation.
 /// Enforces the explicit priority:
 /// 1. Locked Dynamic Input / grip dimensions.
 /// 2. Snaps: screen-space 3D LINE endpoints if in 3D camera view, otherwise standard 2D snaps.
-/// 3. Ejes: ORTHO 3D closest axis (X, Y, or Z) with hysteresis, or legacy Z-LOCK if active.
-/// 4. Plano libre: work plane unprojection with elevation offset (user work plane for first point,
+/// 3. The existing soft Z-axis capture at the vertical crossing of global Z=0.
+/// 4. The visible global-Z=0 target for elevated LINE continuations.
+/// 5. Ejes: ORTHO 3D closest axis (X, Y, or Z) with hysteresis, or legacy Z-LOCK if active.
+/// 6. Remaining soft global-axis tracking for LINE continuations in oblique views.
+/// 7. Plano libre: work plane unprojection with elevation offset (user work plane for first point,
 ///    continuation height of previous vertex for subsequent points).
 ///
 /// A parallel free-plane ray has no point: it clears the cursor and cannot confirm a click.
@@ -1512,7 +2183,19 @@ fn resolve_effective_point(
     let orthomode = app.session.settings.orthomode;
     let prompt_base3 = app.session.current_prompt().as_ref().and_then(|p| p.base3);
     let base3 = prompt_base3.unwrap_or(app.session.last_point3);
+    let was_z_zero = app.canvas.axis_track_z_zero;
     let line_prompt = app.session.running.as_ref().is_some_and(|r| r.id == "line");
+    let z0_mode = app.session.current_prompt().is_some_and(|p| p.global_xy_zero);
+    if !line_prompt || z0_mode || prompt_base3.is_none() {
+        clear_ground_target(app);
+    } else if app.canvas.ground_target_acquired && app.canvas.ground_target_key.as_ref() != Some(&(base3, cam, xf.rect, xf.scale)) {
+        app.canvas.ground_target_acquired = false;
+        app.canvas.ground_target_suppressed = true;
+        app.canvas.ground_target_key = None;
+    }
+    if line_prompt && z0_mode {
+        return resolve_global_z0_point(app, hp, xf, dyn_frame);
+    }
     let continuation_offset = app.session.drawing_plane_offset_for(prompt_base3);
     let plane_point = xf.to_world3_with_offset(hp, plane, continuation_offset);
     let raw2 = if line_prompt { plane_point.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
@@ -1533,13 +2216,16 @@ fn resolve_effective_point(
         app.canvas.snap = None;
         app.canvas.track = None;
         app.canvas.active_axis_3d = None;
+        app.canvas.axis_track_z_zero = false;
         return Some((eff, prompt_point(eff)));
     }
     let grip_held = crate::grip_dyn::constrain(app, raw2);
     if let Some(q_grip) = grip_held {
+        clear_ground_target(app);
         app.canvas.snap = None;
         app.canvas.track = None;
         app.canvas.active_axis_3d = None;
+        app.canvas.axis_track_z_zero = false;
         return Some((q_grip, prompt_point(q_grip)));
     }
 
@@ -1558,6 +2244,7 @@ fn resolve_effective_point(
             app.canvas.snap = Some(hit3d);
             app.canvas.track = None;
             app.canvas.active_axis_3d = None;
+            app.canvas.axis_track_z_zero = false;
             app.canvas.parallel_plane_warning = false;
             return Some((if line_prompt { plane.coordinates(p3) } else { p3.xy() }, p3));
         }
@@ -1576,6 +2263,7 @@ fn resolve_effective_point(
 
     if app.canvas.snap.is_some() {
         app.canvas.active_axis_3d = None;
+        app.canvas.axis_track_z_zero = false;
         app.canvas.parallel_plane_warning = false;
         let eff3 = if let Some(hit) = app.canvas.snap
             && let Some(p3) = hit.point3
@@ -1588,12 +2276,62 @@ fn resolve_effective_point(
         return Some((eff, eff3));
     }
 
-    // Priority 3: 3D Axis Snapping (ORTHO 3D) or legacy Z-LOCK
+    if line_prompt
+        && app.session.pending_window.is_none()
+        && app.canvas.ground_target_acquired
+        && let Some(base) = prompt_base3
+    {
+        return acquire_ground_target(app, hp, xf, base, cam);
+    }
+
+    // Find soft tracking before automatic ground acquisition so its existing vertical Z=0
+    // crossing remains a distinct, higher-priority capture.
+    let soft_candidate = if line_prompt
+        && prompt_base3.is_some()
+        && app.session.settings.axistrack
+        && !orthomode
+        && !zlock
+        && app.session.pending_window.is_none()
+        && cam.principal_drawing_plane().is_none()
+    {
+        soft_axis_track(&cam, q, base3, xf.scale, app.canvas.active_axis_3d)
+    } else {
+        None
+    };
+    if let Some((axis, _, _)) = soft_candidate {
+        let z_zero = Vec3::new(base3.x, base3.y, 0.0);
+        let z_zero_distance = xf.to_screen3(z_zero).distance(hp);
+        let z_zero_limit = if was_z_zero { AXIS_TRACK_Z_ZERO_RELEASE_PIXELS } else { AXIS_TRACK_Z_ZERO_ACQUIRE_PIXELS };
+        if axis == cadcraft_geom::Axis3D::Z && z_zero_distance <= z_zero_limit {
+            clear_ground_target_acquisition(app);
+            app.canvas.active_axis_3d = Some(axis);
+            app.canvas.axis_track_z_zero = true;
+            app.canvas.parallel_plane_warning = false;
+            app.canvas.track = None;
+            app.canvas.snap =
+                Some(SnapHit { point: plane.coordinates(z_zero), point3: Some(z_zero), mode: 0, name: "Z=0", viewport: None, deferred: None });
+            return Some((plane.coordinates(z_zero), z_zero));
+        }
+    }
+
+    // The ring acquires the plane outside the overlapping local vertical snap zone.
+    if line_prompt
+        && app.session.pending_window.is_none()
+        && let Some(base) = prompt_base3
+        && let Some(point) = acquire_ground_target(app, hp, xf, base, cam)
+    {
+        return Some(point);
+    } else if line_prompt {
+        clear_ground_target_acquisition(app);
+    }
+
+    // Priority 5: 3D Axis Snapping (ORTHO 3D) or legacy Z-LOCK
     if prompt_base.is_some() && !cam.is_plan() {
         if zlock {
             let z = cam.unproject_vertical_z(q, base3);
             let eff3 = Vec3::new(base3.x, base3.y, z);
             app.canvas.active_axis_3d = Some(cadcraft_geom::Axis3D::Z);
+            app.canvas.axis_track_z_zero = false;
             app.canvas.snap = None;
             app.canvas.track = None;
             app.canvas.parallel_plane_warning = false;
@@ -1602,6 +2340,7 @@ fn resolve_effective_point(
             let prev_axis = app.canvas.active_axis_3d;
             let (ortho_pt3, axis, _) = cam.closest_axis_3d_with_prev(q, base3, prev_axis);
             app.canvas.active_axis_3d = Some(axis);
+            app.canvas.axis_track_z_zero = false;
             app.canvas.snap = None;
             app.canvas.track = None;
             app.canvas.parallel_plane_warning = false;
@@ -1609,8 +2348,18 @@ fn resolve_effective_point(
         }
     }
 
-    // Priority 4: Free plane unprojection
+    // Priority 6: Remaining soft spatial axis tracking, below explicit constraints.
+    if let Some((axis, axis_point, _)) = soft_candidate {
+        app.canvas.active_axis_3d = Some(axis);
+        app.canvas.parallel_plane_warning = false;
+        app.canvas.track = None;
+        app.canvas.axis_track_z_zero = false;
+        return Some((plane.coordinates(axis_point), axis_point));
+    }
+
+    // Priority 7: Free plane unprojection
     app.canvas.active_axis_3d = None;
+    app.canvas.axis_track_z_zero = false;
     match plane_point {
         Some(p3) => {
             app.canvas.parallel_plane_warning = false;
@@ -1696,6 +2445,10 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // counts the canvas. Over those the OS cursor stays visible and the crosshair stays put, as
     // over the menu bar (#1701).
     let inside = hover_pos.is_some_and(|p| rect.contains(p) && ui.ctx().layer_id_at(p) == Some(ui.layer_id()) && resp.hovered());
+    if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        app.canvas.selection_window = None;
+        app.canvas.drag_window = false;
+    }
     // The menus the canvas paints itself (selection cycling's rows, Dynamic Input's options) are
     // menus too, but they share the canvas's layer: `layer_id_at` reports the drawing under them,
     // so only their rectangles tell them apart from it ([`over_canvas_menu`]). They are excluded
@@ -1922,12 +2675,17 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                     app.session.echo("Point coordinates must be finite.");
                     continue;
                 }
-                let result = match app.canvas.snap {
+                let result = with_ground_target_v_bypassed(app, |app| match app.canvas.snap {
                     Some(hit) => app.session.input_snapped(hit),
                     None => app.session.input(Input::Point3(pt3)),
-                };
-                if let Err(e) = result {
-                    app.session.echo(e.to_string());
+                });
+                match result {
+                    Ok(_) => {
+                        clear_ground_target(app);
+                        app.canvas.active_axis_3d = None;
+                        app.canvas.axis_track_z_zero = false;
+                    }
+                    Err(e) => app.session.echo(e.to_string()),
                 }
             }
         }
@@ -1975,15 +2733,55 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         app.session.state().map_or(0, |st| st.revision),
         xf.center,
         xf.scale,
+        xf.camera,
     );
     if app.canvas.cycle_key.as_ref() != Some(&key) {
         app.canvas.cycle = None;
         app.canvas.hover_cycle = None;
+        app.canvas.hover = None;
+        app.canvas.hover_at = None;
         app.canvas.cycle_key = Some(key);
     }
-    let cycled = pressed_primary && !middle_down && cycle_click(app, &xf, hover_pos, raw_world.filter(|_| inside), mods.shift);
+    if app.canvas.selection_window.is_some() && (!app.session.click_picks() || app.session.pending_window.is_some()) {
+        app.canvas.selection_window = None;
+        app.canvas.drag_window = false;
+    }
+    let cycled = pressed_primary
+        && !middle_down
+        && app.canvas.selection_window.is_none()
+        && cycle_click(app, &xf, hover_pos, raw_world.filter(|_| inside), mods.shift);
+    let mut screen_selection_handled = false;
+    if inside && pressed_primary && !middle_down && !cycled && app.session.click_picks() && app.session.pending_window.is_none() {
+        if let Some(window) = app.canvas.selection_window.take() {
+            if let Some(end) = hover_pos {
+                let handles = screen_window_selection(app, &xf, window.anchor, end);
+                if let Err(error) = app.session.select_window_handles(handles, mods.shift) {
+                    app.session.echo(error.to_string());
+                }
+            }
+            screen_selection_handled = true;
+        } else if let Some(at) = hover_pos {
+            if !app.session.prompting()
+                && let Some(grip) = crate::dyngrips::at(app, &xf, Some(at))
+            {
+                crate::dyngrips::click(app, grip);
+            } else if !app.session.prompting()
+                && let Some(grip) = grip_at(app, &xf, Some(at))
+            {
+                click_grip(app, grip, mods.shift);
+            } else if let Some(handle) = screen_projected_pick_at(app, &xf, at) {
+                if let Err(error) = app.session.pick_cycled(handle, mods.shift) {
+                    app.session.echo(error.to_string());
+                }
+            } else {
+                app.canvas.selection_window = Some(SelectionWindow { anchor: at });
+            }
+            screen_selection_handled = true;
+        }
+    }
     // Clicks.
-    if inside
+    if !screen_selection_handled
+        && inside
         && pressed_primary
         && !middle_down
         && !cycled
@@ -2000,27 +2798,43 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             {
                 app.cmd.buffer.clear();
             }
+            let spatial_pick = if app.session.click_picks() { hover_pos.and_then(|hp| spatial_line_pick_at(app, &xf, hp)) } else { None };
             // Preserve a snap's viewport origin for DIST, and its deferred curve where needed.
-            let result = match app.canvas.snap {
-                Some(hit) => app.session.input_snapped(hit),
-                None => {
-                    let pt3 = app.canvas.cursor3.unwrap_or_else(|| point_on_plane(p, plane, plane_offset));
-                    if pt3.is_finite() {
-                        app.session.input(Input::Point3(pt3))
-                    } else {
-                        app.session.echo("Point coordinates must be finite.");
-                        Ok(())
+            let result = if let Some(handle) = spatial_pick {
+                app.session.pick_cycled(handle, false)
+            } else {
+                with_ground_target_v_bypassed(app, |app| match app.canvas.snap {
+                    Some(hit) => app.session.input_snapped(hit),
+                    None => {
+                        let pt3 = app.canvas.cursor3.unwrap_or_else(|| point_on_plane(p, plane, plane_offset));
+                        if pt3.is_finite() {
+                            app.session.input(Input::Point3(pt3))
+                        } else {
+                            app.session.echo("Point coordinates must be finite.");
+                            Ok(())
+                        }
                     }
-                }
+                })
             };
 
-            if let Err(e) = result {
-                app.session.echo(e.to_string());
+            match result {
+                Ok(_) => {
+                    clear_ground_target(app);
+                    app.canvas.active_axis_3d = None;
+                    app.canvas.axis_track_z_zero = false;
+                }
+                Err(e) => app.session.echo(e.to_string()),
             }
         } else if let Some(g) = crate::dyngrips::at(app, &xf, hover_pos) {
             crate::dyngrips::click(app, g);
         } else if let Some(g) = grip_at(app, &xf, hover_pos) {
             click_grip(app, g, mods.shift);
+        } else if app.session.click_picks()
+            && let Some(h) = hover_pos.and_then(|hp| spatial_line_pick_at(app, &xf, hp))
+        {
+            if let Err(e) = app.session.pick_cycled(h, mods.shift) {
+                app.session.echo(e.to_string());
+            }
         } else if let Err(e) = app.session.idle_click(raw_world.unwrap_or(p), mods.shift) {
             app.session.echo(e.to_string());
         }
@@ -2036,22 +2850,27 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         && !middle_down
         && app.canvas.cycle.is_none()
         && app.session.pending_window.is_none()
+        && app.canvas.selection_window.is_none()
         && let Some(origin) = ui.input(|i| i.pointer.press_origin())
         && rect.contains(origin)
         && grip_at(app, &xf, Some(origin)).is_none()
         && crate::dyngrips::at(app, &xf, Some(origin)).is_none()
     {
-        app.canvas.drag_window = app.session.begin_window(xf.to_world(origin));
+        app.canvas.drag_window = app.session.click_picks();
+        if app.canvas.drag_window {
+            app.canvas.selection_window = Some(SelectionWindow { anchor: origin });
+        }
     }
     if app.canvas.drag_window && resp.drag_stopped_by(egui::PointerButton::Primary) {
         app.canvas.drag_window = false;
-        if app.session.pending_window.is_some()
+        if let Some(window) = app.canvas.selection_window.take()
             && let Some(end) = ui.input(|i| i.pointer.interact_pos())
         {
-            let end = xf.to_world(end);
-            let done = if app.session.prompting() { app.session.input(Input::Point(end)) } else { app.session.idle_click(end, mods.shift) };
-            if let Err(e) = done {
-                app.session.echo(e.to_string());
+            if app.session.click_picks() {
+                let handles = screen_window_selection(app, &xf, window.anchor, end);
+                if let Err(error) = app.session.select_window_handles(handles, mods.shift) {
+                    app.session.echo(error.to_string());
+                }
             }
         }
     }
@@ -2085,8 +2904,13 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             && let (Some(w), Ok(st)) = (raw_world, app.session.state())
         {
             let filter = app.session.settings.previewfilter;
-            app.canvas.hover = cadcraft_engine::select::pick(&st.doc, &st.edit_space(), w, app.session.settings.pickbox.max(1.0) * 1.5 / scale)
+            let spatial = hover_pos
+                .and_then(|hp| spatial_line_at_screen(&st.doc, &st.edit_space(), &xf, hp, (app.session.settings.pickbox.max(1.0) * 1.5) as f32))
                 .filter(|h| st.doc.entity(*h).is_none_or(|e| !cadcraft_engine::select::preview_filtered(&st.doc, e, filter)));
+            app.canvas.hover = spatial.or_else(|| {
+                cadcraft_engine::select::pick(&st.doc, &st.edit_space(), w, app.session.settings.pickbox.max(1.0) * 1.5 / scale)
+                    .filter(|h| st.doc.entity(*h).is_none_or(|e| !cadcraft_engine::select::preview_filtered(&st.doc, e, filter)))
+            });
             app.canvas.hover_at = hover_pos;
         }
     } else {
@@ -2274,10 +3098,9 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         let gs = app.session.settings.gripsize as f32;
         for h in sel.iter().take(200) {
             if let Some(e) = st.doc.entity(*h) {
-                let grips = e.kind.grips();
+                let grips = screen_grips(&e.kind, &xf);
                 let count = grips.len();
-                for (gi, g) in grips.into_iter().enumerate() {
-                    let sp = xf.to_screen(g);
+                for (gi, sp) in grips.into_iter().enumerate() {
                     if rect.contains(sp) {
                         let r = grip_rect(&e.kind, count, gi, sp, gs);
                         let hot = app.canvas.hot_grips.contains(&(*h, gi));
@@ -2347,7 +3170,22 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             draw_list(&painter, &xf, &list, bg, false);
         }
     }
-    // Pending selection window.
+    // Viewport-space selection windows stay aligned with the visible rectangle in every camera.
+    if let (Some(window), Some(end)) = (app.canvas.selection_window, hover_pos.filter(|point| rect.contains(*point))) {
+        let r = Rect::from_two_pos(window.anchor, end);
+        let crossing = end.x < window.anchor.x;
+        if let Some(fill) = selection_area_fill(&app.session.settings, crossing) {
+            painter.rect_filled(r, 0.0, fill);
+        }
+        let stroke = Stroke::new(1.0, if crossing { t.crossing_stroke } else { t.window_stroke });
+        if crossing {
+            let points = vec![r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+            painter.extend(Shape::dashed_line(&points, stroke, 5.0, 3.0));
+        } else {
+            painter.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Middle);
+        }
+    }
+    // Legacy engine selection windows used by typed point-collection modes.
     if let (Some(pw), Some(c)) = (app.session.pending_window, raw_world) {
         let a = xf.to_screen(pw.corner);
         let b = xf.to_screen(c);
@@ -2376,7 +3214,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         };
         draw_snap_marker(&painter, marker_pos, &hit);
     }
-    // 3D Axis Guide Line and Badge
+    // 3D axis guide and coordinate readout; it sits below the dynamic-input prompt.
     if let (Some(axis), Some(base3), Some(c3)) = (app.canvas.active_axis_3d, prompt_base.map(|_| app.session.last_point3), app.canvas.cursor3) {
         let p1 = xf.to_screen3(base3);
         let p2 = xf.to_screen3(c3);
@@ -2386,7 +3224,17 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             cadcraft_geom::Axis3D::Z => Color32::from_rgb(50, 130, 240),
         };
         painter.line_segment([p1, p2], Stroke::new(1.5, col));
-        tooltip(&painter, p2 + vec2(14.0, 14.0), &format!("[{}]", axis.name()));
+        let delta = match axis {
+            cadcraft_geom::Axis3D::X => c3.x - base3.x,
+            cadcraft_geom::Axis3D::Y => c3.y - base3.y,
+            cadcraft_geom::Axis3D::Z => c3.z - base3.z,
+        };
+        let direction = format!("{}{}", if delta.is_sign_negative() { "-" } else { "+" }, axis.name());
+        let (lu, lp) = length_units(&app.session);
+        let length = cadcraft_engine::units::format_distance(base3.dist(c3), lu, lp);
+        let z = cadcraft_engine::units::format_distance(c3.z, lu, lp);
+        let readout = crate::tf!("{direction} | Length: {length} | Z: {z}", direction = direction, length = length, z = z);
+        tooltip(&painter, p2 + vec2(14.0, 36.0), &readout);
     }
     // Graphical Height Manipulator Display
     if app.canvas.height_adjust {
@@ -2407,9 +3255,39 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         cadcraft_geom::DrawingPlane::YZ => Vec3::new(1.0, 0.0, 0.0),
     };
     let adjust_axis_hidden = app.canvas.height_adjust && 1.0 - app.session.camera().view_dir().dot(active_normal).powi(2) <= 1e-6;
+    let z0_point_mode = app.session.current_prompt().is_some_and(|p| p.global_xy_zero);
+    if z0_point_mode {
+        tooltip(
+            &painter,
+            pos2(rect.center().x, rect.top() + 24.0),
+            crate::tl!("Point at Z=0 active; ORTHO, V and soft tracking are bypassed. Only actual LINE endpoints on Z=0 can snap."),
+        );
+    }
+    if !z0_point_mode
+        && app.session.running.as_ref().is_some_and(|r| r.id == "line")
+        && let Some(base3) = app.session.current_prompt().and_then(|p| p.base3)
+        && base3.z.abs() > z0_tolerance(base3)
+    {
+        draw_ground_target(&painter, &xf, base3, app.canvas.ground_target_acquired, &t);
+    }
+    if app.canvas.ground_target_acquired {
+        let locked_dynamic = crate::cmdline::dyn_frame(app)
+            .and_then(|frame| crate::dyninput::parse(&app.cmd.buffer, &frame))
+            .is_some_and(|entries| entries.first_locked().is_some());
+        let status = if locked_dynamic {
+            crate::tl!("Locked Dynamic Input has priority over acquired Z=0.").to_string()
+        } else if let Some(hit) = app.canvas.snap {
+            crate::tf!("{snap} snap has priority over acquired Z=0.", snap = hit.name)
+        } else {
+            crate::tl!("Z=0 acquired; Free/F releases it. ORTHO/V and axis tracking are bypassed.").to_string()
+        };
+        tooltip(&painter, pos2(rect.center().x, rect.top() + 24.0), &status);
+    }
     if app.canvas.parallel_plane_warning || adjust_axis_hidden {
-        let warn_pos = pos2(rect.center().x, rect.top() + 24.0);
-        let warning = if adjust_axis_hidden {
+        let warn_pos = pos2(rect.center().x, rect.top() + if z0_point_mode { 48.0 } else { 24.0 });
+        let warning = if z0_point_mode && app.canvas.parallel_plane_warning {
+            crate::tl!("The camera ray is parallel to global Z=0; orbit the view or choose Free.")
+        } else if adjust_axis_hidden {
             crate::tl!("⚠ View is parallel to the plane normal; its offset cannot be adjusted from this view")
         } else {
             crate::tl!("⚠ View is parallel to the drawing plane (offset is ambiguous)")
@@ -2648,6 +3526,25 @@ fn tooltip(p: &egui::Painter, at: Pos2, text: &str) {
     p.galley(r.min + vec2(4.0, 2.0), galley, Color32::BLACK);
 }
 
+fn draw_ground_target(painter: &egui::Painter, xf: &Xf, base: Vec3, acquired: bool, tokens: &Tokens) {
+    let center = xf.to_screen3(Vec3::new(base.x, base.y, 0.0));
+    if !center.x.is_finite() || !center.y.is_finite() || !xf.rect.expand(GROUND_TARGET_ACQUIRE_PIXELS).contains(center) {
+        return;
+    }
+    let available = global_z0_ray_point(xf, xf.rect.center()).is_some();
+    let color = if !available {
+        tokens.text_faint
+    } else if acquired {
+        tokens.toggle_on
+    } else {
+        tokens.snap
+    };
+    let p = painter.with_clip_rect(xf.rect);
+    p.circle_stroke(center, 6.0, Stroke::new(1.5, color));
+    p.circle_filled(center, 1.5, color);
+    p.text(center + vec2(0.0, -9.0), egui::Align2::CENTER_BOTTOM, "Z=0", crate::theme::small(), color);
+}
+
 /// The hatch under world point `w` within the pick aperture (PICKBOX × 1.5 pixels at `scale`
 /// pixels per unit), if any.
 fn hatch_at(app: &CadApp, w: Vec2, scale: f64) -> Option<Handle> {
@@ -2841,7 +3738,7 @@ fn options_menu(app: &mut CadApp, p: &egui::Painter, r: Rect, hover: Pos2) {
     let Some(mut menu) = app.cmd.options.clone() else { return };
     let t = Tokens::get();
     let font = crate::theme::small();
-    let rows: Vec<_> = menu.keywords.iter().map(|k| p.layout_no_wrap(k.clone(), font.clone(), t.text)).collect();
+    let rows: Vec<_> = menu.keywords.iter().map(|k| p.layout_no_wrap(crate::i18n::prompt_keyword_label(k), font.clone(), t.text)).collect();
     let row_h = rows.iter().map(|g| g.size().y).fold(12.0, f32::max) + 6.0;
     let w = rows.iter().map(|g| g.size().x).fold(60.0, f32::max) + 28.0;
     let h = row_h * rows.len() as f32 + 4.0;
@@ -3107,6 +4004,10 @@ fn grip_rect(kind: &cadcraft_doc::EntityKind, count: usize, index: usize, center
     Rect::from_center_size(center, vec2(size * 2.0, if midpoint { size } else { size * 2.0 }))
 }
 
+fn screen_grips(kind: &cadcraft_doc::EntityKind, xf: &Xf) -> Vec<Pos2> {
+    kind.grips3().into_iter().map(|g| xf.to_screen3(g)).collect()
+}
+
 /// The grip of a selected object under the cursor, if any: (object, grip index).
 fn grip_at(app: &CadApp, xf: &Xf, hover: Option<Pos2>) -> Option<(Handle, usize)> {
     let hp = hover?;
@@ -3121,10 +4022,9 @@ fn grip_at(app: &CadApp, xf: &Xf, hover: Option<Pos2>) -> Option<(Handle, usize)
         if st.doc.layer(&e.common.layer).is_some_and(|l| l.locked) {
             continue;
         }
-        let grips = e.kind.grips();
+        let grips = screen_grips(&e.kind, xf);
         let count = grips.len();
-        for (i, g) in grips.into_iter().enumerate() {
-            let sp = xf.to_screen(g);
+        for (i, sp) in grips.into_iter().enumerate() {
             if grip_rect(&e.kind, count, i, sp, gs).expand(3.0).contains(hp) {
                 return Some((*h, i));
             }
@@ -3238,6 +4138,9 @@ pub(crate) mod tests {
         let circle = |r| EntityKind::Circle(Circle { center: cadcraft_geom::Vec3::new(0.0, 0.0, 0.0), radius: r });
         let a = d.add(&Space::Model, Common::default(), circle(10.0)).unwrap();
         let b = d.add(&Space::Model, Common::default(), circle(5.0)).unwrap();
+        let spatial = d
+            .add(&Space::Model, Common::default(), EntityKind::Line(cadcraft_doc::Line { a: Vec3::new(2.0, 3.0, 4.0), b: Vec3::new(8.0, 5.0, 12.0) }))
+            .unwrap();
         let st = cadcraft_engine::DocState::new(d, "highlight", None);
         let points = |l: &DisplayList| l.prims.iter().map(|p| l.points(p).len()).sum::<usize>();
         let (mut sel, mut hover) = (VpHighlight::default(), VpHighlight::default());
@@ -3259,6 +4162,9 @@ pub(crate) mod tests {
         sel.update(&st, &[a, b], 40.0);
         assert_ne!(sel.list_gen, zoomed);
         assert_eq!(sel.list.prims.iter().map(|p| p.handle).collect::<std::collections::BTreeSet<_>>().len(), 2);
+
+        sel.update(&st, &[spatial], 40.0);
+        assert!(sel.list.prims.is_empty(), "3D LINE highlighting must use the spatial-line screen projection, not a flattened XY primitive");
     }
 
     #[test]
@@ -3513,18 +4419,384 @@ mod hatch_pick_tests {
             app
         }
 
-        fn resolve_at(app: &mut CadApp, point: Vec3) -> Option<(Vec2, Vec3)> {
+        fn test_xf(app: &CadApp) -> Xf {
             let state = app.session.state().unwrap();
-            let xf = Xf {
+            Xf {
                 rect: Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0)),
                 center: state.view().center,
                 scale: 50.0,
                 camera: Some(app.session.camera()),
-            };
-            let screen = xf.to_screen3(point);
+            }
+        }
+
+        fn resolve_at_screen(app: &mut CadApp, screen: Pos2) -> Option<(Vec2, Vec3)> {
+            let xf = test_xf(app);
             let prompt_base = app.session.current_prompt().and_then(|p| p.base);
             let dyn_frame = crate::cmdline::dyn_frame(app);
             resolve_effective_point(app, screen, &xf, &Context::default(), prompt_base, dyn_frame)
+        }
+
+        fn resolve_at(app: &mut CadApp, point: Vec3) -> Option<(Vec2, Vec3)> {
+            resolve_at_screen(app, test_xf(app).to_screen3(point))
+        }
+
+        fn oblique_line_from(base: Vec3) -> CadApp {
+            let mut app = CadApp::new(Session::new(), Services::default());
+            app.session.execute("view.swiso", &json!({})).unwrap();
+            app.session.settings.osmode = 0;
+            app.session.settings.orthomode = false;
+            app.session.settings.zlock = false;
+            app.session.cmdline("line").unwrap();
+            app.session.input(Input::Point3(base)).unwrap();
+            app
+        }
+
+        #[test]
+        fn soft_axis_tracking_resolves_x_y_and_releases_to_free_cursor() {
+            let base = Vec3::new(4.0, -3.0, 8.0);
+            for (axis, direction) in [(cadcraft_geom::Axis3D::X, Vec3::new(1.0, 0.0, 0.0)), (cadcraft_geom::Axis3D::Y, Vec3::new(0.0, 1.0, 0.0))] {
+                let mut app = oblique_line_from(base);
+                let (_, point) = resolve_at(&mut app, base + direction * 3.0).expect("axis point resolves");
+                assert_eq!(app.canvas.active_axis_3d, Some(axis));
+                assert!(point.dist(base + direction * 3.0) < 1e-5, "{axis:?}: {point:?}");
+            }
+
+            let mut app = oblique_line_from(base);
+            let xf = test_xf(&app);
+            let z_point = base + Vec3::new(0.0, 0.0, 3.0);
+            let (_, tracked) = resolve_at(&mut app, z_point).expect("Z axis acquires");
+            assert_eq!(app.canvas.active_axis_3d, Some(cadcraft_geom::Axis3D::Z));
+            let outside = xf.to_screen3(z_point) + egui::vec2(20.0, 0.0);
+            let (_, free) = resolve_at_screen(&mut app, outside).expect("free cursor remains resolvable");
+            assert_eq!(app.canvas.active_axis_3d, None, "leaving the release radius must clear the guide");
+            assert!(free.dist(tracked) > 0.1, "released cursor must return to the untracked plane");
+            assert!(app.canvas.snap.is_none(), "leaving the guide must clear its snap candidate");
+        }
+
+        #[test]
+        fn soft_axis_tracking_has_axis_hysteresis_and_rejects_view_aligned_axes() {
+            let app = oblique_line_from(Vec3::ZERO);
+            let cam = app.session.camera();
+            let base = Vec3::ZERO;
+            let screen_x = cam.project_point(Vec3::new(1.0, 0.0, 0.0)) - cam.project_point(base);
+            let screen_y = cam.project_point(Vec3::new(0.0, 1.0, 0.0)) - cam.project_point(base);
+            let between = (screen_x.normalized() + screen_y.normalized()).normalized() * (12.0 / test_xf(&app).scale);
+            let q = cam.project_point(base) + between;
+            let retained_x = super::super::soft_axis_track(&cam, q, base, test_xf(&app).scale, Some(cadcraft_geom::Axis3D::X));
+            let retained_y = super::super::soft_axis_track(&cam, q, base, test_xf(&app).scale, Some(cadcraft_geom::Axis3D::Y));
+            assert_eq!(retained_x.map(|candidate| candidate.0), Some(cadcraft_geom::Axis3D::X));
+            assert_eq!(retained_y.map(|candidate| candidate.0), Some(cadcraft_geom::Axis3D::Y));
+            let first = super::super::soft_axis_track(&cam, q, base, test_xf(&app).scale, None).map(|candidate| candidate.0);
+            let second = super::super::soft_axis_track(&cam, q, base, test_xf(&app).scale, None).map(|candidate| candidate.0);
+            assert_eq!(first, second, "ambiguous projected axes must resolve deterministically");
+
+            let distant_base = Vec3::new(0.0, 0.0, 100.0);
+            let distant_ground = cam.project_point(Vec3::ZERO);
+            let low_zoom = 0.4;
+            let distant_z = super::super::soft_axis_track(&cam, distant_ground, distant_base, low_zoom, None);
+            assert!(
+                distant_z.is_some_and(|(axis, point, _)| axis == cadcraft_geom::Axis3D::Z && point.dist(Vec3::ZERO) < 1e-6),
+                "a visibly long axis remains trackable when one world unit is less than one pixel"
+            );
+
+            let x_dir = screen_x.normalized();
+            let x_normal = Vec2::new(-x_dir.y, x_dir.x);
+            for scale in [25.0, 50.0, 100.0] {
+                let seven_pixels = cam.project_point(base) + (x_dir * 30.0 + x_normal * 7.0) / scale;
+                let nine_pixels = cam.project_point(base) + (x_dir * 30.0 + x_normal * 9.0) / scale;
+                assert_eq!(
+                    super::super::soft_axis_track(&cam, seven_pixels, base, scale, None).map(|candidate| candidate.0),
+                    Some(cadcraft_geom::Axis3D::X),
+                    "the acquire radius is pixel-based at zoom scale {scale}"
+                );
+                assert!(
+                    super::super::soft_axis_track(&cam, nine_pixels, base, scale, None).is_none(),
+                    "outside the acquire radius at zoom scale {scale}"
+                );
+            }
+
+            let mut edge_on = cam;
+            edge_on.set_view_dir(Vec3::new(1.0, 0.0, 0.0));
+            let axis_projection = edge_on.project_point(Vec3::new(4.0, 0.0, 0.0));
+            assert!(
+                super::super::soft_axis_track(&edge_on, axis_projection, base, test_xf(&app).scale, None).is_none(),
+                "an axis near-parallel to the view must not acquire an unstable depth"
+            );
+        }
+
+        #[test]
+        fn real_3d_endpoint_snap_precedes_soft_axis_tracking() {
+            let mut app = oblique_line_from(Vec3::ZERO);
+            let endpoint = Vec3::new(0.0, 0.0, 3.0);
+            app.session.execute("line", &json!({"points": [[0.0, 0.0, 3.0], [8.0, 0.0, 3.0]]})).unwrap();
+            app.session.settings.osmode = cadcraft_engine::snap::mode::END;
+
+            let (_, point) = resolve_at(&mut app, endpoint).expect("spatial endpoint snap resolves");
+            let hit = app.canvas.snap.expect("endpoint snap must be preserved");
+            assert_eq!(hit.name, "Endpoint");
+            assert_eq!(hit.point3, Some(endpoint));
+            assert_eq!(app.canvas.active_axis_3d, None, "entity snap must outrank soft axis tracking");
+            assert_eq!(point, endpoint);
+        }
+
+        #[test]
+        fn locked_dynamic_input_precedes_the_ground_target() {
+            let base = Vec3::new(4.0, -3.0, 100.0);
+            let mut app = oblique_line_from(base);
+            app.session.settings.dynpi_cartesian = true;
+            app.cmd.buffer = "5,".into();
+            let mut xf = test_xf(&app);
+            xf.scale = 0.25;
+            let screen = xf.to_screen3(Vec3::new(base.x, base.y, 0.0));
+            let frame = crate::cmdline::dyn_frame(&app);
+            let resolved =
+                resolve_effective_point(&mut app, screen, &xf, &Context::default(), Some(base.xy()), frame).expect("locked input resolves");
+            assert!(!app.canvas.ground_target_acquired, "locked dynamic input must prevent automatic ground acquisition");
+            assert!((resolved.1.z - base.z).abs() < 1e-6, "dynamic input keeps the current continuation plane");
+        }
+
+        #[test]
+        fn explicit_and_dynamic_coordinates_keep_priority_over_axis_tracking() {
+            let base = Vec3::new(4.0, -3.0, 8.0);
+            let mut app = oblique_line_from(base);
+            app.session.settings.dynpi_cartesian = true;
+            app.cmd.buffer = "5,".into();
+            let (_, locked) = resolve_at(&mut app, base + Vec3::new(1.0, 0.0, 2.0)).expect("dynamic input resolves");
+            assert!((locked.x - (base.x + 5.0)).abs() < 1e-6);
+            assert_eq!(app.canvas.active_axis_3d, None, "a locked dynamic field suppresses soft tracking");
+
+            app.cmd.buffer = "5,6".into();
+            crate::cmdline::submit(&mut app);
+            assert_eq!(app.session.last_point3, Vec3::new(5.0, 6.0, base.z), "complete coordinates remain absolute");
+            app.cmd.buffer = "@2,3".into();
+            crate::cmdline::submit(&mut app);
+            assert_eq!(app.session.last_point3, Vec3::new(7.0, 9.0, base.z), "explicit @ coordinates remain relative");
+        }
+
+        #[test]
+        fn z_zero_capture_uses_the_elevated_base_and_clears_after_acceptance_and_cancel() {
+            let base = Vec3::new(2.0, -3.0, 10.0);
+            let mut app = oblique_line_from(base);
+            let mut cam = app.session.camera();
+            cam.target = base;
+            cam.height = 35.0;
+            app.session.set_camera(cam);
+
+            let ctx = Context::default();
+            let screen = Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0)));
+            let mut time = 0.0;
+            let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+                time += 0.05;
+                app.logic(&ctx);
+                let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+                let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+                out.textures_delta.clear();
+            };
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+
+            frame(&mut app, Vec::new());
+            let xf = app.canvas.xf.expect("canvas transform");
+            let zero = Vec3::new(base.x, base.y, 0.0);
+            let crossing = xf.to_screen3(zero) + egui::vec2(3.0, 0.0);
+            assert!(xf.rect.contains(crossing), "the Z=0 test point must be in the viewport");
+            frame(&mut app, vec![egui::Event::PointerMoved(crossing)]);
+            assert_eq!(app.canvas.active_axis_3d, Some(cadcraft_geom::Axis3D::Z));
+            let hit = app.canvas.snap.expect("Z=0 crossing is offered as a snap");
+            assert_eq!(hit.name, "Z=0");
+            assert_eq!(hit.point3, Some(zero));
+            let cursor = app.canvas.cursor3.expect("Z=0 cursor");
+            assert_eq!(cursor, zero, "cursor and marker use the exact global Z=0 point");
+            let preview = app
+                .session
+                .preview(app.canvas.cursor.expect("cursor"))
+                .into_iter()
+                .find_map(|entity| match entity.kind {
+                    cadcraft_doc::EntityKind::Line(line) => Some(line.b),
+                    _ => None,
+                })
+                .expect("vertical preview");
+            assert_eq!(preview, zero);
+
+            let away = xf.to_screen3(base + Vec3::new(0.0, 0.0, 2.0)) + egui::vec2(3.0, 0.0);
+            frame(&mut app, vec![egui::Event::PointerMoved(away)]);
+            assert_eq!(app.canvas.active_axis_3d, Some(cadcraft_geom::Axis3D::Z));
+            assert_ne!(app.canvas.snap.map(|snap| snap.name), Some("Z=0"), "the crossing snap releases while the axis remains acquired");
+            assert!(app.canvas.cursor3.is_some_and(|point| point.z > 0.1));
+
+            frame(&mut app, vec![egui::Event::PointerMoved(crossing)]);
+            let hit = app.canvas.snap.expect("moving back near the crossing reacquires Z=0");
+            assert_eq!(hit.point3, Some(zero));
+            assert_eq!(app.canvas.cursor3, Some(zero));
+            frame(&mut app, vec![button(crossing, true), button(crossing, false)]);
+            frame(&mut app, Vec::new());
+            assert_eq!(app.session.last_point3, zero, "click confirms the same Z=0 point as the preview");
+            assert_ne!(app.canvas.snap.map(|snap| snap.name), Some("Z=0"), "accepted candidates must not remain stale");
+
+            let next = xf.to_screen3(zero + Vec3::new(0.0, 0.0, 2.0)) + egui::vec2(3.0, 0.0);
+            frame(&mut app, vec![egui::Event::PointerMoved(next)]);
+            assert_eq!(app.canvas.active_axis_3d, Some(cadcraft_geom::Axis3D::Z), "the new base must be evaluated afresh");
+            assert_ne!(app.canvas.snap.map(|snap| snap.name), Some("Z=0"), "Z=0 must release away from its crossing");
+            assert!(app.canvas.cursor3.is_some_and(|point| point.z.abs() > 0.1));
+
+            frame(
+                &mut app,
+                vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+            );
+            frame(
+                &mut app,
+                vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+            );
+            assert!(app.session.running.is_none(), "Escape cancels LINE");
+            assert_eq!(app.canvas.active_axis_3d, None, "cancellation clears the guide");
+            assert_ne!(app.canvas.snap.map(|snap| snap.name), Some("Z=0"));
+        }
+
+        #[test]
+        fn axis_tracking_status_button_toggles_without_changing_ortho_or_v() {
+            let mut app = CadApp::new(Session::new(), Services::default());
+            app.session.cmdline("line").unwrap();
+            let ctx = Context::default();
+            let screen = Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0)));
+            let mut time = 0.0;
+            let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+                time += 0.05;
+                app.logic(&ctx);
+                let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+                let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+                out.textures_delta.clear();
+            };
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+
+            frame(&mut app, Vec::new());
+            let at = Pos2::new(1314.0, 987.0);
+            frame(&mut app, vec![egui::Event::PointerMoved(at)]);
+            frame(&mut app, vec![button(at, true), button(at, false)]);
+            frame(&mut app, Vec::new());
+            assert!(!app.session.settings.axistrack, "the visible 3D Axis Tracking button disables the feature");
+            assert!(!app.session.settings.orthomode);
+            assert!(!app.session.settings.zlock);
+
+            frame(&mut app, vec![egui::Event::PointerMoved(at)]);
+            frame(&mut app, vec![button(at, true), button(at, false)]);
+            frame(&mut app, Vec::new());
+            assert!(app.session.settings.axistrack, "the same control re-enables tracking");
+        }
+
+        #[test]
+        fn oblique_mouse_tracking_resolves_the_real_z_axis() {
+            let mut app = CadApp::new(Session::new(), Services::default());
+            app.session.execute("view.swiso", &json!({})).unwrap();
+            app.session.settings.osmode = 0;
+            app.session.settings.orthomode = false;
+            app.session.settings.zlock = false;
+            app.session.cmdline("line").unwrap();
+
+            let ctx = Context::default();
+            let screen = Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0)));
+            let mut time = 0.0;
+            let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+                time += 0.05;
+                app.logic(&ctx);
+                let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+                let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+                out.textures_delta.clear();
+            };
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+
+            frame(&mut app, Vec::new());
+            let xf = app.canvas.xf.expect("canvas transform");
+            let base_screen = Pos2::new(800.0, 500.0);
+            frame(&mut app, vec![egui::Event::PointerMoved(base_screen)]);
+            frame(&mut app, vec![button(base_screen, true), button(base_screen, false)]);
+            frame(&mut app, Vec::new());
+            assert!(app.session.current_prompt().and_then(|prompt| prompt.base3).is_some(), "mouse click must begin the continuation prompt");
+            let base = app.session.last_point3;
+
+            let target = xf.to_screen3(base + Vec3::new(0.0, 0.0, 2.0)) + egui::vec2(4.0, 0.0);
+            assert!(xf.rect.contains(target), "test target must be inside canvas: target={target:?}, rect={:?}", xf.rect);
+            frame(&mut app, vec![egui::Event::PointerMoved(target)]);
+            let resolved = app.canvas.cursor3.unwrap_or_else(|| panic!("oblique cursor resolves at {target:?}"));
+            assert!(
+                (resolved.x - base.x).abs() < 1e-6 && (resolved.y - base.y).abs() < 1e-6 && (resolved.z - (base.z + 2.0)).abs() < 1e-4,
+                "near-projection cursor must resolve onto the global +Z axis, got {resolved:?}"
+            );
+            assert_eq!(app.canvas.active_axis_3d, Some(cadcraft_geom::Axis3D::Z));
+
+            let preview = app
+                .session
+                .preview(app.canvas.cursor.expect("cursor"))
+                .into_iter()
+                .find_map(|entity| match entity.kind {
+                    cadcraft_doc::EntityKind::Line(line) => Some(line.b),
+                    _ => None,
+                })
+                .expect("line preview endpoint");
+            assert!(preview.dist(resolved) < 1e-6, "preview must use the acquired 3D point");
+
+            frame(&mut app, vec![button(target, true), button(target, false)]);
+            frame(&mut app, Vec::new());
+            assert!(app.session.last_point3.dist(resolved) < 1e-6, "mouse click must accept the previewed 3D point");
+            frame(
+                &mut app,
+                vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+            );
+            frame(
+                &mut app,
+                vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+            );
+            assert!(app.session.running.is_none(), "Enter with an empty buffer must finish LINE");
+            let line = app
+                .session
+                .doc()
+                .unwrap()
+                .space(&cadcraft_doc::Space::Model)
+                .unwrap()
+                .iter()
+                .find_map(|entity| match &entity.kind {
+                    cadcraft_doc::EntityKind::Line(line) => Some(line),
+                    _ => None,
+                })
+                .expect("confirmed line");
+            assert!(line.a.dist(base) < 1e-6 && line.b.dist(resolved) < 1e-6);
         }
 
         #[test]
@@ -3561,6 +4833,100 @@ mod hatch_pick_tests {
             app.session.start("line").unwrap();
             assert!(resolve_at(&mut app, Vec3::new(2.0, 14.0, 3.0)).is_none());
             assert!(app.canvas.parallel_plane_warning);
+        }
+
+        #[test]
+        fn global_z0_mode_projects_the_preview_and_consumes_one_mouse_point() {
+            let mut app = app_on_plane(DrawingPlane::XZ, 17.0);
+            app.session.settings.axistrack = true;
+            app.session.start("line").unwrap();
+            let base = Vec3::new(4.0, 17.0, 100.0);
+            app.session.input(Input::Point3(base)).unwrap();
+            app.session.input(Input::Keyword("Z=0".into())).unwrap();
+            app.session.settings.zlock = true;
+            app.session.settings.orthomode = true;
+
+            let target = Vec3::new(30.0, 40.0, 0.0);
+            let resolved = resolve_at(&mut app, target).expect("camera ray intersects global Z=0");
+            assert!(resolved.1.dist(target) < 1e-5, "expected {target:?}, got {:?}", resolved.1);
+            assert_eq!(resolved.1.z, 0.0);
+            assert_eq!(app.canvas.active_axis_3d, None, "soft axis tracking must not constrain the ground point");
+            super::super::store_cursor_resolution(&mut app, Some(resolved));
+            let preview = app.session.preview(resolved.0);
+            assert!(
+                preview
+                    .iter()
+                    .any(|entity| { matches!(&entity.kind, cadcraft_doc::EntityKind::Line(line) if line.a == base && line.b == resolved.1) }),
+                "preview and resolved point must use the same WCS endpoint"
+            );
+
+            app.session.input(Input::Point3(resolved.1)).unwrap();
+            assert!(!app.session.current_prompt().unwrap().global_xy_zero, "the mouse point consumes the option");
+            assert!(app.session.settings.zlock && app.session.settings.orthomode, "temporary plane mode does not change ORTHO or V");
+            assert_eq!(app.session.drawing_plane(), DrawingPlane::XZ);
+            assert!(app.session.drawing_plane_offset_is_manual());
+            assert_eq!(app.session.drawing_plane_offset(), 17.0);
+            let line = app.session.doc().unwrap().model.iter().last().unwrap();
+            let cadcraft_doc::EntityKind::Line(line) = &line.kind else { panic!("expected line") };
+            assert_eq!((line.a, line.b), (base, resolved.1));
+
+            app.session.settings.zlock = false;
+            app.session.settings.orthomode = false;
+            let normal_target = Vec3::new(50.0, 17.0, 30.0);
+            let (_, normal_point) = resolve_at(&mut app, normal_target).expect("normal work plane resumes");
+            assert!(normal_point.dist(normal_target) < 1e-5, "expected {normal_target:?}, got {normal_point:?}");
+        }
+
+        #[test]
+        fn global_z0_mode_rejects_elevated_snaps_and_accepts_real_ground_endpoints() {
+            let mut app = app_on_plane(DrawingPlane::XY, 12.0);
+            app.session.start("line").unwrap();
+            app.session.input(Input::Point3(Vec3::new(0.0, 0.0, 100.0))).unwrap();
+            app.session.input(Input::Keyword("Z=0".into())).unwrap();
+            app.session.settings.osmode = cadcraft_engine::snap::mode::END;
+            let elevated = Vec3::new(20.0, 30.0, 50.0);
+            let ground = Vec3::new(60.0, 40.0, 0.0);
+            for (a, b) in [(Vec3::new(10.0, 20.0, 30.0), elevated), (Vec3::new(55.0, 40.0, 0.0), ground)] {
+                app.session
+                    .doc_mut()
+                    .unwrap()
+                    .add(&cadcraft_doc::Space::Model, cadcraft_doc::Common::default(), cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a, b }))
+                    .unwrap();
+            }
+
+            let elevated_point = resolve_at(&mut app, elevated).expect("free ground ray still resolves");
+            assert_eq!(elevated_point.1.z, 0.0);
+            assert_ne!(elevated_point.1, elevated, "an elevated endpoint is never projected to the ground");
+            assert!(app.canvas.snap.is_none(), "elevated object snap is not accepted");
+
+            let ground_point = resolve_at(&mut app, ground).expect("ground endpoint resolves");
+            assert_eq!(ground_point.1, ground);
+            assert_eq!(app.canvas.snap.and_then(|hit| hit.point3), Some(ground), "a real ground endpoint may snap");
+        }
+
+        #[test]
+        fn parallel_global_z0_ray_clears_the_visible_cursor_instead_of_reusing_it() {
+            let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+            app.session.start("line").unwrap();
+            app.session.input(Input::Point3(Vec3::new(3.0, 4.0, 100.0))).unwrap();
+            app.session.input(Input::Keyword("Z=0".into())).unwrap();
+
+            let visible = resolve_at(&mut app, Vec3::new(20.0, 30.0, 0.0));
+            assert!(visible.is_some(), "oblique view has a ground-plane intersection");
+            app.canvas.cursor3 = visible.map(|(_, point)| point);
+
+            let mut camera = app.session.camera();
+            camera.set_preset("front");
+            app.session.set_camera(camera);
+            let point = resolve_at(&mut app, Vec3::new(20.0, 30.0, 0.0));
+            super::super::store_cursor_resolution(&mut app, point);
+            assert!(point.is_none(), "front view ray is parallel to global Z=0");
+            assert!(app.canvas.parallel_plane_warning);
+            assert!(app.canvas.cursor3.is_none(), "no old cursor may be reused");
+            assert!(app.canvas.snap.is_none());
+
+            app.session.input(Input::Keyword("Free".into())).unwrap();
+            assert!(!app.session.current_prompt().unwrap().global_xy_zero, "the visible prompt option can disable the mode");
         }
 
         #[test]

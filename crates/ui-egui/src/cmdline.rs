@@ -223,8 +223,17 @@ fn options_key(app: &mut CadApp, step: isize) -> bool {
 pub fn pick_option(app: &mut CadApp, keyword: String) {
     app.cmd.options = None;
     app.cmd.buffer.clear();
+    note_ground_target_keyword(app, &keyword);
     if let Err(e) = app.session.input(Input::Keyword(keyword)) {
         app.session.echo(e.to_string());
+    }
+}
+
+pub(crate) fn note_ground_target_keyword(app: &mut CadApp, keyword: &str) {
+    if app.session.running.as_ref().is_some_and(|running| running.id == "line")
+        && (keyword.eq_ignore_ascii_case("Free") || keyword.eq_ignore_ascii_case("F"))
+    {
+        crate::canvas::release_ground_target_until_exit(app);
     }
 }
 
@@ -402,6 +411,7 @@ pub fn submit(app: &mut CadApp) {
         }
     }
     crate::context_menu::note_input(app, &text);
+    note_ground_target_keyword(app, &text);
     if text.is_empty() {
         if let Err(e) = app.session.input(Input::Enter) {
             app.session.echo(e.to_string());
@@ -462,7 +472,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui, canvas: Rect) {
                 x += gw;
                 let kws = pr.keywords.clone();
                 for (i, k) in kws.iter().enumerate() {
-                    let g = p.layout_no_wrap(k.clone(), font.clone(), t.cmd_keyword);
+                    let g = p.layout_no_wrap(crate::i18n::prompt_keyword_label(k), font.clone(), t.cmd_keyword);
                     let r = Rect::from_min_size(pos2(x, bar.top() + 3.0), vec2(g.size().x, h - 6.0));
                     let resp = ui.interact(r, ui.id().with(("kw", i)), Sense::click());
                     if resp.hovered() {

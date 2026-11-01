@@ -53,6 +53,11 @@ pub fn specs() -> Vec<CommandSpec> {
             .enabled(always)
             .noundo()
             .transparent(),
+        CommandSpec::new("axistrack", "3D Axis Tracking", |s, p| toggle(s, p, |st| &mut st.axistrack, "3D Axis Tracking"))
+            .params("{on?: bool}")
+            .enabled(always)
+            .noundo()
+            .transparent(),
         CommandSpec::new("dynmode", "Dynamic Input", |s, p| toggle(s, p, |st| &mut st.dynmode, "Dynamic Input"))
             .key("F12")
             .params("{on?: bool}")

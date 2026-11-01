@@ -107,6 +107,7 @@ pub enum Icon {
     Grid,
     Snap,
     Ortho,
+    AxisTrack,
     Polar,
     Osnap,
     OTrack,
@@ -734,6 +735,12 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, dim: bool) {
         }
         Ortho => {
             pen.poly(&[(4.0, 3.0), (4.0, 20.0), (21.0, 20.0)], false, b);
+        }
+        AxisTrack => {
+            pen.l(12.0, 12.0, 21.0, 12.0);
+            pen.l(12.0, 12.0, 7.0, 4.0);
+            pen.l(12.0, 12.0, 12.0, 21.0);
+            pen.c(12.0, 12.0, 2.0, a);
         }
         Polar => {
             pen.l(4.0, 20.0, 21.0, 20.0);

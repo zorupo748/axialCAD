@@ -1487,6 +1487,49 @@ impl EntityKind {
             EntityKind::Unknown(_) => Vec::new(),
         }
     }
+
+    /// Grip points in WCS, preserving the elevation of 3D and elevated planar geometry.
+    pub fn grips3(&self) -> Vec<Vec3> {
+        let lift = |points: Vec<Vec2>, z: f64| points.into_iter().map(|p| Vec3::new(p.x, p.y, z)).collect();
+        match self {
+            EntityKind::Line(l) => vec![l.a, l.a * 0.5 + l.b * 0.5, l.b],
+            EntityKind::Point(p) => vec![p.p],
+            EntityKind::Circle(c) => lift(self.grips(), c.center.z),
+            EntityKind::Arc(a) => lift(self.grips(), a.center.z),
+            EntityKind::Ellipse(e) => lift(self.grips(), e.center.z),
+            EntityKind::LwPolyline(p) => lift(self.grips(), p.elevation),
+            EntityKind::Polyline3d(p) => p.points.clone(),
+            EntityKind::Helix(h) => vec![h.center, h.start_point(), h.end_point()],
+            EntityKind::Ray(r) | EntityKind::XLine(r) => vec![r.base, r.base + r.dir],
+            EntityKind::Dimension(d) => vec![d.p13, d.p14, d.defpt, d.text_mid],
+            EntityKind::Leader(l) => l.vertices.clone(),
+            EntityKind::MLeader(m) => m.leaders.iter().flatten().copied().chain(std::iter::once(m.landing)).collect(),
+            EntityKind::Solid(s) | EntityKind::Trace(s) => s.corners.to_vec(),
+            EntityKind::Face3d(f) => f.corners.to_vec(),
+            EntityKind::Solid3d(s) => {
+                if s.bbox.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![s.bbox.min, s.bbox.max, s.bbox.center()]
+                }
+            }
+            _ => {
+                let z = match self {
+                    EntityKind::Text(t) => t.insert.z,
+                    EntityKind::MText(t) => t.insert.z,
+                    EntityKind::AttDef(a) => a.text.insert.z,
+                    EntityKind::Insert(i) => i.insert.z,
+                    EntityKind::Hatch(h) => h.elevation,
+                    EntityKind::Viewport(v) => v.center.z,
+                    EntityKind::Image(i) => i.insert.z,
+                    EntityKind::Table(t) => t.insert.z,
+                    EntityKind::Tolerance(t) => t.insert.z,
+                    _ => 0.0,
+                };
+                lift(self.grips(), z)
+            }
+        }
+    }
 }
 
 fn transform_text(t: &mut Text, m: &Mat3, s: f64, rot: f64, mirror: bool) {

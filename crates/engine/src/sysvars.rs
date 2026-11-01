@@ -15,6 +15,7 @@ const SESSION_VARS: &[&str] = &[
     "OSNAPHATCH",
     "ANNOAUTOSCALE",
     "ORTHOMODE",
+    "AXISTRACK",
     "POLARMODE",
     "POLARANG",
     "POLARADDANG",
@@ -89,6 +90,7 @@ pub fn get(s: &Session, name: &str) -> Option<Value> {
         // Paper units per drawing unit of the current annotation scale (1:50 → 0.02).
         "CANNOSCALEVALUE" => json!(1.0 / s.doc().ok()?.current_anno_scale().factor()),
         "ORTHOMODE" => json!(i32::from(st.orthomode)),
+        "AXISTRACK" => json!(i32::from(st.axistrack)),
         "POLARMODE" => json!(st.polar_flags),
         "POLARADDANG" => json!(format_angle_list(&st.polaraddang)),
         "POLARDIST" => json!(st.polardist),
@@ -292,6 +294,7 @@ pub fn set(s: &mut Session, name: &str, v: &Value) -> Result<()> {
         "CANNOSCALE" => crate::cmd::annoscale::set_current(s, v.as_str().ok_or_else(bad)?)?,
         "CANNOSCALEVALUE" => return Err(EngineError::BadParams { cmd: "setvar".into(), msg: format!("{n} is read-only") }),
         "ORTHOMODE" => st.orthomode = as_bool(v).ok_or_else(bad)?,
+        "AXISTRACK" => st.axistrack = as_bool(v).ok_or_else(bad)?,
         "POLARMODE" => st.polar_flags = as_i(v).filter(|b| (0..=15).contains(b)).ok_or_else(bad)? as u32,
         "POLARADDANG" => {
             let text = v.as_str().map(str::to_string).or_else(|| as_f64(v).map(|f| f.to_string())).ok_or_else(bad)?;

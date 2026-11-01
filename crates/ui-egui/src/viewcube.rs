@@ -463,19 +463,68 @@ mod tests {
         // Click Top: returns to Top plan view
         click(&mut app, &ctx, l.center, egui::PointerButton::Primary);
         assert!(app.session.camera().is_plan(), "Top face sets Plan view");
+        click(&mut app, &ctx, l.center, egui::PointerButton::Primary);
+        assert_eq!(app.session.camera().view_name(), "BOTTOM", "the Top face toggles to its opposite when already in Plan");
+        assert!(app.session.camera().view_dir().near(cadcraft_geom::Vec3::new(0.0, 0.0, -1.0), 1e-6));
+        click(&mut app, &ctx, l.center, egui::PointerButton::Primary);
+        assert!(app.session.camera().is_plan(), "clicking the center again returns to Top");
 
         // Click Front (South edge): sets Front view
         click(&mut app, &ctx, l.center + vec2(0.0, 15.0), egui::PointerButton::Primary);
         assert_eq!(app.session.camera().view_name(), "FRONT", "South edge sets Front view");
+        assert!(app.session.camera().view_dir().near(cadcraft_geom::Vec3::new(0.0, -1.0, 0.0), 1e-6));
+
+        for (face_offset, compass_offset, preset, expected_view) in [
+            (vec2(0.0, -15.0), vec2(0.0, -l.ring), "back", cadcraft_geom::Vec3::new(0.0, 1.0, 0.0)),
+            (vec2(-15.0, 0.0), vec2(-l.ring, 0.0), "left", cadcraft_geom::Vec3::new(-1.0, 0.0, 0.0)),
+            (vec2(15.0, 0.0), vec2(l.ring, 0.0), "right", cadcraft_geom::Vec3::new(1.0, 0.0, 0.0)),
+        ] {
+            click(&mut app, &ctx, l.center + face_offset, egui::PointerButton::Primary);
+            assert_eq!(app.session.camera().view_name(), preset.to_ascii_uppercase());
+            assert!(app.session.camera().view_dir().near(expected_view, 1e-6), "{preset} face vector");
+            click(&mut app, &ctx, l.center + compass_offset, egui::PointerButton::Primary);
+            assert_eq!(app.session.camera().view_name(), preset.to_ascii_uppercase());
+            assert!(app.session.camera().view_dir().near(expected_view, 1e-6), "{preset} compass vector");
+        }
 
         // Click SW corner: sets SW ISO view
         click(&mut app, &ctx, l.center + vec2(-15.0, 15.0), egui::PointerButton::Primary);
         assert_eq!(app.session.camera().view_name(), "SW ISO", "SW corner sets SW ISO view");
 
+        let orbit_start = l.center + vec2(l.ring, 0.0);
+        let orbit_end = orbit_start + vec2(20.0, 12.0);
+        frame(&mut app, &ctx, vec![egui::Event::PointerMoved(orbit_start)]);
+        frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: orbit_start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        let before_orbit = app.session.camera();
+        frame(&mut app, &ctx, vec![egui::Event::PointerMoved(orbit_end)]);
+        frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos: orbit_end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        let after_orbit = app.session.camera();
+        assert!(after_orbit.azimuth > before_orbit.azimuth, "dragging right advances azimuth");
+        assert!(after_orbit.elevation < before_orbit.elevation, "dragging down lowers elevation");
+        assert_eq!(after_orbit.view_name(), "SW ISO", "the label continues to identify the camera after orbiting");
+
         // A click in the drawing still reaches the drawing.
         let empty = canvas(&app).center() + vec2(0.0, -300.0);
         click(&mut app, &ctx, empty, egui::PointerButton::Primary);
-        assert!(app.session.pending_window.is_some(), "an empty-space click starts a selection window");
+        assert!(app.canvas.selection_window.is_some(), "an empty-space click starts a screen-space selection window");
     }
 
     #[test]

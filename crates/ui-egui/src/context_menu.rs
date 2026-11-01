@@ -166,7 +166,7 @@ pub fn command_entries(app: &CadApp) -> Option<Vec<Vec<Entry>>> {
     let mut groups = vec![vec![typed("Enter", ENTER.into()), typed("Cancel", CANCEL.into())]];
     let recent: Vec<Entry> = app.cmd.recent_input.iter().rev().take(RECENT).map(|t| typed(t, format!("{TYPE}{t}"))).collect();
     push(&mut groups, sub("Recent Input", recent).into_iter().collect());
-    push(&mut groups, prompt.keywords.iter().map(|k| typed(k, format!("{KEYWORD}{k}"))).collect());
+    push(&mut groups, prompt.keywords.iter().map(|k| typed(&crate::i18n::prompt_keyword_label(k), format!("{KEYWORD}{k}"))).collect());
     if cadcraft_engine::pointmod::accepts(&prompt) {
         let mut snaps = Vec::new();
         for g in snap_entries(app) {
@@ -208,6 +208,7 @@ pub fn choose(app: &mut CadApp, id: &str) {
         app.cmdline(text);
     } else if let Some(k) = id.strip_prefix(KEYWORD) {
         app.cmd.buffer.clear();
+        crate::cmdline::note_ground_target_keyword(app, k);
         if let Err(e) = app.session.input(Input::Keyword(k.to_string())) {
             app.session.echo(e.to_string());
         }

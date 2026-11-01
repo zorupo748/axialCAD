@@ -1,7 +1,7 @@
 //! Tests for 3D coordinates in LINE, 2D tool compatibility and DXF persistence.
 
 use cadcraft_doc::EntityKind;
-use cadcraft_engine::Session;
+use cadcraft_engine::{Input, Session};
 use cadcraft_geom::{Vec2, Vec3};
 use serde_json::json;
 
@@ -202,4 +202,106 @@ fn line_mixed_2d_and_3d_endpoints() {
     let EntityKind::Line(l) = last_entity(&s) else { panic!("expected Line entity") };
     assert_eq!(l.a, Vec3::new(5.0, 15.0, 0.0));
     assert_eq!(l.b, Vec3::new(25.0, 35.0, 45.0));
+}
+
+#[test]
+fn line_global_z0_option_is_explicit_and_applies_to_one_point() {
+    let mut s = Session::new();
+    s.cmdline("line 4,6,100").unwrap();
+    let prompt = s.current_prompt().unwrap();
+    assert_eq!(prompt.match_keyword("z0").as_deref(), Some("Z=0"));
+    assert_eq!(prompt.match_keyword("v").as_deref(), Some("Vertical"));
+    assert_eq!(prompt.match_keyword("u").as_deref(), Some("Undo"));
+    assert!(!prompt.global_xy_zero);
+
+    s.cmdline("Z0").unwrap();
+    let active = s.current_prompt().unwrap();
+    assert!(active.global_xy_zero);
+    assert_eq!(active.message, "Specify next point on global Z=0");
+    assert_eq!(active.match_keyword("f").as_deref(), Some("Free"));
+
+    s.settings.zlock = true;
+    s.settings.orthomode = true;
+    s.input(Input::Point3(Vec3::new(30.0, 20.0, 0.0))).unwrap();
+    assert!(!s.current_prompt().unwrap().global_xy_zero, "a confirmed Z=0 point consumes the option");
+    assert!(s.settings.zlock && s.settings.orthomode, "the option does not change global constraints");
+
+    s.settings.zlock = false;
+    s.settings.orthomode = false;
+    s.input(Input::Point3(Vec3::new(45.0, 35.0, 12.0))).unwrap();
+    assert!(!s.current_prompt().unwrap().global_xy_zero, "the next segment uses the normal LINE prompt");
+    s.cmdline("").unwrap();
+    assert!(s.running.is_none(), "empty Enter finishes LINE and does not add a point");
+
+    let lines: Vec<_> = s
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .filter_map(|entity| match &entity.kind {
+            EntityKind::Line(line) => Some((line.a, line.b)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, vec![(Vec3::new(4.0, 6.0, 100.0), Vec3::new(30.0, 20.0, 0.0)), (Vec3::new(30.0, 20.0, 0.0), Vec3::new(45.0, 35.0, 12.0)),]);
+}
+
+#[test]
+fn line_global_z0_option_rejects_nonzero_z_and_can_be_disabled_or_cancelled() {
+    let mut s = Session::new();
+    s.cmdline("line 4,6,100").unwrap();
+    s.cmdline("Z=0").unwrap();
+    s.cmdline("30,20,50").unwrap();
+    assert!(s.current_prompt().unwrap().global_xy_zero, "a conflicting explicit 3D point is rejected");
+    assert!(s.log.last().is_some_and(|message| message.contains("not on global Z=0")), "the conflict is reported");
+    s.cmdline("30,20,0.000000001").unwrap();
+    assert!(s.current_prompt().unwrap().global_xy_zero, "even a small explicit nonzero Z is not silently projected");
+    assert_eq!(s.doc().unwrap().model.len(), 0, "a rejected endpoint adds no line");
+
+    s.cmdline("F").unwrap();
+    assert!(!s.current_prompt().unwrap().global_xy_zero, "Free disables the option without placing a point");
+    s.cmdline("30,20,50").unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), 1);
+    s.cancel();
+    assert!(s.running.is_none() && s.current_prompt().is_none(), "cancel clears LINE's temporary state");
+
+    s.cmdline("line 1,2,75").unwrap();
+    assert!(!s.current_prompt().unwrap().global_xy_zero, "a new LINE starts with the option disabled");
+    s.cancel();
+    assert!(s.running.is_none());
+
+    s.cmdline("line 1,2,75").unwrap();
+    s.cmdline("Z0").unwrap();
+    s.cancel();
+    assert!(s.running.is_none());
+    s.cmdline("line 1,2,75").unwrap();
+    assert!(!s.current_prompt().unwrap().global_xy_zero, "canceling an active mode leaves no state in the next LINE");
+    s.cmdline("Z0").unwrap();
+    s.cmdline("").unwrap();
+    assert!(s.running.is_none(), "Enter ends LINE while Z=0 mode is active");
+    s.cmdline("line 1,2,75").unwrap();
+    assert!(!s.current_prompt().unwrap().global_xy_zero, "finishing an active mode leaves no state in the next LINE");
+    s.cancel();
+}
+
+#[test]
+fn line_global_z0_option_preserves_explicit_2d_coordinate_semantics() {
+    let mut s = Session::new();
+    s.cmdline("line 4,6,100").unwrap();
+    s.cmdline("Z0").unwrap();
+    s.cmdline("@3,4").unwrap();
+    assert!(!s.current_prompt().unwrap().global_xy_zero, "typed 2D input explicitly exits the one-shot mode");
+    s.cmdline("").unwrap();
+
+    let lines: Vec<_> = s
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .filter_map(|entity| match &entity.kind {
+            EntityKind::Line(line) => Some((line.a, line.b)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, vec![(Vec3::new(4.0, 6.0, 100.0), Vec3::new(7.0, 10.0, 100.0))]);
 }
