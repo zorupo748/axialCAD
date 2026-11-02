@@ -49,6 +49,8 @@ pub struct Frame {
     pub cartesian: bool,
     /// DYNPICOORDS = 1: incomplete second and next entries are absolute instead of relative.
     pub absolute: bool,
+    /// Active drawing plane for 2D coordinate labels and projection.
+    pub plane: cadcraft_geom::DrawingPlane,
 }
 
 impl Frame {
@@ -82,12 +84,18 @@ impl Frame {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry<'a> {
     pub format: Format,
+    /// Explicit prefix typed by user: "" or "@" or "#".
+    pub prefix: &'a str,
     /// Text in the first box (X or distance).
     pub first: &'a str,
     /// A separator was typed: the first box is done and the second box is active.
     pub split: bool,
     /// Text in the second box (Y or angle).
     pub second: &'a str,
+    /// A second comma was typed: Cartesian 3D entry with third box.
+    pub split_z: bool,
+    /// Text in the third box (Z).
+    pub third: &'a str,
 }
 
 impl Entry<'_> {
@@ -106,40 +114,107 @@ impl Entry<'_> {
             Format::Polar => cadcraft_engine::units::parse_angle(t),
         }
     }
+    /// The locked second value, once a second comma follows it.
+    pub fn second_locked(&self) -> Option<f64> {
+        if self.split_z { cadcraft_engine::units::parse_distance(self.second) } else { None }
+    }
+    /// The value typed in the third box (Z).
+    pub fn third_value(&self) -> Option<f64> {
+        let t = self.third.trim();
+        if t.is_empty() {
+            return None;
+        }
+        cadcraft_engine::units::parse_distance(t)
+    }
 }
 
-/// Read `text` as a pointer-input entry, or `None` when it is something else (an explicit
-/// `@`/`#` entry, a keyword, a command name, a 3D point).
+/// Read `text` as a pointer-input entry, or `None` when it is something else (a keyword,
+/// command name, or unparseable text).
 pub fn parse<'a>(text: &'a str, frame: &Frame) -> Option<Entry<'a>> {
     let t = text.trim();
-    if t.starts_with('@') || t.starts_with('#') {
-        return None;
-    }
-    let entry = if let Some((a, b)) = t.split_once(',') {
-        Entry { format: Format::Cartesian, first: a.trim(), split: true, second: b.trim() }
-    } else if let Some((a, b)) = t.split_once('<') {
-        Entry { format: Format::Polar, first: a.trim(), split: true, second: b.trim() }
+    let (prefix, rest) = if let Some(r) = t.strip_prefix("@*") {
+        ("@*", r.trim())
+    } else if let Some(r) = t.strip_prefix("*@") {
+        ("*@", r.trim())
+    } else if let Some(r) = t.strip_prefix('@') {
+        let r = r.trim();
+        if let Some(r2) = r.strip_prefix('*') { ("@*", r2.trim()) } else { ("@", r) }
+    } else if let Some(r) = t.strip_prefix('#') {
+        ("#", r.trim())
+    } else if let Some(r) = t.strip_prefix('*') {
+        let r = r.trim();
+        if let Some(r2) = r.strip_prefix('@') { ("*@", r2.trim()) } else { ("*", r) }
     } else {
-        Entry { format: frame.default_format(), first: t, split: false, second: "" }
+        ("", t)
     };
-    let number_or_empty = |s: &str| s.is_empty() || cadcraft_engine::units::parse_distance(s).is_some();
-    if !number_or_empty(entry.first) || entry.second.contains([',', '<']) {
-        return None;
+
+    let number_or_empty = |s: &str| {
+        let s = s.trim();
+        s.is_empty() || s == "-" || s == "+" || s == "." || s == "-." || s == "+." || cadcraft_engine::units::parse_distance(s).is_some()
+    };
+    let angle_or_empty = |s: &str| {
+        let s = s.trim();
+        s.is_empty() || s == "-" || s == "+" || s == "." || s == "-." || s == "+." || cadcraft_engine::units::parse_angle(s).is_some()
+    };
+
+    if let Some((a, b)) = rest.split_once('<') {
+        if b.contains([',', '<']) {
+            return None;
+        }
+        if !number_or_empty(a) || !angle_or_empty(b) {
+            return None;
+        }
+        Some(Entry { format: Format::Polar, prefix, first: a.trim(), split: true, second: b.trim(), split_z: false, third: "" })
+    } else if rest.contains(',') {
+        let parts: Vec<&str> = rest.split(',').collect();
+        match parts.len() {
+            2 => {
+                let first = parts[0].trim();
+                let second = parts[1].trim();
+                if !number_or_empty(first) || !number_or_empty(second) {
+                    return None;
+                }
+                Some(Entry { format: Format::Cartesian, prefix, first, split: true, second, split_z: false, third: "" })
+            }
+            3 => {
+                let first = parts[0].trim();
+                let second = parts[1].trim();
+                let third = parts[2].trim();
+                if !number_or_empty(first) || !number_or_empty(second) || !number_or_empty(third) {
+                    return None;
+                }
+                Some(Entry { format: Format::Cartesian, prefix, first, split: true, second, split_z: true, third })
+            }
+            _ => None,
+        }
+    } else {
+        if !number_or_empty(rest) {
+            return None;
+        }
+        Some(Entry { format: frame.default_format(), prefix, first: rest.trim(), split: false, second: "", split_z: false, third: "" })
     }
-    if !entry.second.is_empty() && entry.second_value().is_none() {
-        return None;
-    }
-    Some(entry)
 }
 
-/// What Tab types: the separator for the format on show, when the first box is still active.
+/// What Tab types: the separator for the format on show, when a box is completed.
 pub fn tab_separator(text: &str, frame: &Frame) -> Option<char> {
-    parse(text, frame).filter(|e| !e.split).map(|e| e.format.separator())
+    let e = parse(text, frame)?;
+    if !e.split {
+        Some(e.format.separator())
+    } else if e.format == Format::Cartesian && !e.split_z && e.second_value().is_some() {
+        Some(',')
+    } else {
+        None
+    }
 }
 
-/// Whether Tab locks the second value too: both values are typed.
+/// Whether Tab locks the typed values: all active boxes have values.
 pub fn can_lock_second(text: &str, frame: &Frame) -> bool {
-    parse(text, frame).is_some_and(|e| e.split && e.first_locked().is_some() && e.second_value().is_some())
+    let Some(e) = parse(text, frame) else { return false };
+    if e.split_z {
+        e.first_locked().is_some() && e.second_locked().is_some() && e.third_value().is_some()
+    } else {
+        e.split && e.first_locked().is_some() && e.second_value().is_some()
+    }
 }
 
 /// Hold the cursor to the locked values: the first one once a separator follows it, and both
@@ -185,7 +260,15 @@ pub fn complete(entry: &Entry<'_>, frame: &Frame, cursor: Option<Vec2>, last: Ve
     if !entry.split {
         return None;
     }
-    if entry.format == Format::Cartesian && entry.first_locked().is_some() && entry.second_value().is_some() {
+    if entry.format == Format::Cartesian
+        && entry.split_z
+        && entry.first_locked().is_some()
+        && entry.second_locked().is_some()
+        && entry.third_value().is_some()
+    {
+        return None;
+    }
+    if entry.format == Format::Cartesian && !entry.split_z && entry.first_locked().is_some() && entry.second_value().is_some() {
         return None;
     }
     let first = entry.first_locked();
@@ -250,7 +333,7 @@ mod tests {
     use super::*;
 
     fn second_point(base: Vec2) -> Frame {
-        Frame { base: Some(base), cartesian: false, absolute: false }
+        Frame { base: Some(base), cartesian: false, absolute: false, plane: cadcraft_geom::DrawingPlane::XY }
     }
 
     fn sent(text: &str, frame: &Frame, cursor: Vec2, last: Vec2) -> Option<Vec2> {
@@ -296,7 +379,7 @@ mod tests {
 
     #[test]
     fn absolute_setting_measures_from_the_origin() {
-        let f = Frame { base: Some(Vec2::new(5.0, 5.0)), cartesian: true, absolute: true };
+        let f = Frame { base: Some(Vec2::new(5.0, 5.0)), cartesian: true, absolute: true, plane: cadcraft_geom::DrawingPlane::XY };
         assert!(close(sent("40,100", &f, Vec2::ZERO, Vec2::new(5.0, 5.0)), Vec2::new(40.0, 100.0)));
     }
 
@@ -472,4 +555,86 @@ mod tests {
         let e = parse("", &f).unwrap();
         assert_eq!((e.format, e.split), (Format::Polar, false));
     }
+
+    #[test]
+    fn third_coordinate_parses_shows_fields_and_supports_tab() {
+        let f = Frame::default();
+        // 1. "0,0,0"
+        let e = parse("0,0,0", &f).unwrap();
+        assert_eq!(e.format, Format::Cartesian);
+        assert_eq!(e.first, "0");
+        assert!(e.split);
+        assert_eq!(e.second, "0");
+        assert!(e.split_z);
+        assert_eq!(e.third, "0");
+        assert_eq!(e.first_locked(), Some(0.0));
+        assert_eq!(e.second_locked(), Some(0.0));
+        assert_eq!(e.third_value(), Some(0.0));
+
+        // 2. "10,20,30"
+        let e2 = parse("10,20,30", &f).unwrap();
+        assert_eq!(e2.first_locked(), Some(10.0));
+        assert_eq!(e2.second_locked(), Some(20.0));
+        assert_eq!(e2.third_value(), Some(30.0));
+
+        // 3. Negative and decimal values: "-10.5,-20.25,-30.75"
+        let e3 = parse("-10.5,-20.25,-30.75", &f).unwrap();
+        assert_eq!(e3.first_locked(), Some(-10.5));
+        assert_eq!(e3.second_locked(), Some(-20.25));
+        assert_eq!(e3.third_value(), Some(-30.75));
+
+        // 4. Relative "@5,5,10"
+        let e4 = parse("@5,5,10", &f).unwrap();
+        assert_eq!(e4.prefix, "@");
+        assert_eq!(e4.first_locked(), Some(5.0));
+        assert_eq!(e4.second_locked(), Some(5.0));
+        assert_eq!(e4.third_value(), Some(10.0));
+
+        // 5. Tab sequence from "10" -> "10," -> "10,20" -> "10,20,"
+        assert_eq!(tab_separator("10", &f), Some(','));
+        assert_eq!(tab_separator("10,20", &f), Some(','));
+        assert_eq!(tab_separator("10,20,", &f), None);
+        assert!(can_lock_second("10,20,30", &f));
+    }
+}
+
+/// Number of coordinate components currently present in the buffer.
+pub fn component_count(text: &str, frame: &Frame) -> usize {
+    let Some(e) = parse(text, frame) else { return 1 };
+    if e.split_z {
+        3
+    } else if e.split {
+        2
+    } else {
+        1
+    }
+}
+
+/// Update a specific component field in the buffer string.
+pub fn update_component_field(buffer: &str, field_idx: usize, ch: Option<char>, backspace: bool) -> String {
+    let t = buffer.trim();
+    let (prefix, rest) = if let Some(r) = t.strip_prefix("@*") {
+        ("@*", r)
+    } else if let Some(r) = t.strip_prefix("*@") {
+        ("*@", r)
+    } else if let Some(r) = t.strip_prefix('@') {
+        ("@", r)
+    } else if let Some(r) = t.strip_prefix('#') {
+        ("#", r)
+    } else if let Some(r) = t.strip_prefix('*') {
+        ("*", r)
+    } else {
+        ("", t)
+    };
+
+    let sep = if rest.contains('<') { '<' } else { ',' };
+    let mut parts: Vec<String> = rest.split(sep).map(str::to_string).collect();
+    if field_idx < parts.len() {
+        if backspace {
+            parts[field_idx].pop();
+        } else if let Some(c) = ch {
+            parts[field_idx].push(c);
+        }
+    }
+    format!("{prefix}{}", parts.join(&sep.to_string()))
 }

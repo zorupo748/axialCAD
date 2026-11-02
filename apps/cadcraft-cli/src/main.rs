@@ -846,7 +846,12 @@ fn cli() -> ExitCode {
         }),
         Some("mcp") => mcp(&rest),
         Some("--version" | "-V") => {
-            outln!("cadcraft-cli {}", env!("CARGO_PKG_VERSION"));
+            let sha = option_env!("CADCRAFT_BUILD_SHA");
+            if let Some(s) = sha {
+                outln!("cadcraft-cli {} ({s})", env!("CARGO_PKG_VERSION"));
+            } else {
+                outln!("cadcraft-cli {}", env!("CARGO_PKG_VERSION"));
+            }
             Ok(())
         }
         Some("--help" | "-h" | "help") => {

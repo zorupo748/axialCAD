@@ -205,11 +205,7 @@ impl OrbitCamera {
                 if v.z.abs() > 1e-4 {
                     let s = (offset - p0.z) / v.z;
                     let p = p0 + v * s;
-                    if p.x.is_finite() && p.y.is_finite() {
-                        Some(Vec3::new(p.x, p.y, offset))
-                    } else {
-                        None
-                    }
+                    if p.x.is_finite() && p.y.is_finite() { Some(Vec3::new(p.x, p.y, offset)) } else { None }
                 } else {
                     None
                 }
@@ -218,11 +214,7 @@ impl OrbitCamera {
                 if v.y.abs() > 1e-4 {
                     let s = (offset - p0.y) / v.y;
                     let p = p0 + v * s;
-                    if p.x.is_finite() && p.z.is_finite() {
-                        Some(Vec3::new(p.x, offset, p.z))
-                    } else {
-                        None
-                    }
+                    if p.x.is_finite() && p.z.is_finite() { Some(Vec3::new(p.x, offset, p.z)) } else { None }
                 } else {
                     None
                 }
@@ -231,11 +223,7 @@ impl OrbitCamera {
                 if v.x.abs() > 1e-4 {
                     let s = (offset - p0.x) / v.x;
                     let p = p0 + v * s;
-                    if p.y.is_finite() && p.z.is_finite() {
-                        Some(Vec3::new(offset, p.y, p.z))
-                    } else {
-                        None
-                    }
+                    if p.y.is_finite() && p.z.is_finite() { Some(Vec3::new(offset, p.y, p.z)) } else { None }
                 } else {
                     None
                 }

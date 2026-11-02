@@ -46,6 +46,7 @@ pub mod quick;
 pub mod ribbon;
 pub mod shortcut_menus;
 pub mod theme;
+pub mod thumbnails;
 pub mod viewcube;
 pub mod vpscale;
 
@@ -113,11 +114,24 @@ pub struct UiState {
     pub save_version: String,
     /// Drawings opened from a path, newest first (File ▸ Open Recent and the Start page).
     pub recent_files: Vec<String>,
+    /// Files pinned to the top of the Start page / recents.
+    #[serde(default)]
+    pub pinned_files: Vec<String>,
+    /// Whether the Start page displays drawings as a card grid (true) or list (false).
+    #[serde(default = "default_true")]
+    pub start_grid_view: bool,
+    /// Search filter text for recent files on the Start page.
+    #[serde(default)]
+    pub start_search: String,
     /// The folder the last APPLOAD file came from: the next pick starts there.
     pub last_lisp_dir: Option<String>,
     /// Whether CADCraft creates an initial drawing from template at startup without explicit files.
     #[serde(default)]
     pub startup_create_drawing: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A DXF/DWG file version (2000 … 2018).
@@ -128,9 +142,9 @@ pub use cadcraft_engine::cmd::file::Version as SaveVersion;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SaveFormat {
-    /// CADCraft's native format, and the default.
-    #[default]
     Dxf,
+    /// Default save format for new drawings.
+    #[default]
     Dwg,
 }
 
@@ -194,6 +208,9 @@ impl Default for UiState {
             save_format: SaveFormat::default(),
             save_version: SaveVersion::default().year().to_string(),
             recent_files: Vec::new(),
+            pinned_files: Vec::new(),
+            start_grid_view: true,
+            start_search: String::new(),
             last_lisp_dir: None,
             startup_create_drawing: false,
         }
@@ -275,6 +292,7 @@ pub struct CadApp {
     pub hatch_dlg: Option<hatchdlg::HatchDlgState>,
     /// The Edit Block Definition dialog ([`bedit`]).
     pub bedit: bedit::State,
+    pub thumbnail_textures: std::collections::HashMap<String, egui::TextureHandle>,
 }
 
 impl CadApp {
@@ -317,6 +335,7 @@ impl CadApp {
             alias_dlg: None,
             hatch_dlg: None,
             bedit: bedit::State::default(),
+            thumbnail_textures: std::collections::HashMap::new(),
         }
     }
 
@@ -347,11 +366,19 @@ impl CadApp {
             return r;
         }
         let r = self.session.execute(id, &params).map_err(|e| e.to_string());
-        if let Ok(v) = &r
-            && let Some(m) = v.get("message").and_then(Value::as_str)
-        {
-            for l in m.lines() {
-                self.session.echo(l.to_string());
+        if let Ok(v) = &r {
+            if id == "qsave" || id == "saveas" || id == "save" {
+                let doc_and_path = self.session.state().ok().and_then(|st| st.path.clone().map(|p| (st.doc.clone(), st.view(), p)));
+                if let Some((doc, view, p)) = doc_and_path {
+                    self.remember_recent(p.clone());
+                    crate::thumbnails::update_thumbnail(&doc, Some(view), &p);
+                    self.invalidate_thumbnail(&p);
+                }
+            }
+            if let Some(m) = v.get("message").and_then(Value::as_str) {
+                for l in m.lines() {
+                    self.session.echo(l.to_string());
+                }
             }
         }
         if let Err(e) = &r {
@@ -391,9 +418,29 @@ impl CadApp {
                 return None;
             }
         }
-        let e = self.session.cmdline(text).err()?.to_string();
-        self.session.echo(e.clone());
-        Some(e)
+        let err = self.session.cmdline(text).err();
+        if let Some(e) = err {
+            let msg = e.to_string();
+            self.session.echo(msg.clone());
+            return Some(msg);
+        }
+        let first_word = text.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        if first_word == "qsave" || first_word == "saveas" || first_word == "save" {
+            let doc_and_path = if let Ok(st) = self.session.state()
+                && let Some(p) = &st.path
+                && !st.is_dirty()
+            {
+                Some((st.doc.clone(), st.view(), p.clone()))
+            } else {
+                None
+            };
+            if let Some((doc, view, p)) = doc_and_path {
+                self.remember_recent(p.clone());
+                crate::thumbnails::update_thumbnail(&doc, Some(view), &p);
+                self.invalidate_thumbnail(&p);
+            }
+        }
+        None
     }
 
     /// The theme the interface shows now (the choice resolved against the OS appearance).
@@ -419,8 +466,18 @@ impl CadApp {
         if self.spacemouse.settings != spacemouse::Settings::default() {
             prefs["spacemouse"] = json!(self.spacemouse.settings);
         }
+        let qnew = cadcraft_engine::cmd::file::qnew_template();
+        if !qnew.is_empty() {
+            prefs["defaultTemplate"] = json!(qnew);
+        }
         if !self.ui.recent_files.is_empty() {
             prefs["recentFiles"] = json!(self.ui.recent_files);
+        }
+        if !self.ui.pinned_files.is_empty() {
+            prefs["pinnedFiles"] = json!(self.ui.pinned_files);
+        }
+        if !self.ui.start_grid_view {
+            prefs["startGridView"] = json!(false);
         }
         if let Some(dir) = &self.ui.last_lisp_dir {
             prefs["lispDir"] = json!(dir);
@@ -461,8 +518,17 @@ impl CadApp {
         if let Some(v) = v.get("saveVersion").and_then(Value::as_str).and_then(SaveVersion::parse) {
             self.ui.save_version = v.year().to_string();
         }
+        if let Some(tmpl) = v.get("defaultTemplate").and_then(Value::as_str) {
+            cadcraft_engine::cmd::file::set_qnew_template(tmpl);
+        }
         if let Some(files) = v.get("recentFiles").and_then(Value::as_array) {
             self.ui.recent_files = files.iter().filter_map(Value::as_str).filter(|p| !p.is_empty()).take(RECENT_FILES).map(str::to_string).collect();
+        }
+        if let Some(pinned) = v.get("pinnedFiles").and_then(Value::as_array) {
+            self.ui.pinned_files = pinned.iter().filter_map(Value::as_str).filter(|p| !p.is_empty()).map(str::to_string).collect();
+        }
+        if let Some(grid) = v.get("startGridView").and_then(Value::as_bool) {
+            self.ui.start_grid_view = grid;
         }
         if let Some(dir) = v.get("lispDir").and_then(Value::as_str).filter(|d| !d.is_empty()) {
             self.ui.last_lisp_dir = Some(dir.to_string());
@@ -629,9 +695,19 @@ impl CadApp {
             Ok(v) => {
                 self.ui.start_tab = false;
                 self.canvas.zoom_pending = true;
-                let doc = v.get("index").and_then(Value::as_u64).and_then(|i| self.session.docs.get(usize::try_from(i).ok()?));
-                if let Some(path) = doc.and_then(|d| d.path.clone()) {
-                    self.remember_recent(path);
+                let doc_idx = v.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());
+                let saved_path = if let Some(i) = doc_idx
+                    && let Some(d) = self.session.docs.get(i)
+                    && let Some(p) = &d.path
+                {
+                    crate::thumbnails::update_thumbnail(&d.drawing(), Some(d.view()), p);
+                    Some(p.clone())
+                } else {
+                    None
+                };
+                if let Some(path) = saved_path {
+                    self.remember_recent(path.clone());
+                    self.invalidate_thumbnail(&path);
                 }
                 // A partial read (DWG records left out) shows in the status bar too, not only on
                 // the command line.
@@ -647,11 +723,40 @@ impl CadApp {
     }
 
     /// Put `path` first in File ▸ Open Recent and on the Start page.
-    fn remember_recent(&mut self, path: String) {
+    pub fn remember_recent(&mut self, path: String) {
         let recent = &mut self.ui.recent_files;
         recent.retain(|p| *p != path);
         recent.insert(0, path);
         recent.truncate(RECENT_FILES);
+    }
+
+    /// Remove `path` from recents and pinned files.
+    pub fn forget_recent(&mut self, path: &str) {
+        self.ui.recent_files.retain(|p| p != path);
+        self.ui.pinned_files.retain(|p| p != path);
+        self.thumbnail_textures.remove(path);
+    }
+
+    /// Invalidate in-memory texture handle for `path` after thumbnail PNG update.
+    pub fn invalidate_thumbnail(&mut self, path: &str) {
+        self.thumbnail_textures.remove(path);
+    }
+
+    /// Prune in-memory texture cache to prevent unbounded growth.
+    pub fn prune_thumbnail_textures(&mut self) {
+        const MAX_TEXTURES: usize = 32;
+        if self.thumbnail_textures.len() > MAX_TEXTURES {
+            self.thumbnail_textures.retain(|p, _| self.ui.pinned_files.contains(p) || self.ui.recent_files.contains(p));
+        }
+    }
+
+    /// Toggle pin state for `path`.
+    pub fn toggle_pinned(&mut self, path: &str) {
+        if let Some(pos) = self.ui.pinned_files.iter().position(|p| p == path) {
+            self.ui.pinned_files.remove(pos);
+        } else {
+            self.ui.pinned_files.push(path.to_string());
+        }
     }
 
     /// Per-frame logic before layout.
@@ -948,7 +1053,7 @@ mod tests {
         frame(&mut a, &ctx, None);
         assert_eq!(Tokens::get(), Tokens::of(theme::SYSTEM_FALLBACK), "no OS appearance: the documented fallback");
         assert_eq!(a.ui.theme, ThemePref::System);
-        assert_eq!(a.prefs_json(), r#"{"animations":"system","interfaceLanguage":"auto","saveFormat":"dxf","saveVersion":"2018","theme":"system"}"#);
+        assert_eq!(a.prefs_json(), r#"{"animations":"system","interfaceLanguage":"auto","saveFormat":"dwg","saveVersion":"2018","theme":"system"}"#);
     }
 
     #[test]
@@ -970,21 +1075,23 @@ mod tests {
     #[test]
     fn default_save_format_persists_and_names_new_drawings() {
         let mut a = app();
-        assert_eq!(a.ui.save_format, SaveFormat::Dxf, "default keeps DXF, CADCraft's native format");
+        assert_eq!(a.ui.save_format, SaveFormat::Dwg, "default is DWG for new drawings");
         assert!(a.run("ui.saveformat", json!({ "format": "pdf" })).is_err());
-        assert_eq!(a.run("ui.saveformat", json!({ "format": "DWG" })).ok(), Some(json!({ "saveFormat": "dwg" })));
-        assert_eq!(a.run("ui.saveformat", json!({})).ok(), Some(json!({ "saveFormat": "dwg" })), "no format: report it");
+        assert_eq!(a.run("ui.saveformat", json!({ "format": "DXF" })).ok(), Some(json!({ "saveFormat": "dxf" })));
+        assert_eq!(a.run("ui.saveformat", json!({})).ok(), Some(json!({ "saveFormat": "dxf" })), "no format: report it");
         // Saved and restored by the host; bad values are ignored.
         let mut b = app();
         b.load_prefs(&a.prefs_json());
-        assert_eq!(b.ui.save_format, SaveFormat::Dwg);
+        assert_eq!(b.ui.save_format, SaveFormat::Dxf);
         b.load_prefs(r#"{"saveFormat": "svg"}"#);
-        assert_eq!(b.ui.save_format, SaveFormat::Dwg);
+        assert_eq!(b.ui.save_format, SaveFormat::Dxf);
         // The menu items reach the same setting, and resetting the palettes keeps it.
+        b.start("ui.saveformat.dwg");
+        assert_eq!(b.ui.save_format, SaveFormat::Dwg);
         b.start("ui.saveformat.dxf");
+        b.start("ui.resetpalettes");
         assert_eq!(b.ui.save_format, SaveFormat::Dxf);
         b.start("ui.saveformat.dwg");
-        b.start("ui.resetpalettes");
         assert_eq!(b.ui.save_format, SaveFormat::Dwg);
         // Untitled drawings get the format's extension; files keep their own.
         assert_eq!(SaveFormat::Dwg.suggested_name(Some("Drawing1")), "Drawing1.dwg");

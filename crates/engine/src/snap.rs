@@ -1128,22 +1128,10 @@ pub fn snap_3d_line_endpoints(
         return None;
     }
 
-    candidates.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.1.cmp(&b.1))
-            .then_with(|| a.2.cmp(&b.2))
-    });
+    candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.cmp(&b.2)));
 
     let chosen = candidates[cycle_idx % candidates.len()];
-    Some(SnapHit {
-        point: chosen.3.xy(),
-        point3: Some(chosen.3),
-        mode: mode::END,
-        name: "Endpoint",
-        viewport: None,
-        deferred: None,
-    })
+    Some(SnapHit { point: chosen.3.xy(), point3: Some(chosen.3), mode: mode::END, name: "Endpoint", viewport: None, deferred: None })
 }
 
 #[cfg(test)]

@@ -1956,7 +1956,14 @@ fn resolve_global_z0_point(app: &mut CadApp, hp: Pos2, xf: &Xf, dyn_frame: Optio
         && entries.first_locked().is_some()
     {
         let point = crate::dyninput::constrain(&entries, &frame, raw.xy(), app.cmd.second_locked());
-        let point3 = Vec3::new(point.x, point.y, 0.0);
+        let point3 = if entries.split_z
+            && let Some(z) = entries.third_value()
+        {
+            let base_z = if entries.prefix == "@" || frame.relative() { app.session.last_point3.z } else { 0.0 };
+            Vec3::new(point.x, point.y, base_z + z)
+        } else {
+            Vec3::new(point.x, point.y, 0.0)
+        };
         app.canvas.parallel_plane_warning = false;
         return point3.is_finite().then_some((point, point3));
     }
@@ -2125,7 +2132,15 @@ fn resolve_effective_point(
         app.canvas.track = None;
         app.canvas.active_axis_3d = None;
         app.canvas.axis_track_z_zero = false;
-        let dyn_p3 = plane.embed(eff, dyn_continuation_offset);
+        let dyn_p3 = if e.split_z
+            && let Some(z) = e.third_value()
+        {
+            let base = if e.prefix == "@" || f.relative() { prompt_base3.unwrap_or(Vec3::ZERO) } else { Vec3::ZERO };
+            let p_unrel = Vec3::new(eff.x, eff.y, z);
+            base + p_unrel
+        } else {
+            plane.embed(eff, dyn_continuation_offset)
+        };
         return Some((eff, dyn_p3));
     }
     let grip_held = crate::grip_dyn::constrain(app, raw2);
@@ -3551,7 +3566,19 @@ fn dynamic_input(app: &mut CadApp, p: &egui::Painter, hover: Pos2, fields: bool)
         && let Some(c) = app.canvas.cursor
     {
         let message = if show_prompt { crate::i18n::t(&prompt.message) } else { "" };
-        let r = dynamic_input_boxes(p, at, message, &f, &e, c, app.cmd.second_locked(), options, length_units(&app.session), zlock_info);
+        let r = dynamic_input_boxes(
+            p,
+            at,
+            message,
+            &f,
+            &e,
+            c,
+            app.cmd.second_locked(),
+            app.cmd.dyn_active_field,
+            options,
+            length_units(&app.session),
+            zlock_info,
+        );
         options_menu(app, p, r, hover);
         return;
     }
@@ -3642,10 +3669,27 @@ fn options_menu(app: &mut CadApp, p: &egui::Painter, r: Rect, hover: Pos2) {
     }
 }
 
-/// The tooltip background, matching the command line bar; returns its rectangle.
+/// The tooltip background, matching the command line bar; returns its rectangle clamped within canvas.
 fn tooltip_frame(p: &egui::Painter, at: Pos2, size: egui::Vec2) -> Rect {
     let t = Tokens::get();
-    let r = Rect::from_min_size(at + vec2(18.0, -size.y - 14.0), size);
+    let clip = p.clip_rect();
+    let pad = 4.0;
+    let clamped_w = size.x.min((clip.width() - 2.0 * pad).max(1.0));
+    let clamped_h = size.y.min((clip.height() - 2.0 * pad).max(1.0));
+
+    let mut min_x = at.x + 18.0;
+    if min_x + clamped_w > clip.max.x - pad {
+        min_x = at.x - clamped_w - 18.0;
+    }
+    min_x = min_x.clamp(clip.min.x + pad, (clip.max.x - clamped_w - pad).max(clip.min.x + pad));
+
+    let mut min_y = at.y - clamped_h - 14.0;
+    if min_y < clip.min.y + pad {
+        min_y = at.y + 18.0;
+    }
+    min_y = min_y.clamp(clip.min.y + pad, (clip.max.y - clamped_h - pad).max(clip.min.y + pad));
+
+    let r = Rect::from_min_size(pos2(min_x, min_y), vec2(clamped_w, clamped_h));
     p.rect_filled(r, 3.0, t.cmd_bg);
     p.rect_stroke(r, 3.0, Stroke::new(1.0, t.cmd_border), egui::StrokeKind::Inside);
     r
@@ -3664,6 +3708,7 @@ fn dynamic_input_boxes(
     e: &crate::dyninput::Entry<'_>,
     cursor: Vec2,
     second_locked: bool,
+    active_field: Option<usize>,
     options: bool,
     (lu, lp): (i64, i64),
     zlock_info: Option<(Vec3, Vec3)>,
@@ -3685,30 +3730,60 @@ fn dynamic_input_boxes(
         Format::Cartesian => dist(live_second),
         Format::Polar => format!("{}°", (live_second.to_degrees() * 10.0).round() / 10.0),
     };
-    let (label_first, label_second) = match e.format {
-        Format::Cartesian => ("X", "Y"),
-        Format::Polar => ("", "<"),
+    let (label_first, label_second, label_third) = match e.format {
+        Format::Cartesian => {
+            if e.split_z {
+                ("X", "Y", "Z")
+            } else {
+                match f.plane {
+                    cadcraft_geom::DrawingPlane::XY => ("X", "Y", "Z"),
+                    cadcraft_geom::DrawingPlane::XZ => ("X", "Z", "Y"),
+                    cadcraft_geom::DrawingPlane::YZ => ("Y", "Z", "X"),
+                }
+            }
+        }
+        Format::Polar => ("", "<", ""),
     };
+    let count = if e.split_z {
+        3
+    } else if e.split {
+        2
+    } else {
+        1
+    };
+    let cur_active = active_field.unwrap_or(count - 1).min(count - 1);
     // (label, text, typed, locked, active)
-    let cells = [
+    let mut cells = vec![
         (
             label_first,
             if e.first.is_empty() { dist(live_first) } else { e.first.to_owned() },
             !e.first.is_empty(),
             e.first_locked().is_some(),
-            !e.split,
+            cur_active == 0,
         ),
         (
             label_second,
             if e.second.is_empty() { live_second } else { e.second.to_owned() },
             !e.second.is_empty(),
-            second_locked,
-            e.split && !second_locked,
+            if e.split_z { e.second_locked().is_some() } else { second_locked },
+            cur_active == 1,
         ),
     ];
+    if e.split_z {
+        let live_z = zlock_info.map(|(c3, _)| c3.z).unwrap_or(0.0);
+        let third_val = if e.third.is_empty() { dist(live_z) } else { e.third.to_owned() };
+        cells.push((label_third, third_val, !e.third.is_empty(), second_locked && e.third_value().is_some(), cur_active == 2));
+    }
 
     let msg = p.layout_no_wrap(message.to_owned(), font.clone(), t.text_dim);
-    let marker = p.layout_no_wrap(if f.relative() { "@".to_owned() } else { String::new() }, font.clone(), t.text_faint);
+    let marker_text = if !e.prefix.is_empty() {
+        e.prefix.to_owned()
+    } else if f.relative() {
+        "@".to_owned()
+    } else {
+        String::new()
+    };
+    let marker = p.layout_no_wrap(marker_text, font.clone(), t.text_faint);
     let lock_w = 10.0;
     let laid: Vec<_> = cells
         .into_iter()

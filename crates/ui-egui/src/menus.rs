@@ -5,6 +5,35 @@ use serde_json::{Value, json};
 
 use crate::CadApp;
 
+/// Check if `path` is a valid drawing/template path (.dwt, .dwg, or .dxf).
+pub fn is_valid_template_path(path: &str) -> bool {
+    let p = path.trim();
+    if p.is_empty() || p == "." {
+        return false;
+    }
+    let p_path = std::path::Path::new(p);
+    let Some(ext) = p_path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    let ext_lower = ext.to_ascii_lowercase();
+    if ext_lower != "dwt" && ext_lower != "dxf" && ext_lower != "dwg" {
+        return false;
+    }
+    if let Ok(meta) = std::fs::metadata(p_path) {
+        if meta.is_dir() {
+            return false;
+        }
+    }
+    if p_path.is_file() {
+        if let Ok(bytes) = std::fs::read(p_path) {
+            if bytes.is_empty() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// The top-level menus, in order.
 pub const MENUS: &[&str] = &["File", "Edit", "View", "Insert", "Format", "Tools", "Draw", "Dimension", "Modify", "Window", "Help"];
 
@@ -22,6 +51,8 @@ pub const UI_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("ui.dock.reset", "Reset Panel Layout", &["Window", "Reset Panel Layout"], None),
     ("ui.open", "Open...", &[], Some("Cmd+O")),
     ("ui.newtemplate", "New from Template...", &["File", "New from Template..."], None),
+    ("ui.defaulttemplate.choose", "Choose Default Template...", &[], None),
+    ("ui.defaulttemplate.clear", "Clear Default Template", &[], None),
     ("ui.saveas", "Save As...", &[], None),
     ("ui.sample", "Open Sample Drawing", &["Help", "Open Sample Drawing"], None),
     ("ui.toggle.toolsets", "Tool Sets", &["Window", "Tool Sets"], Some("Cmd+3")),
@@ -182,11 +213,29 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
             app.cmdline(&path);
             Ok(Value::Null)
         }
-        // Pick a template (.dwt or .dxf) and start a new drawing from it.
+        // Pick a template (.dwt or .dxf) and start a new drawing from it without modifying default template.
         "ui.newtemplate" => {
             if let Some(p) = app.services.pick_open.as_ref().and_then(|f| f()) {
-                return Some(app.session.execute("new", &json!({ "template": p })).map_err(|e| e.to_string()));
+                let r = app.session.execute("new", &json!({ "template": p })).map_err(|e| e.to_string());
+                if r.is_ok() {
+                    app.ui.start_tab = false;
+                }
+                return Some(r);
             }
+            Ok(Value::Null)
+        }
+        // Choose default template: validates selection, sets preference, persists, creates no document.
+        "ui.defaulttemplate.choose" => {
+            if let Some(p) = app.services.pick_open.as_ref().and_then(|f| f()) {
+                if is_valid_template_path(&p) {
+                    let _ = app.run("options", json!({ "QNEWTEMPLATE": p }));
+                }
+            }
+            Ok(Value::Null)
+        }
+        // Clear default template: resets and persists preference.
+        "ui.defaulttemplate.clear" => {
+            let _ = app.run("options", json!({ "QNEWTEMPLATE": "" }));
             Ok(Value::Null)
         }
         // RECOVER from the menu or typed: pick the file. Without a picker the engine asks for the
@@ -202,7 +251,15 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
             let title = app.session.state().map(|s| s.title.clone()).ok();
             let name = app.ui.save_format.suggested_name(title.as_deref());
             if let Some(p) = app.services.pick_save.as_ref().and_then(|f| f(&name)) {
-                return Some(app.session.execute("saveas", &saveas_params(&app.ui, &app.session, &p)).map_err(|e| e.to_string()));
+                let res = app.session.execute("saveas", &saveas_params(&app.ui, &app.session, &p)).map_err(|e| e.to_string());
+                if res.is_ok() {
+                    app.remember_recent(p.clone());
+                    if let Ok(st) = app.session.state() {
+                        crate::thumbnails::update_thumbnail(&st.doc, Some(st.view()), &p);
+                        app.invalidate_thumbnail(&p);
+                    }
+                }
+                return Some(res);
             }
             Ok(Value::Null)
         }

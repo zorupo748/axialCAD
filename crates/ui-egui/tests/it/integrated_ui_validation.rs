@@ -1324,6 +1324,10 @@ fn test_default_template_and_startup_options_roundtrip() {
     assert!(profile.contains("office.dwt"));
     assert!(profile.contains("startupCreateDrawing"));
 
+    // CORRECTION: Clear global value before restoring, proving that restoration actually works!
+    cadcraft_engine::cmd::file::set_qnew_template("");
+    assert_eq!(cadcraft_engine::cmd::file::qnew_template(), "");
+
     let mut restored_app = CadApp::new(Session::default(), Services::default());
     restored_app.load_profile(&profile);
     assert_eq!(cadcraft_engine::cmd::file::qnew_template(), "/test/templates/office.dwt");
@@ -1333,4 +1337,340 @@ fn test_default_template_and_startup_options_roundtrip() {
     app.run("options", json!({"QNEWTEMPLATE": "", "startupCreateDrawing": false})).unwrap();
     assert_eq!(cadcraft_engine::cmd::file::qnew_template(), "");
     assert!(!app.ui.startup_create_drawing);
+}
+
+#[test]
+fn test_template_personal_flow_and_independence() {
+    let _restore = RestoreQnewTemplate(cadcraft_engine::cmd::file::qnew_template());
+    let mut app = CadApp::new(Session::default(), Services::default());
+
+    // 1. Set a personal template via options
+    let template_path = "/tmp/test_user_template.dwt";
+    app.run("options", json!({ "QNEWTEMPLATE": template_path })).unwrap();
+    assert_eq!(cadcraft_engine::cmd::file::qnew_template(), template_path);
+
+    // 2. Profile persistence roundtrip
+    let prof = app.profile_json();
+    // Clear global value first to prove restoration from profile
+    cadcraft_engine::cmd::file::set_qnew_template("");
+    assert_eq!(cadcraft_engine::cmd::file::qnew_template(), "");
+    let mut restored = CadApp::new(Session::default(), Services::default());
+    restored.load_profile(&prof);
+    assert_eq!(cadcraft_engine::cmd::file::qnew_template(), template_path);
+
+    // 3. Fallback when template file is missing: NEW starts a clean untitled blank drawing
+    let _res = restored.session.execute("new", &json!({})).unwrap();
+    let st = restored.session.state().unwrap();
+    assert!(st.title.starts_with("Drawing"));
+    assert!(st.path.is_none(), "new drawing has no file path set; cannot overwrite template");
+    assert!(restored.session.execute("qsave", &json!({})).is_err(), "QSAVE must require SAVEAS");
+
+    // 4. Cancel file selection or options dialog does not change preference
+    cadcraft_engine::cmd::file::set_qnew_template(template_path);
+    // Clearing sets empty
+    app.run("options", json!({ "QNEWTEMPLATE": "" })).unwrap();
+    assert_eq!(cadcraft_engine::cmd::file::qnew_template(), "");
+}
+
+#[test]
+fn test_dynamic_input_3d_coordinates_and_geometry() {
+    let mut app = CadApp::new(Session::default(), Services::default());
+    app.session.new_drawing(true);
+
+    // Start LINE command
+    app.session.cmdline("line").unwrap();
+
+    // 1. Enter 0,0,0
+    app.cmdline(
+        "0,0,0
+",
+    );
+
+    // 2. Enter 10,20,30
+    app.cmdline(
+        "10,20,30
+",
+    );
+
+    // 3. Enter @5,5,10
+    app.cmdline(
+        "@5,5,10
+",
+    );
+
+    // Finish line with Enter
+    app.cmdline(
+        "
+",
+    );
+
+    let doc = app.session.doc().unwrap();
+    let lines: Vec<_> = doc
+        .model
+        .iter()
+        .filter_map(|e| match &e.kind {
+            cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(lines.len(), 2, "must create two 3D line segments");
+    // First segment: (0, 0, 0) -> (10, 20, 30)
+    assert!(lines[0].a.near(cadcraft_geom::Vec3::new(0.0, 0.0, 0.0), 1e-5), "line 1 start: {:?}", lines[0].a);
+    assert!(lines[0].b.near(cadcraft_geom::Vec3::new(10.0, 20.0, 30.0), 1e-5), "line 1 end: {:?}", lines[0].b);
+
+    // Second segment: (10, 20, 30) -> (15, 25, 40)
+    assert!(lines[1].a.near(cadcraft_geom::Vec3::new(10.0, 20.0, 30.0), 1e-5), "line 2 start: {:?}", lines[1].a);
+    assert!(lines[1].b.near(cadcraft_geom::Vec3::new(15.0, 25.0, 40.0), 1e-5), "line 2 end: {:?}", lines[1].b);
+
+    // 4. Test negative and decimal coordinates in Front (XZ) view
+    app.session.cmdline("view.front").unwrap();
+    assert_eq!(app.session.drawing_plane(), cadcraft_geom::DrawingPlane::XZ);
+
+    app.session.cmdline("line").unwrap();
+    app.cmdline(
+        "-10.5,-20.5,-30.5
+",
+    );
+    app.cmdline(
+        "5.25,10.25,15.25
+",
+    );
+    app.cmdline(
+        "
+",
+    );
+
+    let doc2 = app.session.doc().unwrap();
+    let lines2: Vec<_> = doc2
+        .model
+        .iter()
+        .filter_map(|e| match &e.kind {
+            cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(lines2.len(), 3);
+    assert!(lines2[2].a.near(cadcraft_geom::Vec3::new(-10.5, -20.5, -30.5), 1e-5));
+    assert!(lines2[2].b.near(cadcraft_geom::Vec3::new(5.25, 10.25, 15.25), 1e-5));
+
+    // 5. Test Escape cancels without leftover state
+    app.session.cmdline("line").unwrap();
+    app.cmd.buffer = "10,20,".to_string();
+    app.session.cancel();
+    assert!(app.session.current_prompt().is_none());
+}
+
+#[test]
+fn test_template_ui_journey_with_simulated_pickers() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let _serial = TEMPLATE_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _restore = RestoreQnewTemplate(cadcraft_engine::cmd::file::qnew_template());
+    cadcraft_engine::cmd::file::set_io(cadcraft_engine::cmd::file::IoHooks {
+        read: |_, _| {
+            let mut d = cadcraft_doc::Drawing::new_metric();
+            d.layers.push(cadcraft_doc::Layer { name: "OFFICE-A".to_string(), color: cadcraft_color::Color::Index(3), ..Default::default() });
+            Ok(d)
+        },
+        write: |_, _| Ok(Vec::new()),
+        plot: None,
+    });
+    cadcraft_engine::cmd::file::set_write_as(|_, _, _| Ok(Vec::new()));
+
+    let temp_dir = std::env::temp_dir().join(format!("cadcraft-tmpl-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+    let path_custom_dwt = temp_dir.join("custom_default.dwt");
+    std::fs::write(&path_custom_dwt, b"0\nEOF\n").unwrap();
+    let str_custom_dwt = path_custom_dwt.to_string_lossy().to_string();
+
+    let path_other_dwt = temp_dir.join("other_standalone.dwt");
+    std::fs::write(&path_other_dwt, b"0\nEOF\n").unwrap();
+    let str_other_dwt = path_other_dwt.to_string_lossy().to_string();
+
+    let picked_file = Rc::new(RefCell::new(Some(str_custom_dwt.clone())));
+    let picked_file_c = picked_file.clone();
+    let save_prompt_called = Rc::new(std::cell::Cell::new(false));
+    let save_prompt_called_c = save_prompt_called.clone();
+
+    let services = Services {
+        pick_open: Some(Box::new(move || picked_file_c.borrow().clone())),
+        pick_save: Some(Box::new(move |_| {
+            save_prompt_called_c.set(true);
+            Some("/saved_drawings/my_plan.dxf".to_string())
+        })),
+        ..Services::default()
+    };
+
+    let mut app = CadApp::new(Session::empty(), services);
+    assert_eq!(app.session.docs.len(), 0);
+
+    // 1. Elegir la predeterminada no aumenta el número de documentos
+    app.start("ui.defaulttemplate.choose");
+    assert_eq!(app.session.docs.len(), 0, "choosing default template must not create any document");
+    assert_eq!(cadcraft_engine::cmd::file::qnew_template(), str_custom_dwt);
+
+    // 2. Nuevo utiliza su contenido
+    app.start("new");
+    assert_eq!(app.session.docs.len(), 1, "new must create one document from default template");
+    let st = app.session.state().unwrap();
+    assert!(st.doc.layers.iter().any(|l| l.name == "OFFICE-A"), "new drawing uses default template layers");
+    assert!(st.path.is_none(), "created document never inherits the template save path");
+
+    // 3. Nuevo desde otra plantilla no cambia la predeterminada
+    *picked_file.borrow_mut() = Some(str_other_dwt.clone());
+    app.start("ui.newtemplate");
+    assert_eq!(app.session.docs.len(), 2, "new from other template creates a separate document");
+    assert_eq!(cadcraft_engine::cmd::file::qnew_template(), str_custom_dwt, "default template remains unchanged");
+
+    // 4. Cancelar conserva el valor
+    *picked_file.borrow_mut() = None; // simulated cancel
+    app.start("ui.defaulttemplate.choose");
+    assert_eq!(cadcraft_engine::cmd::file::qnew_template(), str_custom_dwt, "cancelling file picker preserves preference");
+
+    // 5. Una selección inválida no sustituye la preferencia válida anterior
+    *picked_file.borrow_mut() = Some("/invalid/doc.txt".to_string()); // invalid extension
+    app.start("ui.defaulttemplate.choose");
+    assert_eq!(cadcraft_engine::cmd::file::qnew_template(), str_custom_dwt, "invalid file path does not overwrite valid template");
+
+    *picked_file.borrow_mut() = Some(".".to_string());
+    app.start("ui.defaulttemplate.choose");
+    assert_eq!(cadcraft_engine::cmd::file::qnew_template(), str_custom_dwt, "dot does not overwrite template");
+
+    // 6. Primer guardado solicita otra ruta
+    assert!(!save_prompt_called.get());
+    app.start("ui.saveas");
+    assert!(save_prompt_called.get(), "first save must prompt user for save path via pick_save");
+
+    // 7. Quitar persiste
+    app.start("ui.defaulttemplate.clear");
+    assert_eq!(cadcraft_engine::cmd::file::qnew_template(), "");
+    let prof = app.profile_json();
+    cadcraft_engine::cmd::file::set_qnew_template("/some/temp.dwt");
+    let mut restored = CadApp::new(Session::default(), Services::default());
+    restored.load_profile(&prof);
+    assert_eq!(cadcraft_engine::cmd::file::qnew_template(), "", "cleared template persists across restore");
+}
+
+#[test]
+fn test_dynamic_input_harness_events_and_containment() {
+    let mut h = harness(None, 1600.0, 1000.0);
+    h.state_mut().session.new_drawing(true);
+
+    // Start LINE
+    h.state_mut().cmdline("line");
+    h.run_steps(2);
+    assert!(h.state().session.prompting());
+
+    // 1. Enter "10" and Tab -> first comma appended, moves to field 1 (Y)
+    h.state_mut().cmd.buffer = "10".to_string();
+    cadcraft_ui_egui::cmdline::tab(h.state_mut());
+    assert_eq!(h.state().cmd.buffer, "10,");
+    assert_eq!(h.state().cmd.dyn_active_field, None);
+
+    // 2. Enter "20" and Tab -> second comma appended, appears Z!
+    h.state_mut().cmd.buffer = "10,20".to_string();
+    cadcraft_ui_egui::cmdline::tab(h.state_mut());
+    assert_eq!(h.state().cmd.buffer, "10,20,");
+    assert_eq!(h.state().cmd.dyn_active_field, None);
+
+    // 3. Enter "30": 3 fields present, "10,20,30" visible before Enter
+    h.state_mut().cmd.buffer = "10,20,30".to_string();
+    let f = cadcraft_ui_egui::cmdline::dyn_frame(h.state()).unwrap();
+    let e = cadcraft_ui_egui::dyninput::parse(&h.state().cmd.buffer, &f).unwrap();
+    assert!(e.split && e.split_z);
+    assert_eq!(e.first, "10");
+    assert_eq!(e.second, "20");
+    assert_eq!(e.third, "30");
+
+    // 4. Tab and Shift+Tab navigation between components
+    cadcraft_ui_egui::cmdline::tab_backward(h.state_mut());
+    assert_eq!(h.state().cmd.dyn_active_field, Some(1), "Shift+Tab moves focus backwards to field 1 (Y)");
+
+    cadcraft_ui_egui::cmdline::tab_backward(h.state_mut());
+    assert_eq!(h.state().cmd.dyn_active_field, Some(0), "Shift+Tab moves focus backwards to field 0 (X)");
+
+    cadcraft_ui_egui::cmdline::tab(h.state_mut());
+    assert_eq!(h.state().cmd.dyn_active_field, Some(1), "Tab moves focus forward to field 1 (Y)");
+
+    cadcraft_ui_egui::cmdline::tab(h.state_mut());
+    assert_eq!(h.state().cmd.dyn_active_field, Some(2), "Tab moves focus forward to field 2 (Z)");
+
+    cadcraft_ui_egui::cmdline::tab(h.state_mut());
+    assert_eq!(h.state().cmd.dyn_active_field, Some(0), "Tab wraps focus forward to field 0 (X)");
+
+    // 5. Editing component 0
+    let updated = cadcraft_ui_egui::dyninput::update_component_field(&h.state().cmd.buffer, 0, Some('5'), false);
+    assert_eq!(updated, "105,20,30");
+    let backspaced = cadcraft_ui_egui::dyninput::update_component_field(&h.state().cmd.buffer, 0, None, true);
+    assert_eq!(backspaced, "1,20,30");
+
+    // 6. Escape cancellation
+    h.state_mut().session.cmdline("line").unwrap();
+    h.state_mut().cmd.buffer = "10,20,30".to_string();
+    h.state_mut().cmd.dyn_active_field = Some(2);
+    h.state_mut().session.cancel();
+    h.state_mut().cmd.buffer.clear();
+    h.state_mut().cmd.dyn_active_field = None;
+    assert!(h.state().cmd.buffer.is_empty());
+    assert_eq!(h.state().cmd.dyn_active_field, None);
+
+    // 7. Prefixes supported: @, #, *, @*
+    let e_rel = cadcraft_ui_egui::dyninput::parse("@5,5,10", &f).unwrap();
+    assert_eq!(e_rel.prefix, "@");
+    assert_eq!(e_rel.first, "5");
+    assert_eq!(e_rel.second, "5");
+    assert_eq!(e_rel.third, "10");
+
+    let e_abs = cadcraft_ui_egui::dyninput::parse("#0,0,0", &f).unwrap();
+    assert_eq!(e_abs.prefix, "#");
+
+    let e_world = cadcraft_ui_egui::dyninput::parse("*10,20", &f).unwrap();
+    assert_eq!(e_world.prefix, "*");
+
+    let e_rel_world = cadcraft_ui_egui::dyninput::parse("@*10,20,30", &f).unwrap();
+    assert_eq!(e_rel_world.prefix, "@*");
+
+    // 8. Labels in Front view (XZ)
+    let f_front = cadcraft_ui_egui::dyninput::Frame {
+        base: Some(cadcraft_geom::Vec2::ZERO),
+        cartesian: true,
+        absolute: false,
+        plane: cadcraft_geom::DrawingPlane::XZ,
+    };
+    // 2 components in front view
+    let e_front_2 = cadcraft_ui_egui::dyninput::parse("10,20", &f_front).unwrap();
+    assert!(!e_front_2.split_z);
+    // 3 components in front view
+    let e_front_3 = cadcraft_ui_egui::dyninput::parse("10,20,30", &f_front).unwrap();
+    assert!(e_front_3.split_z);
+
+    // 9. Containment in small window and near all four borders
+    let _small_h = harness(None, 360.0, 240.0);
+    let clip = egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(360.0, 240.0));
+    let pad = 4.0;
+    for (at_x, at_y) in [(2.0, 2.0), (358.0, 2.0), (2.0, 238.0), (358.0, 238.0), (180.0, 120.0)] {
+        let size = vec2(280.0, 40.0);
+        let clamped_w = size.x.min((clip.width() - 2.0 * pad).max(1.0));
+        let clamped_h = size.y.min((clip.height() - 2.0 * pad).max(1.0));
+        let mut min_x = at_x + 18.0;
+        if min_x + clamped_w > clip.max.x - pad {
+            min_x = at_x - clamped_w - 18.0;
+        }
+        min_x = min_x.clamp(clip.min.x + pad, (clip.max.x - clamped_w - pad).max(clip.min.x + pad));
+
+        let mut min_y = at_y - clamped_h - 14.0;
+        if min_y < clip.min.y + pad {
+            min_y = at_y + 18.0;
+        }
+        min_y = min_y.clamp(clip.min.y + pad, (clip.max.y - clamped_h - pad).max(clip.min.y + pad));
+
+        let r = egui::Rect::from_min_size(pos2(min_x, min_y), vec2(clamped_w, clamped_h));
+        assert!(r.min.x >= clip.min.x + pad - 1e-4, "min_x contained at ({at_x}, {at_y}): {:?}", r);
+        assert!(r.max.x <= clip.max.x - pad + 1e-4, "max_x contained at ({at_x}, {at_y}): {:?}", r);
+        assert!(r.min.y >= clip.min.y + pad - 1e-4, "min_y contained at ({at_x}, {at_y}): {:?}", r);
+        assert!(r.max.y <= clip.max.y - pad + 1e-4, "max_y contained at ({at_x}, {at_y}): {:?}", r);
+    }
 }

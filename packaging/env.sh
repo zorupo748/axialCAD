@@ -35,6 +35,9 @@ export DIST
 
 if [[ -z "${CADCRAFT_BUILD_SHA:-}" ]]; then
   CADCRAFT_BUILD_SHA="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -n "$CADCRAFT_BUILD_SHA" ]] && ! git -C "$ROOT" diff-index --quiet HEAD -- 2>/dev/null; then
+    CADCRAFT_BUILD_SHA="${CADCRAFT_BUILD_SHA}-dirty"
+  fi
 fi
 export CADCRAFT_BUILD_SHA
 export CADCRAFT_BUILD_DATE="${CADCRAFT_BUILD_DATE:-$(date -u +%Y-%m-%d)}"

@@ -105,3 +105,18 @@ fn a_template_that_cannot_be_read_makes_no_drawing() {
     assert!(s.execute("new", &json!({ "template": 42 })).is_err());
     assert_eq!(s.docs.len(), docs);
 }
+
+#[test]
+fn default_qnewtemplate_unreadable_falls_back_safely_to_blank_drawing() {
+    hooks();
+    let mut s = Session::new();
+    let docs = s.docs.len();
+    s.execute("setvar", &json!({ "name": "QNEWTEMPLATE", "value": "/missing/custom_template.dwt" })).unwrap();
+    // Default template cannot be read: NEW creates a safe blank drawing rather than failing and blocking the user
+    let _res = s.execute("new", &json!({})).unwrap();
+    assert_eq!(s.docs.len(), docs + 1);
+    let st = s.state().unwrap();
+    assert!(st.title.starts_with("Drawing"));
+    assert!(st.path.is_none());
+    assert!(s.log.iter().any(|msg| msg.contains("could not be read") && msg.contains("blank drawing")));
+}

@@ -31,19 +31,28 @@ pub fn set_qnew_template(path: &str) {
 
 /// The template a NEW call starts from: `template` ("" or "." for none), else the default
 /// template unless `metric` asks for a blank drawing in given units.
-fn template_for(p: &Value) -> Result<Option<String>> {
+/// Returns (path, is_default).
+fn template_for(p: &Value) -> Result<Option<(String, bool)>> {
     match p.get("template") {
-        Some(Value::String(t)) => Ok(Some(t.trim().to_string()).filter(|t| !t.is_empty() && t != ".")),
+        Some(Value::String(t)) => Ok(Some((t.trim().to_string(), false)).filter(|(t, _)| !t.is_empty() && t != ".")),
         Some(Value::Null) | None if p.get("metric").is_some_and(|m| !m.is_null()) => Ok(None),
-        Some(Value::Null) | None => Ok(Some(qnew_template()).filter(|t| !t.is_empty())),
+        Some(Value::Null) | None => Ok(Some((qnew_template(), true)).filter(|(t, _)| !t.is_empty())),
         Some(_) => Err(bad("new", "`template` must be a file path")),
     }
 }
 
 /// NEW from a template, or `None` when the call names none (a blank drawing then).
+/// If the default template is missing or unreadable, a warning is echoed and a blank drawing is created.
 pub(super) fn run_new(s: &mut Session, p: &Value) -> Result<Option<Value>> {
-    let Some(path) = template_for(p)? else { return Ok(None) };
-    let d = read_template(&path)?;
+    let Some((path, is_default)) = template_for(p)? else { return Ok(None) };
+    let d = match read_template(&path) {
+        Ok(d) => d,
+        Err(e) if is_default => {
+            s.echo(format!("Template '{path}' could not be read: {e}. Starting a blank drawing instead."));
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
     s.untitled_counter = s.untitled_counter.saturating_add(1);
     let title = format!("Drawing{}", s.untitled_counter);
     let i = s.open_drawing(d, &title, None);

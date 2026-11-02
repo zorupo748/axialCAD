@@ -31,6 +31,8 @@ pub struct CmdLine {
     locked_second: Option<String>,
     /// Where the options menu's rows were drawn last frame (screen), for clicks on them.
     pub option_rows: Vec<(Rect, String)>,
+    /// Active field index in Dynamic Input coordinate boxes (0 = X, 1 = Y, 2 = Z).
+    pub dyn_active_field: Option<usize>,
     /// Where the Dynamic Input tooltip stays while the options menu is open.
     pub options_anchor: Option<Pos2>,
 }
@@ -47,7 +49,7 @@ pub fn dyn_frame(app: &CadApp) -> Option<crate::dyninput::Frame> {
         return None;
     }
     let p = app.session.current_prompt().filter(cadcraft_engine::pointmod::accepts)?;
-    Some(crate::dyninput::Frame { base: p.base, cartesian: st.dynpi_cartesian, absolute: st.dynpi_absolute })
+    Some(crate::dyninput::Frame { base: p.base, cartesian: st.dynpi_cartesian, absolute: st.dynpi_absolute, plane: app.session.drawing_plane() })
 }
 
 /// Take Tab away from egui before it moves keyboard focus to the next widget (which would leave
@@ -58,13 +60,13 @@ pub fn capture_tab(ctx: &egui::Context, raw: &mut egui::RawInput) {
         return;
     }
     raw.events.retain_mut(|e| {
-        let tab = match e {
-            egui::Event::Key { key: Key::Tab, pressed, .. } => Some(*pressed),
-            _ => None,
+        let (pressed, shift) = match e {
+            egui::Event::Key { key: Key::Tab, pressed, modifiers, .. } => (Some(*pressed), modifiers.shift),
+            _ => (None, false),
         };
-        match tab {
+        match pressed {
             Some(true) => {
-                *e = egui::Event::Text("\t".into());
+                *e = if shift { egui::Event::Text("\x1b[Z".into()) } else { egui::Event::Text("\t".into()) };
                 true
             }
             Some(false) => false,
@@ -73,26 +75,53 @@ pub fn capture_tab(ctx: &egui::Context, raw: &mut egui::RawInput) {
     });
 }
 
-/// Tab on the command line: cycle the object snaps under the cursor, type the Dynamic Input
-/// separator (`,` or `<`) after a value, or complete a command name.
-fn tab(app: &mut CadApp) {
-    // Grip dimensional input: Tab locks the typed value and moves to the next field.
+/// Tab on the command line: cycle candidate snaps, complete separators or cycle fields forward.
+pub fn tab(app: &mut CadApp) {
+    tab_with_direction(app, false);
+}
+
+/// Shift+Tab on the command line: navigate backwards between coordinate components.
+pub fn tab_backward(app: &mut CadApp) {
+    tab_with_direction(app, true);
+}
+
+fn tab_with_direction(app: &mut CadApp, backward: bool) {
     if crate::grip_dyn::tab(app) {
         return;
     }
-    // Over a snap marker with nothing typed, Tab cycles the candidate snaps.
     if app.cmd.buffer.is_empty() && app.canvas.snap.is_some() {
         app.canvas.snap_tab = true;
-    } else if let Some(f) = dyn_frame(app)
-        && let Some(sep) = crate::dyninput::tab_separator(&app.cmd.buffer, &f)
-    {
-        app.cmd.buffer.push(sep);
-    } else if let Some(f) = dyn_frame(app)
-        && crate::dyninput::can_lock_second(&app.cmd.buffer, &f)
-    {
-        // Both values typed: Tab locks the second one as well.
-        app.cmd.locked_second = Some(app.cmd.buffer.clone());
-    } else if let Some(s) = suggestions(&app.cmd.buffer).first() {
+        return;
+    }
+    if let Some(f) = dyn_frame(app) {
+        let count = crate::dyninput::component_count(&app.cmd.buffer, &f);
+        if backward {
+            if count > 1 {
+                let cur = app.cmd.dyn_active_field.unwrap_or(count - 1);
+                app.cmd.dyn_active_field = Some((cur + count - 1) % count);
+                return;
+            }
+        } else {
+            if let Some(sep) = crate::dyninput::tab_separator(&app.cmd.buffer, &f) {
+                app.cmd.buffer.push(sep);
+                app.cmd.dyn_active_field = None;
+                return;
+            }
+            if count > 1 {
+                let cur = app.cmd.dyn_active_field.unwrap_or(count - 1);
+                app.cmd.dyn_active_field = Some((cur + 1) % count);
+                if crate::dyninput::can_lock_second(&app.cmd.buffer, &f) {
+                    app.cmd.locked_second = Some(app.cmd.buffer.clone());
+                }
+                return;
+            }
+            if crate::dyninput::can_lock_second(&app.cmd.buffer, &f) {
+                app.cmd.locked_second = Some(app.cmd.buffer.clone());
+                return;
+            }
+        }
+    }
+    if !backward && let Some(s) = suggestions(&app.cmd.buffer).first() {
         app.cmd.buffer = s.id.clone();
     }
 }
@@ -294,16 +323,30 @@ pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
             egui::Event::Text(t) => {
                 if t == "\t" {
                     tab(app);
+                } else if t == "\x1b[Z" {
+                    tab_backward(app);
                 } else if t == " " && !text_prompt {
                     submit(app);
                 } else {
-                    app.cmd.buffer.push_str(&t);
+                    if let Some(f) = dyn_frame(app)
+                        && crate::dyninput::parse(&app.cmd.buffer, &f).is_some()
+                        && let Some(field) = app.cmd.dyn_active_field
+                        && field + 1 < crate::dyninput::component_count(&app.cmd.buffer, &f)
+                    {
+                        for ch in t.chars() {
+                            app.cmd.buffer = crate::dyninput::update_component_field(&app.cmd.buffer, field, Some(ch), false);
+                        }
+                    } else {
+                        app.cmd.dyn_active_field = None;
+                        app.cmd.buffer.push_str(&t);
+                    }
                 }
             }
             egui::Event::Key { key, pressed: true, repeat, modifiers, .. } => match key {
                 Key::Enter => submit(app),
                 Key::Escape => {
                     app.cmd.buffer.clear();
+                    app.cmd.dyn_active_field = None;
                     app.session.cancel();
                 }
                 Key::Backspace => {
@@ -318,7 +361,14 @@ pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
                     );
                     if erase {
                         let _ = app.run("erase.selection", serde_json::json!({}));
+                    } else if let Some(f) = dyn_frame(app)
+                        && crate::dyninput::parse(&app.cmd.buffer, &f).is_some()
+                        && let Some(field) = app.cmd.dyn_active_field
+                        && field + 1 < crate::dyninput::component_count(&app.cmd.buffer, &f)
+                    {
+                        app.cmd.buffer = crate::dyninput::update_component_field(&app.cmd.buffer, field, None, true);
                     } else {
+                        app.cmd.dyn_active_field = None;
                         app.cmd.buffer.pop();
                     }
                 }
@@ -344,7 +394,13 @@ pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
                         }
                     }
                 }
-                Key::Tab => tab(app),
+                Key::Tab => {
+                    if modifiers.shift {
+                        tab_backward(app);
+                    } else {
+                        tab(app);
+                    }
+                }
                 Key::Delete if app.cmd.buffer.is_empty() && !app.session.prompting() => {
                     let _ = app.run("erase.selection", serde_json::json!({}));
                 }
@@ -367,9 +423,11 @@ pub fn submit(app: &mut CadApp) {
     if let Some(f) = dyn_frame(app) {
         let last = app.session.last_point;
         let entry = crate::dyninput::parse(&app.cmd.buffer, &f);
-        let complete_cartesian_point = entry
-            .as_ref()
-            .is_some_and(|e| e.format == crate::dyninput::Format::Cartesian && e.first_locked().is_some() && e.second_value().is_some());
+        let complete_cartesian_point = entry.as_ref().is_some_and(|e| {
+            e.format == crate::dyninput::Format::Cartesian
+                && e.first_locked().is_some()
+                && (if e.split_z { e.second_locked().is_some() && e.third_value().is_some() } else { e.second_value().is_some() })
+        });
         let done = if complete_cartesian_point {
             None
         } else if app.session.settings.zlock

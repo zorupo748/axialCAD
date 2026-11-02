@@ -522,7 +522,13 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
         } else {
             p.rect_filled(br_zlock, 3.0, if zlock_hovered { t.control_hover } else { t.chrome });
             p.rect_stroke(br_zlock, 3.0, Stroke::new(1.0, if zlock_hovered { t.text_dim } else { t.border }), egui::StrokeKind::Inside);
-            p.text(br_zlock.center(), egui::Align2::CENTER_CENTER, zlock_text, crate::theme::small(), if zlock_hovered { t.text } else { t.text_dim });
+            p.text(
+                br_zlock.center(),
+                egui::Align2::CENTER_CENTER,
+                zlock_text,
+                crate::theme::small(),
+                if zlock_hovered { t.text } else { t.text_dim },
+            );
         }
         if resp_zlock
             .on_hover_text(if zlock {
@@ -698,12 +704,15 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
 
 /// The Start page (no drawing open, or the Start tab).
 pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
+    use egui::Color32;
     let t = Tokens::get();
     let r = ui.max_rect();
     let p = ui.painter().clone();
-    let left = Rect::from_min_size(r.min, vec2(300.0, r.height()));
+    let left = Rect::from_min_size(r.min, vec2(280.0, r.height()));
     p.rect_filled(left, 0.0, t.chrome_dark);
     p.rect_filled(Rect::from_min_max(pos2(left.right(), r.top()), r.max), 0.0, t.chrome);
+
+    // Left branding
     p.text(pos2(left.left() + 34.0, left.top() + 70.0), egui::Align2::LEFT_CENTER, crate::tl!("CADCraft"), egui::FontId::proportional(28.0), t.text);
     p.text(
         pos2(left.left() + 34.0, left.top() + 98.0),
@@ -712,55 +721,314 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
         crate::theme::small(),
         t.text_faint,
     );
+
     let mut y = left.top() + 140.0;
     let mut action = None;
-    for (label, cmd) in [("Open...", "open"), ("New", "new"), ("New (metric)", "new.metric"), ("Open sample drawing", "sample")] {
-        let br = Rect::from_min_size(pos2(left.left() + 34.0, y), vec2(220.0, 34.0));
+    for (label, cmd) in [
+        ("New", "new"),
+        ("New from Template...", "ui.newtemplate"),
+        ("New (metric)", "new.metric"),
+        ("Open...", "open"),
+        ("Open sample drawing", "sample"),
+    ] {
+        let br = Rect::from_min_size(pos2(left.left() + 34.0, y), vec2(212.0, 32.0));
         let resp = ui.interact(br, ui.id().with(("start", cmd)), Sense::click());
         p.rect_stroke(br, 2.0, Stroke::new(1.0, if resp.hovered() { t.text } else { t.text_dim }), egui::StrokeKind::Inside);
-        p.text(pos2(br.left() + 16.0, br.center().y), egui::Align2::LEFT_CENTER, crate::i18n::t(label), crate::theme::body(), t.text);
+        p.text(pos2(br.left() + 14.0, br.center().y), egui::Align2::LEFT_CENTER, crate::i18n::t(label), crate::theme::body(), t.text);
         if resp.clicked() {
             action = Some(cmd);
         }
-        y += 44.0;
+        y += 40.0;
     }
-    let main = Rect::from_min_max(pos2(left.right() + 36.0, r.top() + 40.0), r.max);
-    p.text(main.min, egui::Align2::LEFT_TOP, crate::tl!("Recent"), egui::FontId::proportional(22.0), t.text);
-    let mut recent = None;
-    let mut y = main.top() + 44.0;
-    for (i, path) in app.ui.recent_files.iter().enumerate() {
-        let row = Rect::from_min_size(pos2(main.left(), y), vec2((r.right() - main.left() - 36.0).clamp(0.0, 640.0), 42.0));
-        let resp = ui.interact(row, ui.id().with(("recent", i)), Sense::click());
-        if resp.hovered() {
-            p.rect_filled(row, 2.0, t.control_hover.gamma_multiply(0.5));
-        }
-        let dir = std::path::Path::new(path).parent().map(|d| d.display().to_string()).unwrap_or_default();
-        let clip = p.with_clip_rect(row.shrink(2.0));
-        clip.text(pos2(row.left() + 10.0, row.top() + 13.0), egui::Align2::LEFT_CENTER, crate::menus::file_name(path), crate::theme::body(), t.text);
-        clip.text(pos2(row.left() + 10.0, row.top() + 30.0), egui::Align2::LEFT_CENTER, dir, crate::theme::small(), t.text_faint);
-        if resp.on_hover_text(path).clicked() {
-            recent = Some(path.clone());
-        }
-        y += 46.0;
+
+    // Template section in sidebar
+    y += 16.0;
+    p.line_segment([pos2(left.left() + 34.0, y), pos2(left.right() - 34.0, y)], Stroke::new(1.0, t.border));
+    y += 16.0;
+    p.text(pos2(left.left() + 34.0, y), egui::Align2::LEFT_CENTER, crate::tl!("Default Template:"), crate::theme::small(), t.text_dim);
+    y += 18.0;
+
+    let current_tmpl = cadcraft_engine::cmd::file::qnew_template();
+    let tmpl_str = if current_tmpl.is_empty() { crate::tl!("None (Blank drawing)").to_string() } else { crate::menus::file_name(&current_tmpl) };
+    let tmpl_rect = Rect::from_min_size(pos2(left.left() + 34.0, y - 8.0), vec2(212.0, 20.0));
+    p.with_clip_rect(tmpl_rect).text(pos2(left.left() + 34.0, y), egui::Align2::LEFT_CENTER, tmpl_str, crate::theme::body(), t.text);
+    y += 24.0;
+
+    let choose_rect = Rect::from_min_size(pos2(left.left() + 34.0, y), vec2(100.0, 26.0));
+    let resp_choose = ui.interact(choose_rect, ui.id().with("start_choose_template"), Sense::click());
+    p.rect_stroke(choose_rect, 2.0, Stroke::new(1.0, if resp_choose.hovered() { t.text } else { t.text_dim }), egui::StrokeKind::Inside);
+    p.text(choose_rect.center(), egui::Align2::CENTER_CENTER, crate::tl!("Choose..."), crate::theme::small(), t.text);
+    if resp_choose.clicked() {
+        action = Some("ui.defaulttemplate.choose");
     }
-    if let Some(path) = recent {
+
+    if !current_tmpl.is_empty() {
+        let clear_rect = Rect::from_min_size(pos2(left.left() + 144.0, y), vec2(80.0, 26.0));
+        let resp_clear = ui.interact(clear_rect, ui.id().with("start_clear_template"), Sense::click());
+        p.rect_stroke(clear_rect, 2.0, Stroke::new(1.0, if resp_clear.hovered() { t.text } else { t.text_dim }), egui::StrokeKind::Inside);
+        p.text(clear_rect.center(), egui::Align2::CENTER_CENTER, crate::tl!("Clear"), crate::theme::small(), t.text);
+        if resp_clear.clicked() {
+            action = Some("ui.defaulttemplate.clear");
+        }
+    }
+
+    // Main area
+    let main_rect = Rect::from_min_max(pos2(left.right() + 32.0, r.top() + 28.0), pos2(r.right() - 24.0, r.bottom() - 16.0));
+    let mut to_open = None;
+    let mut to_pin = None;
+    let mut to_forget = None;
+
+    ui.scope_builder(egui::UiBuilder::new().max_rect(main_rect), |ui| {
+        // Header
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(crate::tl!("Recent Drawings")).font(egui::FontId::proportional(22.0)).color(t.text));
+            ui.add_space(24.0);
+
+            // Search
+            ui.label(egui::RichText::new(crate::tl!("Search:")).color(t.text_dim));
+            ui.add(egui::TextEdit::singleline(&mut app.ui.start_search).hint_text(crate::tl!("Filter by name or path...")));
+            if !app.ui.start_search.is_empty() && ui.small_button("×").clicked() {
+                app.ui.start_search.clear();
+            }
+
+            // View toggle
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.selectable_label(!app.ui.start_grid_view, crate::tl!("List")).clicked() {
+                    app.ui.start_grid_view = false;
+                }
+                if ui.selectable_label(app.ui.start_grid_view, crate::tl!("Grid")).clicked() {
+                    app.ui.start_grid_view = true;
+                }
+            });
+        });
+
+        ui.add_space(14.0);
+
+        // Filter and sort items: combine pinned and recent files (deduplicating with pinned first)
+        // so that pinned favorites are preserved even if they drop out of the limited recent_files list.
+        let mut combined_files: Vec<String> = Vec::new();
+        for p in &app.ui.pinned_files {
+            if !combined_files.contains(p) {
+                combined_files.push(p.clone());
+            }
+        }
+        for p in &app.ui.recent_files {
+            if !combined_files.contains(p) {
+                combined_files.push(p.clone());
+            }
+        }
+
+        let query = app.ui.start_search.trim().to_lowercase();
+        let files: Vec<String> = combined_files
+            .into_iter()
+            .filter(|p| {
+                if query.is_empty() { true } else { crate::menus::file_name(p).to_lowercase().contains(&query) || p.to_lowercase().contains(&query) }
+            })
+            .collect();
+        app.prune_thumbnail_textures();
+
+        if files.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(80.0);
+                ui.label(egui::RichText::new(crate::tl!("There is nothing here yet.")).font(egui::FontId::proportional(18.0)).color(t.text));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(crate::tl!("To get started, create or open a drawing.")).color(t.text_dim));
+            });
+            return;
+        }
+
+        let ctx = ui.ctx().clone();
+        egui::ScrollArea::vertical().id_salt("start_recents_scroll").show(ui, |ui| {
+            if app.ui.start_grid_view {
+                // Card Grid View
+                let card_w = 230.0f32;
+                let card_h = 180.0f32;
+                let gap = 16.0f32;
+                let avail_w = ui.available_width();
+                let cols = ((avail_w + gap) / (card_w + gap)).floor().max(1.0) as usize;
+
+                for chunk in files.chunks(cols) {
+                    ui.horizontal(|ui| {
+                        for path in chunk {
+                            let (card_rect, resp) = ui.allocate_exact_size(vec2(card_w, card_h), Sense::click());
+                            let cp = ui.painter().with_clip_rect(card_rect);
+                            let is_pinned = app.ui.pinned_files.contains(path);
+                            let exists = crate::thumbnails::file_exists(path);
+
+                            // Card background & border
+                            let bg = if resp.hovered() { t.control_hover.gamma_multiply(0.35) } else { t.panel };
+                            let border_color = if is_pinned {
+                                t.accent
+                            } else if resp.hovered() {
+                                t.text_dim
+                            } else {
+                                t.border
+                            };
+                            cp.rect_filled(card_rect, 4.0, bg);
+                            cp.rect_stroke(card_rect, 4.0, Stroke::new(if is_pinned { 1.5 } else { 1.0 }, border_color), egui::StrokeKind::Inside);
+
+                            // Thumbnail image area
+                            let thumb_rect = Rect::from_min_size(pos2(card_rect.left() + 6.0, card_rect.top() + 6.0), vec2(card_w - 12.0, 106.0));
+                            if !app.thumbnail_textures.contains_key(path) {
+                                if let Some(tex) = crate::thumbnails::load_thumbnail_texture(&ctx, path) {
+                                    app.thumbnail_textures.insert(path.clone(), tex);
+                                }
+                            }
+
+                            if let Some(tex) = app.thumbnail_textures.get(path) {
+                                cp.image(tex.id(), thumb_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                            } else {
+                                cp.rect_filled(thumb_rect, 2.0, t.canvas);
+                                cp.text(thumb_rect.center(), egui::Align2::CENTER_CENTER, "📐", egui::FontId::proportional(26.0), t.text_faint);
+                            }
+
+                            // Missing file badge
+                            if !exists {
+                                let badge_r = Rect::from_min_size(pos2(thumb_rect.left() + 6.0, thumb_rect.top() + 6.0), vec2(60.0, 18.0));
+                                cp.rect_filled(badge_r, 2.0, Color32::from_rgb(180, 50, 40));
+                                cp.text(badge_r.center(), egui::Align2::CENTER_CENTER, crate::tl!("Missing"), crate::theme::small(), Color32::WHITE);
+
+                                // Remove button
+                                let rm_r = Rect::from_min_size(pos2(card_rect.right() - 50.0, card_rect.top() + 8.0), vec2(18.0, 18.0));
+                                let rm_resp = ui.interact(rm_r, ui.id().with(("rm", path)), Sense::click());
+                                cp.rect_filled(
+                                    rm_r,
+                                    2.0,
+                                    if rm_resp.hovered() { Color32::from_rgb(200, 40, 40) } else { Color32::from_black_alpha(140) },
+                                );
+                                cp.text(rm_r.center(), egui::Align2::CENTER_CENTER, "×", crate::theme::body(), Color32::WHITE);
+                                if rm_resp.clicked() {
+                                    to_forget = Some(path.clone());
+                                }
+                            }
+
+                            // Pin toggle button
+                            let pin_r = Rect::from_min_size(pos2(card_rect.right() - 26.0, card_rect.top() + 8.0), vec2(18.0, 18.0));
+                            let pin_resp = ui.interact(pin_r, ui.id().with(("pin", path)), Sense::click());
+                            cp.rect_filled(pin_r, 2.0, if pin_resp.hovered() { t.control_hover } else { Color32::from_black_alpha(140) });
+                            let pin_icon = if is_pinned { "★" } else { "☆" };
+                            let pin_color = if is_pinned { t.accent } else { Color32::WHITE };
+                            cp.text(pin_r.center(), egui::Align2::CENTER_CENTER, pin_icon, egui::FontId::proportional(12.0), pin_color);
+                            if pin_resp.clicked() {
+                                to_pin = Some(path.clone());
+                            }
+
+                            // Metadata text
+                            let text_area = Rect::from_min_max(
+                                pos2(card_rect.left() + 8.0, card_rect.top() + 118.0),
+                                pos2(card_rect.right() - 8.0, card_rect.bottom() - 4.0),
+                            );
+                            let text_p = cp.with_clip_rect(text_area);
+                            let fname = crate::menus::file_name(path);
+                            text_p.text(pos2(text_area.left(), text_area.top() + 2.0), egui::Align2::LEFT_TOP, fname, crate::theme::body(), t.text);
+
+                            let dir = std::path::Path::new(path).parent().map(|d| d.display().to_string()).unwrap_or_default();
+                            text_p.text(
+                                pos2(text_area.left(), text_area.top() + 20.0),
+                                egui::Align2::LEFT_TOP,
+                                dir,
+                                crate::theme::small(),
+                                t.text_faint,
+                            );
+
+                            let mtime = crate::thumbnails::file_modified_time(path);
+                            text_p.text(
+                                pos2(text_area.left(), text_area.top() + 38.0),
+                                egui::Align2::LEFT_TOP,
+                                mtime,
+                                crate::theme::small(),
+                                t.text_dim,
+                            );
+
+                            if resp.on_hover_text(path).clicked() && to_pin.is_none() && to_forget.is_none() {
+                                to_open = Some(path.clone());
+                            }
+                        }
+                    });
+                    ui.add_space(gap);
+                }
+            } else {
+                // List View
+                for (i, path) in files.iter().enumerate() {
+                    let (row_r, resp) = ui.allocate_exact_size(vec2(ui.available_width().clamp(200.0, 720.0), 46.0), Sense::click());
+                    let cp = ui.painter().with_clip_rect(row_r);
+                    let is_pinned = app.ui.pinned_files.contains(path);
+                    let exists = crate::thumbnails::file_exists(path);
+
+                    if resp.hovered() {
+                        cp.rect_filled(row_r, 2.0, t.control_hover.gamma_multiply(0.4));
+                    }
+                    if is_pinned {
+                        cp.rect_stroke(row_r, 2.0, Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
+                    }
+
+                    // Mini thumbnail
+                    let mini_r = Rect::from_min_size(pos2(row_r.left() + 6.0, row_r.top() + 6.0), vec2(50.0, 34.0));
+                    if !app.thumbnail_textures.contains_key(path) {
+                        if let Some(tex) = crate::thumbnails::load_thumbnail_texture(&ctx, path) {
+                            app.thumbnail_textures.insert(path.clone(), tex);
+                        }
+                    }
+                    if let Some(tex) = app.thumbnail_textures.get(path) {
+                        cp.image(tex.id(), mini_r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    } else {
+                        cp.rect_filled(mini_r, 2.0, t.canvas);
+                        cp.text(mini_r.center(), egui::Align2::CENTER_CENTER, "📐", egui::FontId::proportional(16.0), t.text_faint);
+                    }
+
+                    // Text labels
+                    let fname = crate::menus::file_name(path);
+                    let dir = std::path::Path::new(path).parent().map(|d| d.display().to_string()).unwrap_or_default();
+                    let mtime = crate::thumbnails::file_modified_time(path);
+
+                    cp.text(pos2(row_r.left() + 66.0, row_r.top() + 14.0), egui::Align2::LEFT_CENTER, fname, crate::theme::body(), t.text);
+                    cp.text(pos2(row_r.left() + 66.0, row_r.top() + 32.0), egui::Align2::LEFT_CENTER, dir, crate::theme::small(), t.text_faint);
+                    let mtime_label = if mtime.is_empty() { String::new() } else { format!("{}: {mtime}", crate::tl!("Modified")) };
+                    cp.text(pos2(row_r.right() - 80.0, row_r.center().y), egui::Align2::RIGHT_CENTER, mtime_label, crate::theme::small(), t.text_dim);
+
+                    // Pin button
+                    let pin_r = Rect::from_min_size(pos2(row_r.right() - 30.0, row_r.center().y - 10.0), vec2(20.0, 20.0));
+                    let pin_resp = ui.interact(pin_r, ui.id().with(("list_pin", i)), Sense::click());
+                    let pin_icon = if is_pinned { "★" } else { "☆" };
+                    let pin_color = if is_pinned { t.accent } else { t.text_dim };
+                    cp.text(pin_r.center(), egui::Align2::CENTER_CENTER, pin_icon, egui::FontId::proportional(14.0), pin_color);
+                    if pin_resp.clicked() {
+                        to_pin = Some(path.clone());
+                    }
+
+                    // Missing badge & remove button
+                    if !exists {
+                        let badge_r = Rect::from_min_size(pos2(row_r.right() - 150.0, row_r.center().y - 9.0), vec2(56.0, 18.0));
+                        cp.rect_filled(badge_r, 2.0, Color32::from_rgb(180, 50, 40));
+                        cp.text(badge_r.center(), egui::Align2::CENTER_CENTER, crate::tl!("Missing"), crate::theme::small(), Color32::WHITE);
+
+                        let rm_r = Rect::from_min_size(pos2(row_r.right() - 54.0, row_r.center().y - 9.0), vec2(18.0, 18.0));
+                        let rm_resp = ui.interact(rm_r, ui.id().with(("list_rm", i)), Sense::click());
+                        cp.text(rm_r.center(), egui::Align2::CENTER_CENTER, "×", crate::theme::body(), t.text_dim);
+                        if rm_resp.clicked() {
+                            to_forget = Some(path.clone());
+                        }
+                    }
+
+                    if resp.on_hover_text(path).clicked() && to_pin.is_none() && to_forget.is_none() {
+                        to_open = Some(path.clone());
+                    }
+                    ui.add_space(4.0);
+                }
+            }
+        });
+    });
+
+    if let Some(path) = to_pin {
+        app.toggle_pinned(&path);
+    }
+    if let Some(path) = to_forget {
+        app.forget_recent(&path);
+    }
+    if let Some(path) = to_open {
         app.open_path(&path);
-    } else if app.ui.recent_files.is_empty() {
-        p.text(
-            pos2(main.center().x, main.center().y),
-            egui::Align2::CENTER_CENTER,
-            crate::tl!("There is nothing here yet."),
-            egui::FontId::proportional(18.0),
-            t.text,
-        );
-        p.text(
-            pos2(main.center().x, main.center().y + 26.0),
-            egui::Align2::CENTER_CENTER,
-            crate::tl!("To get started, create or open a drawing."),
-            crate::theme::body(),
-            t.text_dim,
-        );
     }
+
     match action {
         Some("open") => app.start("ui.open"),
         Some("new") => {
@@ -774,10 +1042,18 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
         Some("sample") => {
             app.start("ui.sample");
         }
+        Some("ui.newtemplate") => {
+            app.start("ui.newtemplate");
+        }
+        Some("ui.defaulttemplate.choose") => {
+            app.start("ui.defaulttemplate.choose");
+        }
+        Some("ui.defaulttemplate.clear") => {
+            app.start("ui.defaulttemplate.clear");
+        }
         _ => {}
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
