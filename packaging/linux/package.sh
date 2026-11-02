@@ -81,10 +81,63 @@ has() { local format="$1"; case " $FORMATS " in *" $format "*) return 0 ;; *) re
 
 # ---- .tar.gz ------------------------------------------------------------------------------------
 if has tar; then
-  mkdir -p "$WORK/tar"
-  cp -R "$STAGE/usr" "$WORK/tar/$BASENAME"
+  TAR_DIR="$WORK/tar/$BASENAME"
+  mkdir -p "$TAR_DIR"
+  cp -R "$STAGE/usr/"* "$TAR_DIR/"
+  install -m 755 "$HERE/install.sh" "$TAR_DIR/install.sh"
+  install -m 755 "$HERE/uninstall.sh" "$TAR_DIR/uninstall.sh"
+
+  cat > "$TAR_DIR/version.env" <<EOF
+CADCRAFT_VERSION="$VERSION"
+CADCRAFT_BUILD_SHA="$CADCRAFT_BUILD_SHA"
+CADCRAFT_BUILD_DATE="$CADCRAFT_BUILD_DATE"
+CADCRAFT_ARCH="$ARCH"
+EOF
+
+  cat > "$TAR_DIR/README.txt" <<EOF
+CADCraft for Linux ($ARCH)
+Version: $VERSION ($CADCRAFT_BUILD_SHA)
+Date:    $CADCRAFT_BUILD_DATE
+
+INSTALLATION (Per-User, No Root Required):
+1. Open a terminal in this extracted directory.
+2. Run the installer:
+     ./install.sh
+
+   By default, this installs to: \$HOME/.local
+   - Binaries: ~/.local/bin/cadcraft, ~/.local/bin/cadcraft-cli
+   - Desktop launcher: ~/.local/share/applications/$APP_ID.desktop
+   - Icons: ~/.local/share/icons/hicolor/...
+   - MIME / file associations: ~/.local/share/mime/packages/...
+   - Documentation: ~/.local/share/doc/cadcraft/...
+
+   Custom prefix (optional):
+     ./install.sh --prefix /path/to/custom/prefix
+
+LAUNCHING:
+- Desktop Menu: Search for "CADCraft" in your desktop application menu.
+- File Manager: Right-click any DWG or DXF file and choose "Open With -> CADCraft".
+- Terminal:     ~/.local/bin/cadcraft [drawing.dwg|drawing.dxf]
+  (Ensure ~/.local/bin is in your PATH to run 'cadcraft' directly)
+
+UPDATING:
+To update CADCraft while keeping all your drawings, templates, and preferences intact:
+1. Extract the new version package.
+2. Run:
+     ./install.sh --update
+
+UNINSTALLATION:
+To cleanly remove CADCraft (preserving personal preferences and drawings):
+     ~/.local/share/cadcraft/uninstall.sh
+   or run './uninstall.sh' from this package directory.
+EOF
+
   tar -C "$WORK/tar" -czf "$DIST/$BASENAME.tar.gz" "$BASENAME"
+  sha256 "$DIST/$BASENAME.tar.gz" > "$DIST/$BASENAME.tar.gz.sha256"
+  tar -ztvf "$DIST/$BASENAME.tar.gz" > "$DIST/$BASENAME.manifest.txt"
   echo "wrote $DIST/$BASENAME.tar.gz"
+  echo "wrote $DIST/$BASENAME.tar.gz.sha256"
+  echo "wrote $DIST/$BASENAME.manifest.txt"
 fi
 
 # ---- .deb / .rpm --------------------------------------------------------------------------------
