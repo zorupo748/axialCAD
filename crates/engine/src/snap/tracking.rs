@@ -15,7 +15,7 @@
 //! ([`crate::Session::snap_cursor`]).
 
 use cadcraft_doc::{Drawing, Prim, Space};
-use cadcraft_geom::{Ellipse, Line, PI, Segment, TAU, Vec2, angle_in_sweep, intersect_ext, norm_angle};
+use cadcraft_geom::{Ellipse, Line, PI, Segment, TAU, Vec2, Vec3, angle_in_sweep, intersect_ext, norm_angle};
 use serde::Serialize;
 
 use super::{SnapHit, mode};
@@ -185,12 +185,19 @@ pub enum Acquired {
     /// An object snap point; `ext` is the extension path when it is a line or arc endpoint.
     Point {
         at: Vec2,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        at3: Option<Vec3>,
         name: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
         ext: Option<PathShape>,
     },
     /// A line rested on with Parallel running: `at` where, `dir` its unit direction.
-    Parallel { at: Vec2, dir: Vec2 },
+    Parallel {
+        at: Vec2,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        at3: Option<Vec3>,
+        dir: Vec2,
+    },
     /// An object rested on with Apparent Intersection running, and its whole extension.
     Apparent { at: Vec2, shape: PathShape },
     /// A temporary tracking point (`TT`): it sends alignment paths even with OTRACK off, and is
@@ -206,13 +213,25 @@ impl Acquired {
         }
     }
 
+    /// 3D position of the acquired reference, if available.
+    pub fn at3(&self) -> Option<Vec3> {
+        match *self {
+            Acquired::Point { at3, .. } | Acquired::Parallel { at3, .. } => at3,
+            _ => None,
+        }
+    }
+
     /// The same point or object (so resting on it again releases it).
     fn same(&self, o: &Acquired) -> bool {
         let near = |a: Vec2, b: Vec2| a.dist(b) <= 1e-9 * (1.0 + a.len().max(b.len()));
+        let near3 = |a: Option<Vec3>, b: Option<Vec3>| match (a, b) {
+            (Some(p), Some(q)) => p.dist(q) <= 1e-9 * (1.0 + p.len().max(q.len())),
+            _ => true,
+        };
         match (self, o) {
-            (Acquired::Point { at: a, .. }, Acquired::Point { at: b, .. }) => near(*a, *b),
-            (Acquired::Parallel { dir: a, at: p }, Acquired::Parallel { dir: b, at: q }) => {
-                a.cross(*b).abs() < 1e-9 && (*p - *q).cross(*a).abs() <= 1e-9 * (1.0 + p.len())
+            (Acquired::Point { at: a, at3: a3, .. }, Acquired::Point { at: b, at3: b3, .. }) => near(*a, *b) && near3(*a3, *b3),
+            (Acquired::Parallel { dir: a, at: p, at3: p3 }, Acquired::Parallel { dir: b, at: q, at3: q3 }) => {
+                a.cross(*b).abs() < 1e-9 && (*p - *q).cross(*a).abs() <= 1e-9 * (1.0 + p.len()) && near3(*p3, *q3)
             }
             (Acquired::Apparent { shape: a, .. }, Acquired::Apparent { shape: b, .. }) => same_shape(a, b),
             (Acquired::Temporary { at: a }, Acquired::Temporary { at: b }) => near(*a, *b),
@@ -433,7 +452,7 @@ impl Tracker {
         }
         for acq in &self.acquired {
             match *acq {
-                Acquired::Point { at, name, ext } => {
+                Acquired::Point { at, name, ext, .. } => {
                     if cfg.otrack {
                         out.extend(cfg.track_angles.iter().map(|a| Path { shape: ray(at, *a), kind: PathKind::Alignment, from: at, name }));
                     }
@@ -443,7 +462,7 @@ impl Tracker {
                 }
                 Acquired::Parallel { dir, .. } => {
                     if let Some(b) = base.filter(|b| b.is_finite())
-                        && cfg.running(mode::PAR)
+                        && (cfg.running(mode::PAR) || cfg.otrack)
                     {
                         for d in [dir, -dir] {
                             out.push(Path { shape: PathShape::Ray { origin: b, dir: d }, kind: PathKind::Parallel, from: b, name: "Parallel" });
@@ -517,6 +536,14 @@ impl Tracker {
                 if a.from.dist(b.from) <= cadcraft_geom::EPS {
                     continue;
                 }
+                if let (
+                    PathShape::Ray { dir: da, .. } | PathShape::Line { dir: da, .. },
+                    PathShape::Ray { dir: db, .. } | PathShape::Line { dir: db, .. },
+                ) = (&a.shape, &b.shape)
+                    && da.cross(*db).abs() < 0.05
+                {
+                    continue;
+                }
                 for sa in a.shape.segments() {
                     for sb in b.shape.segments() {
                         for x in intersect_ext(&sa, &sb, true) {
@@ -566,7 +593,15 @@ impl Tracker {
         if let Some((_, t)) = best {
             return Some(t);
         }
-        // 3. Along the nearest path.
+        // 3. Along the nearest path (with hysteresis for currently tracked path).
+        if let Some(ref last) = self.last
+            && let Some((p, f, dd)) = near.iter().find(|(p, _, _)| last.paths.iter().any(|lp| lp.shape == p.shape))
+        {
+            let release_tol = tol * 1.6;
+            if p.slides() && *dd <= release_tol {
+                return Some(Track { point: *f, paths: vec![*p], object: None });
+            }
+        }
         near.iter().filter(|(p, _, dd)| p.slides() && *dd <= tol).min_by(|a, b| a.2.total_cmp(&b.2)).map(|(p, f, _)| Track {
             point: *f,
             paths: vec![*p],
@@ -626,10 +661,10 @@ fn candidate_from_prims(
     if let Some((at, ext)) = ext_end
         && hit.is_none_or(|h| h.point.dist(at) <= cadcraft_geom::EPS * (1.0 + at.len()))
     {
-        return Some(Acquired::Point { at, name: hit.map_or("Endpoint", |h| h.name), ext: Some(ext) });
+        return Some(Acquired::Point { at, at3: hit.and_then(|h| h.point3), name: hit.map_or("Endpoint", |h| h.name), ext: Some(ext) });
     }
     if let Some(h) = hit {
-        return cfg.otrack.then_some(Acquired::Point { at: h.point, name: h.name, ext: None });
+        return cfg.otrack.then_some(Acquired::Point { at: h.point, at3: h.point3, name: h.name, ext: None });
     }
     let (prim, at) = prims
         .iter()
@@ -648,11 +683,11 @@ fn candidate_from_prims(
         _ => None,
     }
     .filter(|d| *d != Vec2::ZERO && d.is_finite());
-    if cfg.running(mode::PAR)
+    if (cfg.running(mode::PAR) || cfg.otrack)
         && base.is_some()
         && let Some(dir) = line
     {
-        return Some(Acquired::Parallel { at, dir });
+        return Some(Acquired::Parallel { at, at3: None, dir });
     }
     if cfg.running(mode::APP) {
         let shape = match prim {

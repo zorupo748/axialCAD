@@ -19,17 +19,16 @@ pub fn is_valid_template_path(path: &str) -> bool {
     if ext_lower != "dwt" && ext_lower != "dxf" && ext_lower != "dwg" {
         return false;
     }
-    if let Ok(meta) = std::fs::metadata(p_path) {
-        if meta.is_dir() {
-            return false;
-        }
+    if let Ok(meta) = std::fs::metadata(p_path)
+        && meta.is_dir()
+    {
+        return false;
     }
-    if p_path.is_file() {
-        if let Ok(bytes) = std::fs::read(p_path) {
-            if bytes.is_empty() {
-                return false;
-            }
-        }
+    if p_path.is_file()
+        && let Ok(bytes) = std::fs::read(p_path)
+        && bytes.is_empty()
+    {
+        return false;
     }
     true
 }
@@ -184,7 +183,8 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
             Ok(json!({"interfaceLanguage": preference.code(), "shown": shown}))
         }
         "ui.open" | "open" if no_path => {
-            let picked = app.services.pick_open.as_ref().and_then(|f| f());
+            let initial_dir = app.ui.default_drawings_dir.as_deref();
+            let picked = app.services.pick_open.as_ref().and_then(|f| f(initial_dir));
             if let Some(p) = picked {
                 app.open_path(&p);
             }
@@ -215,7 +215,13 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
         }
         // Pick a template (.dwt or .dxf) and start a new drawing from it without modifying default template.
         "ui.newtemplate" => {
-            if let Some(p) = app.services.pick_open.as_ref().and_then(|f| f()) {
+            let initial_dir = app.ui.default_templates_dir.as_deref();
+            let picked = if let Some(pick) = app.services.pick_template.as_ref() {
+                pick(initial_dir)
+            } else {
+                app.services.pick_open.as_ref().and_then(|f| f(initial_dir))
+            };
+            if let Some(p) = picked {
                 let r = app.session.execute("new", &json!({ "template": p })).map_err(|e| e.to_string());
                 if r.is_ok() {
                     app.ui.start_tab = false;
@@ -226,10 +232,14 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
         }
         // Choose default template: validates selection, sets preference, persists, creates no document.
         "ui.defaulttemplate.choose" => {
-            if let Some(p) = app.services.pick_open.as_ref().and_then(|f| f()) {
-                if is_valid_template_path(&p) {
-                    let _ = app.run("options", json!({ "QNEWTEMPLATE": p }));
-                }
+            let initial_dir = app.ui.default_templates_dir.as_deref();
+            let picked = if let Some(pick) = app.services.pick_template.as_ref() {
+                pick(initial_dir)
+            } else {
+                app.services.pick_open.as_ref().and_then(|f| f(initial_dir))
+            };
+            if let Some(p) = picked.filter(|p| is_valid_template_path(p)) {
+                let _ = app.run("options", json!({ "QNEWTEMPLATE": p }));
             }
             Ok(Value::Null)
         }
@@ -241,7 +251,8 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
         // RECOVER from the menu or typed: pick the file. Without a picker the engine asks for the
         // file name on the command line.
         "recover" if no_path && app.services.pick_open.is_some() => {
-            if let Some(p) = app.services.pick_open.as_ref().and_then(|f| f()) {
+            let initial_dir = app.ui.default_drawings_dir.as_deref();
+            if let Some(p) = app.services.pick_open.as_ref().and_then(|f| f(initial_dir)) {
                 let r = app.run("recover", json!({ "path": p }));
                 app.opened(r);
             }
@@ -250,7 +261,12 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
         "ui.saveas" | "saveas" if no_path => {
             let title = app.session.state().map(|s| s.title.clone()).ok();
             let name = app.ui.save_format.suggested_name(title.as_deref());
-            if let Some(p) = app.services.pick_save.as_ref().and_then(|f| f(&name)) {
+            let current_path = app.session.state().ok().and_then(|s| s.path.clone());
+            let initial_dir = match &current_path {
+                Some(p) => std::path::Path::new(p).parent().and_then(|d| d.to_str()).map(str::to_string),
+                None => app.ui.default_drawings_dir.clone(),
+            };
+            if let Some(p) = app.services.pick_save.as_ref().and_then(|f| f(&name, initial_dir.as_deref())) {
                 let res = app.session.execute("saveas", &saveas_params(&app.ui, &app.session, &p)).map_err(|e| e.to_string());
                 if res.is_ok() {
                     app.remember_recent(p.clone());
@@ -271,7 +287,7 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
             let pick = app.services.pick_save.as_ref()?;
             let title = app.session.state().map(|s| s.title.clone()).unwrap_or_default();
             let stem = std::path::Path::new(&title).file_stem().map(|s| s.to_string_lossy().to_string()).filter(|s| !s.is_empty());
-            let Some(path) = pick(&format!("{}.pdf", stem.unwrap_or_else(|| "Drawing".into()))) else { return Some(Ok(Value::Null)) };
+            let Some(path) = pick(&format!("{}.pdf", stem.unwrap_or_else(|| "Drawing".into())), None) else { return Some(Ok(Value::Null)) };
             let r = app.session.execute("exportpdf", &json!({ "path": path })).map_err(|e| e.to_string());
             app.session.echo(match &r {
                 Ok(_) => format!("Plotted to {path}"),
@@ -841,7 +857,7 @@ mod tests {
         let log = Rc::clone(&asked);
         let services = Services {
             pick_open: None,
-            pick_save: Some(Box::new(move |name: &str| {
+            pick_save: Some(Box::new(move |name: &str, _dir| {
                 log.borrow_mut().push(name.to_string());
                 answer.clone()
             })),

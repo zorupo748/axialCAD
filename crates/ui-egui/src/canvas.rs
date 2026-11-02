@@ -1832,7 +1832,7 @@ fn draw_tracking(p: &egui::Painter, xf: &Xf, acquired: &[snap::tracking::Acquire
     let t = Tokens::get();
     let st = Stroke::new(1.0, t.snap);
     for a in acquired {
-        let c = xf.to_screen(a.at());
+        let c = if let Some(p3) = a.at3() { xf.to_screen3(p3) } else { xf.to_screen(a.at()) };
         if let Acquired::Parallel { .. } = a {
             p.line_segment([c + vec2(-5.0, 3.0), c + vec2(-1.0, -5.0)], st);
             p.line_segment([c + vec2(1.0, 3.0), c + vec2(5.0, -5.0)], st);
@@ -2157,19 +2157,26 @@ fn resolve_effective_point(
     let over = app.session.snap_override();
     let osmode = over.unwrap_or(base_osmode);
     let is_end_active = (osmode & snap::mode::END != 0) && (osmode & snap::mode::OFF == 0);
-    if wants_point && app.session.pending_window.is_none() && is_end_active {
+    if wants_point && app.session.pending_window.is_none() && is_end_active && !cam.is_plan() {
         let ap_cam = aperture / xf.scale;
         let cycle_idx = app.canvas.snap_cycle.map_or(0, |c| c.index);
         if let Ok(st) = app.session.state()
             && let Some(hit3d) = snap::snap_3d_line_endpoints(&st.doc, &st.edit_space(), &cam, q, ap_cam, cycle_idx)
         {
             let p3 = hit3d.point3.unwrap_or_else(|| Vec3::new(hit3d.point.x, hit3d.point.y, 0.0));
+            let at2 = if line_prompt { plane.coordinates(p3) } else { p3.xy() };
+            let (now, shift) = ctx.input(|i| (i.time, i.modifiers.shift));
+            let cand = Some(snap::tracking::Acquired::Point { at: at2, at3: Some(p3), name: hit3d.name, ext: None });
+            let wait = app.session.tracking.hover(cand, now, app.session.settings.polar_flags & snap::tracking::polarmode::SHIFT_ACQUIRE != 0, shift);
+            if wait {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(snap::tracking::DWELL / 4.0));
+            }
             app.canvas.snap = Some(hit3d);
             app.canvas.track = None;
             app.canvas.active_axis_3d = None;
             app.canvas.axis_track_z_zero = false;
             app.canvas.parallel_plane_warning = false;
-            return Some((if line_prompt { plane.coordinates(p3) } else { p3.xy() }, p3));
+            return Some((at2, p3));
         }
     }
 
@@ -2184,7 +2191,10 @@ fn resolve_effective_point(
         }
     }
 
-    if app.canvas.snap.is_some() {
+    let has_2d_constraint =
+        app.canvas.snap.is_some() || app.canvas.track.is_some() || (cam.is_plan() && (orthomode || app.session.settings.snapmode));
+
+    if has_2d_constraint {
         app.canvas.active_axis_3d = None;
         app.canvas.axis_track_z_zero = false;
         app.canvas.parallel_plane_warning = false;
@@ -2780,12 +2790,11 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         app.canvas.drag_window = false;
         if let Some(window) = app.canvas.selection_window.take()
             && let Some(end) = ui.input(|i| i.pointer.interact_pos())
+            && app.session.click_picks()
         {
-            if app.session.click_picks() {
-                let handles = screen_window_selection(app, &xf, window.anchor, end);
-                if let Err(error) = app.session.select_window_handles(handles, mods.shift) {
-                    app.session.echo(error.to_string());
-                }
+            let handles = screen_window_selection(app, &xf, window.anchor, end);
+            if let Err(error) = app.session.select_window_handles(handles, mods.shift) {
+                app.session.echo(error.to_string());
             }
         }
     }

@@ -125,9 +125,27 @@ pub struct UiState {
     pub start_search: String,
     /// The folder the last APPLOAD file came from: the next pick starts there.
     pub last_lisp_dir: Option<String>,
+    /// Default folder proposed when saving new drawings.
+    #[serde(default)]
+    pub default_drawings_dir: Option<String>,
+    /// Personal templates folder for template pickers and default template selection.
+    #[serde(default)]
+    pub default_templates_dir: Option<String>,
     /// Whether CADCraft creates an initial drawing from template at startup without explicit files.
     #[serde(default)]
     pub startup_create_drawing: bool,
+    /// A drawing file pending confirmation or warning to move to trash from the Start page.
+    #[serde(skip)]
+    pub pending_trash: Option<PendingTrash>,
+}
+
+/// A drawing file pending confirmation or warning to move to trash from the Start page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingTrash {
+    pub path: String,
+    pub filename: String,
+    pub is_open_in_cadcraft: bool,
+    pub error: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -212,7 +230,10 @@ impl Default for UiState {
             start_grid_view: true,
             start_search: String::new(),
             last_lisp_dir: None,
+            default_drawings_dir: None,
+            default_templates_dir: None,
             startup_create_drawing: false,
+            pending_trash: None,
         }
     }
 }
@@ -220,12 +241,17 @@ impl Default for UiState {
 /// Host services (file pickers, clipboard) injected by the app so this crate stays portable.
 #[derive(Default)]
 pub struct Services {
-    pub pick_open: Option<Box<dyn Fn() -> Option<String>>>,
-    pub pick_save: Option<Box<dyn Fn(&str) -> Option<String>>>,
+    pub pick_open: Option<Box<dyn Fn(Option<&str>) -> Option<String>>>,
+    pub pick_save: Option<Box<dyn Fn(&str, Option<&str>) -> Option<String>>>,
+    pub pick_template: Option<Box<dyn Fn(Option<&str>) -> Option<String>>>,
+    pub pick_folder: Option<Box<dyn Fn(Option<&str>) -> Option<String>>>,
     /// Pick a `.lsp` file for APPLOAD, starting in the given folder (empty for the default one).
     /// `None` where there is no native file dialog: the desktop without one asks for the name,
     /// and the web (no file system) says to drop the file (`no_file_system`).
     pub pick_lisp: Option<Box<dyn Fn(&str) -> Option<String>>>,
+    /// Moves a file to the system trash. Returns Ok(()) on success, or Err(message) on failure.
+    /// `None` when the platform or host has no trash facility (e.g. web).
+    pub trash_file: Option<Box<dyn Fn(&str) -> Result<(), String>>>,
     /// The host has no file system to read a path from (the browser): a dropped file's contents
     /// are what it loads, and APPLOAD says so instead of asking for a name it cannot read.
     pub no_file_system: bool,
@@ -482,6 +508,12 @@ impl CadApp {
         if let Some(dir) = &self.ui.last_lisp_dir {
             prefs["lispDir"] = json!(dir);
         }
+        if let Some(dir) = &self.ui.default_drawings_dir {
+            prefs["drawingsDir"] = json!(dir);
+        }
+        if let Some(dir) = &self.ui.default_templates_dir {
+            prefs["templatesDir"] = json!(dir);
+        }
         if !self.ui.show_ribbon {
             prefs["showRibbon"] = json!(false);
         }
@@ -532,6 +564,12 @@ impl CadApp {
         }
         if let Some(dir) = v.get("lispDir").and_then(Value::as_str).filter(|d| !d.is_empty()) {
             self.ui.last_lisp_dir = Some(dir.to_string());
+        }
+        if let Some(dir) = v.get("drawingsDir").and_then(Value::as_str).filter(|d| !d.is_empty()) {
+            self.ui.default_drawings_dir = Some(dir.to_string());
+        }
+        if let Some(dir) = v.get("templatesDir").and_then(Value::as_str).filter(|d| !d.is_empty()) {
+            self.ui.default_templates_dir = Some(dir.to_string());
         }
         if let Some(r) = v.get("showRibbon").and_then(Value::as_bool) {
             self.ui.show_ribbon = r;
@@ -700,7 +738,7 @@ impl CadApp {
                     && let Some(d) = self.session.docs.get(i)
                     && let Some(p) = &d.path
                 {
-                    crate::thumbnails::update_thumbnail(&d.drawing(), Some(d.view()), p);
+                    crate::thumbnails::update_thumbnail(d.drawing(), Some(d.view()), p);
                     Some(p.clone())
                 } else {
                     None
@@ -732,9 +770,9 @@ impl CadApp {
 
     /// Remove `path` from recents and pinned files.
     pub fn forget_recent(&mut self, path: &str) {
-        self.ui.recent_files.retain(|p| p != path);
-        self.ui.pinned_files.retain(|p| p != path);
-        self.thumbnail_textures.remove(path);
+        self.ui.recent_files.retain(|p| p != path && !crate::thumbnails::is_same_file(p, path));
+        self.ui.pinned_files.retain(|p| p != path && !crate::thumbnails::is_same_file(p, path));
+        self.thumbnail_textures.retain(|p, _| p != path && !crate::thumbnails::is_same_file(p, path));
     }
 
     /// Invalidate in-memory texture handle for `path` after thumbnail PNG update.

@@ -143,10 +143,10 @@ impl Workspace {
     pub fn apply(&mut self, action: Action<Panel>) -> Result<(), String> {
         self.validate()?;
         let mut next = self.clone();
-        if let Action::Float { panel, .. } | Action::Activate { panel } = &action {
-            if !next.layout.contains(panel) {
-                next.set_visible(*panel, true)?;
-            }
+        if let Action::Float { panel, .. } | Action::Activate { panel } = &action
+            && !next.layout.contains(panel)
+        {
+            next.set_visible(*panel, true)?;
         }
         if let Action::Close { panel } = &action {
             let location = next.layout.location(panel).map_err(|error| error.to_string())?;

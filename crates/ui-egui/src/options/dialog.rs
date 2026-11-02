@@ -23,14 +23,23 @@ pub(super) const TABS: [(&str, &str); 6] = [
 
 const WIDTH: f32 = 580.0;
 const MIN_TAB_HEIGHT: f32 = 200.0;
+const SNAPSHOT_OPTIONS: &str = "cc_options_snapshot";
 
 /// Show the Options dialog (`name` is `"options"` or `"options:<tab>"`).
 pub fn dialog(app: &mut CadApp, ctx: &egui::Context, name: &str, open: &mut bool) {
     let tab = name.strip_prefix("options:").and_then(|t| TABS.iter().find(|(id, _)| *id == t)).map_or("display", |(id, _)| *id);
+    let snapshot_id = egui::Id::new(SNAPSHOT_OPTIONS);
+    let snapshot = ctx.data(|d| d.get_temp::<Value>(snapshot_id)).unwrap_or_else(|| {
+        let s = super::report(app);
+        ctx.data_mut(|d| d.insert_temp(snapshot_id, s.clone()));
+        s
+    });
     let mut changes = Map::new();
     let mut next_tab = None;
     let mut start = None;
-    let mut close = false;
+    let mut cancel = false;
+    let mut ok = false;
+    let mut apply = false;
     let center = ctx.content_rect().center();
     egui::Window::new(crate::tl!("Options"))
         .id(egui::Id::new("cc_options"))
@@ -64,21 +73,37 @@ pub fn dialog(app: &mut CadApp, ctx: &egui::Context, name: &str, open: &mut bool
             ui.separator();
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(crate::tl!("Close")).clicked() {
-                        close = true;
+                    if ui.button(crate::tl!("Apply")).clicked() {
+                        apply = true;
                     }
-                    ui.label(RichText::new(crate::tl!("Changes apply at once and are kept for next time.")).small().color(Tokens::get().text_faint));
+                    if ui.button(crate::tl!("Cancel")).clicked() {
+                        cancel = true;
+                    }
+                    if ui.button(crate::tl!("OK")).clicked() {
+                        ok = true;
+                    }
                 });
             });
         });
-    if close {
+    if !changes.is_empty() {
+        let _ = app.run("options", Value::Object(changes));
+    }
+    if cancel {
+        let _ = app.run("options", snapshot);
+        ctx.data_mut(|d| d.remove::<Value>(snapshot_id));
         *open = false;
+    } else if ok {
+        ctx.data_mut(|d| d.remove::<Value>(snapshot_id));
+        *open = false;
+    } else if apply {
+        let updated = super::report(app);
+        ctx.data_mut(|d| d.insert_temp(snapshot_id, updated));
+    } else if !*open {
+        let _ = app.run("options", snapshot);
+        ctx.data_mut(|d| d.remove::<Value>(snapshot_id));
     }
     if let Some(t) = next_tab {
         app.ui.dialog = Some(format!("options:{t}"));
-    }
-    if !changes.is_empty() {
-        let _ = app.run("options", Value::Object(changes));
     }
     if let Some(id) = start {
         app.start(id);
@@ -206,6 +231,7 @@ fn display(app: &CadApp, ui: &mut egui::Ui, changes: &mut Map<String, Value>) {
 
 fn files(app: &CadApp, ui: &mut egui::Ui, changes: &mut Map<String, Value>) {
     grid(ui, "options_files", |ui| {
+        let current_format = changes.get("saveFormat").and_then(Value::as_str).and_then(crate::SaveFormat::parse).unwrap_or(app.ui.save_format);
         ui.label(crate::tl!("Save new drawings as"));
         ui.horizontal(|ui| {
             for f in crate::SaveFormat::ALL {
@@ -213,7 +239,7 @@ fn files(app: &CadApp, ui: &mut egui::Ui, changes: &mut Map<String, Value>) {
                     crate::SaveFormat::Dxf => crate::tl!("DXF"),
                     crate::SaveFormat::Dwg => crate::tl!("DWG"),
                 };
-                if ui.radio(app.ui.save_format == f, label).clicked() && app.ui.save_format != f {
+                if ui.radio(current_format == f, label).clicked() && current_format != f {
                     changes.insert("saveFormat".into(), json!(f.as_str()));
                 }
             }
@@ -221,21 +247,25 @@ fn files(app: &CadApp, ui: &mut egui::Ui, changes: &mut Map<String, Value>) {
         ui.end_row();
 
         ui.label(crate::tl!("Default save version"));
-        let current = crate::SaveVersion::parse(&app.ui.save_version).unwrap_or_default();
-        let mut version = current;
+        let current_version = changes
+            .get("saveVersion")
+            .and_then(Value::as_str)
+            .and_then(crate::SaveVersion::parse)
+            .unwrap_or_else(|| crate::SaveVersion::parse(&app.ui.save_version).unwrap_or_default());
+        let mut version = current_version;
         egui::ComboBox::from_id_salt("options_save_version").selected_text(version.year()).show_ui(ui, |ui| {
             for v in crate::SaveVersion::ALL {
                 ui.selectable_value(&mut version, v, v.year());
             }
         });
-        if version != current {
+        if version != current_version {
             changes.insert("saveVersion".into(), json!(version.year()));
         }
         ui.end_row();
 
         ui.label(crate::tl!("Units of new drawings"));
         ui.horizontal(|ui| {
-            let metric = app.session.settings.measureinit;
+            let metric = changes.get("MEASUREINIT").and_then(Value::as_i64).map(|n| n != 0).unwrap_or(app.session.settings.measureinit);
             if ui.radio(!metric, crate::tl!("Imperial (inches)")).clicked() && metric {
                 changes.insert("MEASUREINIT".into(), json!(0));
             }
@@ -246,7 +276,7 @@ fn files(app: &CadApp, ui: &mut egui::Ui, changes: &mut Map<String, Value>) {
         ui.end_row();
 
         ui.label(crate::tl!("Automatic save every"));
-        let mut minutes = cadcraft_engine::autosave::savetime();
+        let mut minutes = changes.get("SAVETIME").and_then(Value::as_u64).map(|n| n as u32).unwrap_or_else(cadcraft_engine::autosave::savetime);
         let max = cadcraft_engine::autosave::MAX_SAVETIME;
         if ui.add(egui::DragValue::new(&mut minutes).range(0..=max).suffix(format!(" {}", crate::tl!("min")))).changed() {
             changes.insert("SAVETIME".into(), json!(minutes));
@@ -256,27 +286,88 @@ fn files(app: &CadApp, ui: &mut egui::Ui, changes: &mut Map<String, Value>) {
         ui.label(crate::tl!("Automatic save file location"));
         // Edited as text; the folder changes when the field loses focus.
         let id = egui::Id::new("cc_options_savefilepath");
-        let current = cadcraft_engine::autosave::savefilepath();
-        let mut path = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| current.clone());
+        let current_savepath =
+            changes.get("SAVEFILEPATH").and_then(Value::as_str).map(ToString::to_string).unwrap_or_else(cadcraft_engine::autosave::savefilepath);
+        let mut path = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| current_savepath.clone());
         let r = ui.add(egui::TextEdit::singleline(&mut path).desired_width(330.0));
         if r.changed() {
             ui.data_mut(|d| d.insert_temp(id, path.clone()));
         }
         if r.lost_focus() {
             ui.data_mut(|d| d.remove::<String>(id));
-            if path.trim() != current {
+            if path.trim() != current_savepath {
                 changes.insert("SAVEFILEPATH".into(), json!(path.trim()));
             }
         }
         ui.end_row();
 
+        ui.label(crate::tl!("Default drawings folder"));
+        let drawings_dir = match changes.get("drawingsDir") {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Null) => None,
+            _ => app.ui.default_drawings_dir.clone(),
+        };
+        ui.horizontal(|ui| {
+            let label = drawings_dir.as_deref().unwrap_or(crate::tl!("(Default)"));
+            ui.label(RichText::new(label).monospace());
+            if drawings_dir.as_ref().is_some_and(|d| !std::path::Path::new(d).is_dir()) {
+                ui.label(RichText::new(format!("⚠️ {}", crate::tl!("Folder not found or not accessible"))).small().color(Tokens::get().text_faint));
+            }
+            if ui.button(crate::tl!("Browse...")).clicked() {
+                let picked = app.services.pick_folder.as_ref().and_then(|f| f(drawings_dir.as_deref()));
+                if let Some(dir) = picked {
+                    changes.insert("drawingsDir".into(), json!(dir));
+                }
+            }
+            if drawings_dir.is_some() && ui.button(crate::tl!("Clear")).clicked() {
+                changes.insert("drawingsDir".into(), Value::Null);
+            }
+        });
+        ui.end_row();
+
+        ui.label(crate::tl!("Personal templates folder"));
+        let templates_dir = match changes.get("templatesDir") {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Null) => None,
+            _ => app.ui.default_templates_dir.clone(),
+        };
+        ui.horizontal(|ui| {
+            let label = templates_dir.as_deref().unwrap_or(crate::tl!("(Default)"));
+            ui.label(RichText::new(label).monospace());
+            if templates_dir.as_ref().is_some_and(|d| !std::path::Path::new(d).is_dir()) {
+                ui.label(RichText::new(format!("⚠️ {}", crate::tl!("Folder not found or not accessible"))).small().color(Tokens::get().text_faint));
+            }
+            if ui.button(crate::tl!("Browse...")).clicked() {
+                let picked = app.services.pick_folder.as_ref().and_then(|f| f(templates_dir.as_deref()));
+                if let Some(dir) = picked {
+                    changes.insert("templatesDir".into(), json!(dir));
+                }
+            }
+            if templates_dir.is_some() && ui.button(crate::tl!("Clear")).clicked() {
+                changes.insert("templatesDir".into(), Value::Null);
+            }
+        });
+        ui.end_row();
+
         ui.label(crate::tl!("Default template for new drawings"));
-        let template = cadcraft_engine::cmd::file::qnew_template();
+        let template = match changes.get("QNEWTEMPLATE") {
+            Some(Value::String(s)) => s.clone(),
+            _ => cadcraft_engine::cmd::file::qnew_template(),
+        };
         ui.horizontal(|ui| {
             let label = if template.is_empty() { format!("({})", crate::tl!("None")) } else { template.clone() };
             ui.label(RichText::new(label).monospace());
+            if !template.is_empty() && !std::path::Path::new(&template).is_file() {
+                ui.label(RichText::new(format!("⚠️ {}", crate::tl!("File not found or not accessible"))).small().color(Tokens::get().text_faint));
+            }
             if ui.button(crate::tl!("Browse...")).clicked() {
-                if let Some(p) = app.services.pick_open.as_ref().and_then(|f| f()) {
+                let initial_dir = templates_dir.as_deref();
+                let picked = if let Some(pick) = app.services.pick_template.as_ref() {
+                    pick(initial_dir)
+                } else {
+                    app.services.pick_open.as_ref().and_then(|f| f(initial_dir))
+                };
+                if let Some(p) = picked {
                     changes.insert("QNEWTEMPLATE".into(), json!(p));
                 }
             }
@@ -287,7 +378,7 @@ fn files(app: &CadApp, ui: &mut egui::Ui, changes: &mut Map<String, Value>) {
         ui.end_row();
     });
     ui.add_space(6.0);
-    let mut startup_create = app.ui.startup_create_drawing;
+    let mut startup_create = changes.get("startupCreateDrawing").and_then(Value::as_bool).unwrap_or(app.ui.startup_create_drawing);
     if ui.checkbox(&mut startup_create, crate::tl!("Create a drawing at startup")).changed() {
         changes.insert("startupCreateDrawing".into(), json!(startup_create));
     }

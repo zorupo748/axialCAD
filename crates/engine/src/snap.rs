@@ -1092,35 +1092,84 @@ pub fn grid_frame(d: &Drawing) -> (Vec2, f64) {
 /// Projects visible 3D LINE endpoints using the active camera and returns the closest endpoint
 /// within `aperture_cam` units in the camera projection plane. This currently scans every entity
 /// in the active space (O(N)); spatial indexing is intentionally outside this functional fix.
+/// 3D object snap query (endpoints, midpoints, nodes, centers) projected through camera `cam`.
 /// Overlapping candidates are ordered deterministically and support cycling via `cycle_idx`.
-pub fn snap_3d_line_endpoints(
+pub fn snap_3d_endpoints(
     doc: &Drawing,
     space: &Space,
     cam: &OrbitCamera,
     cursor_q: Vec2,
     aperture_cam: f64,
+    osmode: u32,
     cycle_idx: usize,
 ) -> Option<SnapHit> {
-    if !cursor_q.is_finite() || !aperture_cam.is_finite() || aperture_cam <= 0.0 {
+    if !cursor_q.is_finite() || !aperture_cam.is_finite() || aperture_cam <= 0.0 || (osmode & mode::OFF != 0) {
         return None;
     }
     let store = doc.space(space)?;
-    let mut candidates: Vec<(f64, cadcraft_doc::Handle, u8, Vec3)> = Vec::new();
+    let mut candidates: Vec<(f64, cadcraft_doc::Handle, u8, Vec3, u32, &'static str)> = Vec::new();
 
     for ent in store.iter() {
         if !doc.is_visible(ent) {
             continue;
         }
-        if let EntityKind::Line(line) = &ent.kind {
-            for (idx, p) in [(0u8, line.a), (1u8, line.b)] {
+        match &ent.kind {
+            EntityKind::Line(line) => {
+                if osmode & mode::END != 0 {
+                    for (idx, p) in [(0u8, line.a), (1u8, line.b)] {
+                        let p_screen = cam.project_point(p);
+                        if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
+                            let dist = (p_screen - cursor_q).len();
+                            if dist <= aperture_cam {
+                                candidates.push((dist, ent.handle, idx, p, mode::END, "Endpoint"));
+                            }
+                        }
+                    }
+                }
+                if osmode & mode::MID != 0 {
+                    let mid = (line.a + line.b) * 0.5;
+                    let p_screen = cam.project_point(mid);
+                    if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
+                        let dist = (p_screen - cursor_q).len();
+                        if dist <= aperture_cam {
+                            candidates.push((dist, ent.handle, 2, mid, mode::MID, "Midpoint"));
+                        }
+                    }
+                }
+            }
+            EntityKind::Point(point) => {
+                if osmode & mode::NOD != 0 {
+                    let p = point.p;
+                    let p_screen = cam.project_point(p);
+                    if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
+                        let dist = (p_screen - cursor_q).len();
+                        if dist <= aperture_cam {
+                            candidates.push((dist, ent.handle, 0, p, mode::NOD, "Node"));
+                        }
+                    }
+                }
+            }
+            EntityKind::Circle(c) if osmode & mode::CEN != 0 => {
+                let p = c.center;
                 let p_screen = cam.project_point(p);
                 if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
                     let dist = (p_screen - cursor_q).len();
                     if dist <= aperture_cam {
-                        candidates.push((dist, ent.handle, idx, p));
+                        candidates.push((dist, ent.handle, 0, p, mode::CEN, "Center"));
                     }
                 }
             }
+            EntityKind::Arc(a) if osmode & mode::CEN != 0 => {
+                let p = a.center;
+                let p_screen = cam.project_point(p);
+                if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
+                    let dist = (p_screen - cursor_q).len();
+                    if dist <= aperture_cam {
+                        candidates.push((dist, ent.handle, 0, p, mode::CEN, "Center"));
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1131,7 +1180,19 @@ pub fn snap_3d_line_endpoints(
     candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.cmp(&b.2)));
 
     let chosen = candidates[cycle_idx % candidates.len()];
-    Some(SnapHit { point: chosen.3.xy(), point3: Some(chosen.3), mode: mode::END, name: "Endpoint", viewport: None, deferred: None })
+    Some(SnapHit { point: chosen.3.xy(), point3: Some(chosen.3), mode: chosen.4, name: chosen.5, viewport: None, deferred: None })
+}
+
+/// Overlapping candidates are ordered deterministically and support cycling via `cycle_idx`.
+pub fn snap_3d_line_endpoints(
+    doc: &Drawing,
+    space: &Space,
+    cam: &OrbitCamera,
+    cursor_q: Vec2,
+    aperture_cam: f64,
+    cycle_idx: usize,
+) -> Option<SnapHit> {
+    snap_3d_endpoints(doc, space, cam, cursor_q, aperture_cam, mode::END, cycle_idx)
 }
 
 #[cfg(test)]

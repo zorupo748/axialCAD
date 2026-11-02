@@ -1455,6 +1455,7 @@ impl Session {
         self.select_mode = None;
         self.select_single = false;
         self.settings.zlock = false;
+        self.tracking.clear();
         if find_command(&run.id).is_some_and(|c| c.undoable)
             && let Err(e) = self.refuse_non_finite(None, &run.before, &run.selection_before, &run.id)
         {
@@ -1517,6 +1518,7 @@ impl Session {
     /// transparent command, cancels it and the command it interrupted.
     pub fn cancel(&mut self) {
         self.point_mods.clear();
+        self.tracking.clear();
         // Esc stops a LISP routine waiting for input, and the command it paused in.
         if self.lisp_waiting() {
             if self.running.is_some() {
@@ -1760,10 +1762,12 @@ impl Session {
             if let Some((p3, has_z)) = prompt::parse_point3_opt(tt, self.last_point3, &angles) {
                 self.last_polar = prompt::parse_polar_text(tt, &self.angle_settings());
                 let world_2d = tt.starts_with('*') || tt.strip_prefix('@').is_some_and(|rest| rest.trim_start().starts_with('*'));
-                if line_prompt && !has_z && !world_2d {
-                    if let Some(point) = prompt::parse_point_with(tt, self.last_point, &angles) {
-                        return self.input(Input::Point(point));
-                    }
+                if line_prompt
+                    && !has_z
+                    && !world_2d
+                    && let Some(point) = prompt::parse_point_with(tt, self.last_point, &angles)
+                {
+                    return self.input(Input::Point(point));
                 }
                 return self.input(Input::Point3(p3));
             }

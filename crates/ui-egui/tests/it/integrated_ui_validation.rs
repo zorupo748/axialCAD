@@ -1341,6 +1341,7 @@ fn test_default_template_and_startup_options_roundtrip() {
 
 #[test]
 fn test_template_personal_flow_and_independence() {
+    let _serial = TEMPLATE_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let _restore = RestoreQnewTemplate(cadcraft_engine::cmd::file::qnew_template());
     let mut app = CadApp::new(Session::default(), Services::default());
 
@@ -1496,8 +1497,8 @@ fn test_template_ui_journey_with_simulated_pickers() {
     let save_prompt_called_c = save_prompt_called.clone();
 
     let services = Services {
-        pick_open: Some(Box::new(move || picked_file_c.borrow().clone())),
-        pick_save: Some(Box::new(move |_| {
+        pick_open: Some(Box::new(move |_dir| picked_file_c.borrow().clone())),
+        pick_save: Some(Box::new(move |_name, _dir| {
             save_prompt_called_c.set(true);
             Some("/saved_drawings/my_plan.dxf".to_string())
         })),

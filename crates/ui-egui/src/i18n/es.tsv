@@ -10,6 +10,8 @@
 	% of all commits	% de todos los commits
 	* Wildcard Match	* Coincidencia con comodines
 	*VARIES*	*VARIOS*
+	(Default)	(Predeterminada)
+	(None)	(Ninguna)
 	+  |  Top  |  2D Wireframe	+  |  Superior  |  Estructura alámbrica 2D
 	+Bin	+Bin
 	+LOC	+Líneas
@@ -63,6 +65,7 @@
 	Apply true color	Aplicar color verdadero
 	Arc	Arco
 	Arc Length	Longitud de arco
+	Are you sure you want to move this file to the system trash?	¿Está seguro de que desea mover este archivo a la papelera del sistema?
 	Area	Área
 	Arrange Panel	Organizar panel
 	Array	Matriz
@@ -134,6 +137,7 @@
 	Change to Current Layer	Cambiar a la capa actual
 	Changed: {n}	Modificados: {n}
 	Changes apply at once and are kept for next time.	Los cambios se aplican al instante y se conservan para la próxima vez.
+	Choose...	Elegir...
 	Circle	Círculo
 	Circumference	Circunferencia
 	Clear	Limpiar
@@ -218,9 +222,13 @@
 	Data Extraction...	Extracción de datos...
 	Data Link...	Vínculo de datos...
 	Default	Predeterminado
+	Default drawings folder	Carpeta predeterminada de dibujos
 	Default Save Format	Formato de guardado predeterminado
 	Default Save Version	Versión de guardado predeterminada
 	Default save version	Versión de guardado predeterminada
+	Default Template	Plantilla predeterminada
+	Default Template:	Plantilla predeterminada:
+	Default template for new drawings	Plantilla predeterminada para nuevos dibujos
 	Define Attributes	Definir atributos
 	Define Attributes...	Definir atributos...
 	Defined width	Anchura definida
@@ -280,6 +288,7 @@
 	Drawing plane offset fixed at {offset}.	Cota del plano de dibujo fijada en {offset}.
 	Drawing Recovery Manager...	Administrador de recuperación de dibujos...
 	Drawing Template (DWT)	Plantilla de dibujo (DWT)
+	Drawing Templates (DWT, DXF, DWG)	Plantillas de dibujo (DWT, DXF, DWG)
 	Drawing Utilities	Utilidades de dibujo
 	Drawings (DWG, DXF)	Dibujos (DWG, DXF)
 	Drawings with no file yet are saved in the default version. 0 minutes turns automatic save off.	Los dibujos que aún no tienen archivo se guardan en la versión predeterminada. 0 minutos desactiva el guardado automático.
@@ -370,9 +379,11 @@
 	External References	Referencias externas
 	Extrude	Extruir
 	File	Archivo
+	File not found or not accessible	Archivo no encontrado o no accesible
 	File Tab	Pestañas de archivos
 	Fillet	Empalme
 	Filter	Filtrar
+	Filter by name or path...	Filtrar por nombre o ruta...
 	Filters	Filtros
 	Find and Replace	Buscar y reemplazar
 	Find...	Buscar...
@@ -381,6 +392,7 @@
 	Fit Points	Puntos de ajuste
 	Fix	Fijar
 	Flatten Objects	Aplanar objetos
+	Folder not found or not accessible	Carpeta no encontrada o no accesible
 	Format	Formato
 	Free point	Punto libre
 	Freehand	Mano alzada
@@ -415,6 +427,7 @@
 	Z=0 acquired; Free/F releases it. ORTHO/V and axis tracking are bypassed.	Suelo Z=0 adquirido; Punto libre/F lo libera. ORTO/V y el rastreo de ejes se omiten.
 	Locked Dynamic Input has priority over acquired Z=0.	La entrada dinámica bloqueada tiene prioridad sobre el Z=0 adquirido.
 	{snap} snap has priority over acquired Z=0.	La referencia {snap} tiene prioridad sobre el Z=0 adquirido.
+	Grid	Cuadrícula
 	Grip Edit	Editar con pinzamientos
 	Grip Mirror	Simetría con pinzamientos
 	Grip Option	Opción de pinzamiento
@@ -575,6 +588,7 @@
 	Mid Between 2 Points	Punto medio entre 2 puntos
 	Midpoint	Punto medio
 	Mirror	Simetría
+	Missing	No encontrado
 	Model	Modelo
 	More	Más
 	Model Space (in viewport)	Espacio modelo (en ventana gráfica)
@@ -582,8 +596,11 @@
 	Modeling	Modelado
 	Models	Modelos
 	Modify	Modificar
+	Modified	Modificado
 	More toolbar commands	Más comandos de la barra de herramientas
 	Move	Desplazar
+	Move to Trash	Mover a la papelera
+	Move to Trash...	Mover a la papelera...
 	Multileader	Directriz múltiple
 	Multileader Style...	Estilo de directriz múltiple...
 	Multileader style	Estilo de directriz múltiple
@@ -691,8 +708,10 @@
 	Paste as Block	Pegar como bloque
 	Paste to Original Coordinates	Pegar en coordenadas originales
 	Path Array	Matriz de camino
+	Path:	Ruta:
 	Pattern	Patrón
 	Perpendicular	Perpendicular
+	Personal templates folder	Carpeta de plantillas personales
 	Plane offset adjustment cancelled.	Ajuste del desplazamiento del plano cancelado.
 	Plane offset reset to the origin (0.0).	Desplazamiento del plano restablecido al origen (0.0).
 	Plane: {plane}	Plano: {plane}
@@ -720,6 +739,7 @@
 	QuickCalc Pick	Designar para la calculadora rápida
 	Recalculate Table Formulas	Recalcular fórmulas de tabla
 	Recent Commands	Comandos recientes
+	Recent Drawings	Dibujos recientes
 	Recent Input	Entradas recientes
 	Rectangular snap	Forzar cursor rectangular
 	Reference Manager	Administrador de referencias
@@ -729,6 +749,7 @@
 	Relative to last segment	Relativo al último segmento
 	Reload	Volver a cargar
 	Reload All	Volver a cargar todas
+	Remove from Recents	Quitar de recientes
 	Remove Vertex	Eliminar vértice
 	Reset Panel Layout	Restablecer disposición de paneles
 	Reset keeps the interface language.	Restablecer conserva el idioma de la interfaz.
@@ -766,12 +787,14 @@
 	Thaw Layer	Reutilizar capa
 	The aperture is how near the cursor must come to a point for an object snap to find it.	La apertura indica cuánto debe acercarse el cursor a un punto para que la referencia a objetos lo encuentre.
 	The camera ray is parallel to global Z=0; orbit the view or choose Free.	El rayo de la cámara es paralelo a Z=0 global; orbite la vista o elija Punto libre.
+	The file is currently open in CADcraft. Close it first before moving to trash.	El archivo está abierto en CADcraft. Ciérrelo antes de moverlo a la papelera.
 	Time-sensitive right-click: a quick click is Enter, holding opens the menu	Clic derecho según duración: un clic rápido equivale a Intro; mantenerlo abre el menú
 	To	A
 	Tolerance...	Tolerancia...
 	Top	Superior
 	Track orthogonally only	Rastrear solo ortogonalmente
 	Track using all polar angle settings	Rastrear con todos los ángulos polares configurados
+	Trash is not available on this system.	La papelera no está disponible en este sistema.
 	Turn On Layer	Activar capa
 	Turned off, a right-click while a command runs always opens the shortcut menu.	Desactivado, un clic derecho durante un comando siempre abre el menú contextual.
 	Units Conversion	Conversión de unidades
@@ -891,6 +914,8 @@
 	Save Layer State	Guardar estado de capas
 	Save State	Guardar estado
 	Scale	Escala
+	Search	Buscar
+	Search:	Buscar:
 	Search for layer	Buscar capa
 	Search for parameter	Buscar parámetro
 	Second and next points:	Segundo punto y siguientes:

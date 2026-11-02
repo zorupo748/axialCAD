@@ -94,7 +94,7 @@ mod web {
     /// no file system either, so a dropped file is opened from its contents and APPLOAD says to
     /// drop a `.lsp` file rather than asking for a name it cannot read.
     fn services() -> Services {
-        Services { pick_save: Some(Box::new(|name: &str| Some(name.to_string()))), no_file_system: true, ..Services::default() }
+        Services { pick_save: Some(Box::new(|name: &str, _dir: Option<&str>| Some(name.to_string()))), no_file_system: true, ..Services::default() }
     }
 
     pub fn start() {
@@ -167,7 +167,7 @@ mod web {
                         // chosen file in the background (`upload.rs`), so the picker returns none.
                         let inbox = crate::upload::Inbox::new(&cc.egui_ctx);
                         let picker = inbox.clone();
-                        app.services.pick_open = Some(Box::new(move || {
+                        app.services.pick_open = Some(Box::new(move |_dir: Option<&str>| {
                             picker.pick();
                             None
                         }));

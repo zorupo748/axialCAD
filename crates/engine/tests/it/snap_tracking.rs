@@ -79,7 +79,7 @@ fn default_cursor_tracking_acquires_nested_block_geometry() {
     assert_eq!(s.tracking.acquired.len(), 1);
     assert!(matches!(
         s.tracking.acquired.first(),
-        Some(Acquired::Point { at, name, ext: Some(_) }) if at.near(v(10.0, 0.0), 1e-9) && *name == "Endpoint"
+        Some(Acquired::Point { at, name, ext: Some(_), .. }) if at.near(v(10.0, 0.0), 1e-9) && *name == "Endpoint"
     ));
 }
 
@@ -281,7 +281,7 @@ fn resting_again_releases_and_seven_points_at_most() {
     assert!(s.tracking.acquired.is_empty());
     // At most seven, the oldest dropped.
     for i in 0..10 {
-        s.tracking.toggle(Acquired::Point { at: v(f64::from(i), 0.0), name: "Endpoint", ext: None });
+        s.tracking.toggle(Acquired::Point { at: v(f64::from(i), 0.0), at3: None, name: "Endpoint", ext: None });
     }
     assert_eq!(s.tracking.acquired.len(), MAX_ACQUIRED);
     assert_eq!(s.tracking.acquired[0].at(), v(3.0, 0.0));
@@ -370,7 +370,7 @@ fn hostile_inputs_never_panic() {
     setvar(&mut s, "POLARADDANG", json!("1e300;-5;0"));
     for i in 0..9 {
         let a = [f64::NAN, f64::INFINITY, 1e300, -1e300, 0.0, 1e-300, 5.0, 10.0, -0.0][i];
-        s.tracking.toggle(Acquired::Point { at: v(a, a), name: "Endpoint", ext: None });
+        s.tracking.toggle(Acquired::Point { at: v(a, a), at3: None, name: "Endpoint", ext: None });
     }
     rest(&mut s, v(10.0, 0.0), Some(v(1.0, 1.0)));
     rest(&mut s, v(5.0, 8.0), Some(v(1.0, 1.0)));

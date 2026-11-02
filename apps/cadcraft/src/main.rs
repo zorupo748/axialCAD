@@ -128,28 +128,121 @@ pub fn install_io() {
 
 fn services() -> Services {
     Services {
-        pick_open: Some(Box::new(|| {
-            rfd::FileDialog::new()
+        pick_open: Some(Box::new(|dir: Option<&str>| {
+            let mut dialog = rfd::FileDialog::new()
                 .add_filter(i18n::t("Drawings (DWG, DXF)"), &["dwg", "dxf", "dwt"])
                 .add_filter(i18n::t("SVG drawings (SVG, SVGZ)"), &["svg", "svgz"])
-                .add_filter(i18n::t("All files"), &["*"])
-                .pick_file()
-                .map(|p| p.to_string_lossy().to_string())
+                .add_filter(i18n::t("All files"), &["*"]);
+            if let Some(d) = dir.filter(|d| std::path::Path::new(d).is_dir()) {
+                dialog = dialog.set_directory(d);
+            }
+            dialog.pick_file().map(|p| p.to_string_lossy().to_string())
         })),
-        pick_save: Some(Box::new(|name: &str| {
+        pick_save: Some(Box::new(|name: &str, dir: Option<&str>| {
+            let mut dialog = rfd::FileDialog::new().set_file_name(name);
+            if let Some(d) = dir.filter(|d| std::path::Path::new(d).is_dir()) {
+                dialog = dialog.set_directory(d);
+            }
             filters_for_save(name)
                 .iter()
-                .fold(rfd::FileDialog::new().set_file_name(name), |d, (label, ext)| d.add_filter(i18n::t(label), &[*ext]))
+                .fold(dialog, |d, (label, ext)| d.add_filter(i18n::t(label), &[*ext]))
                 .save_file()
                 .map(|p| p.to_string_lossy().to_string())
+        })),
+        pick_template: Some(Box::new(|dir: Option<&str>| {
+            let mut dialog = rfd::FileDialog::new()
+                .add_filter(i18n::t("Drawing Templates (DWT, DXF, DWG)"), &["dwt", "dxf", "dwg"])
+                .add_filter(i18n::t("All files"), &["*"]);
+            if let Some(d) = dir.filter(|d| std::path::Path::new(d).is_dir()) {
+                dialog = dialog.set_directory(d);
+            }
+            dialog.pick_file().map(|p| p.to_string_lossy().to_string())
+        })),
+        pick_folder: Some(Box::new(|dir: Option<&str>| {
+            let mut dialog = rfd::FileDialog::new();
+            if let Some(d) = dir.filter(|d| std::path::Path::new(d).is_dir()) {
+                dialog = dialog.set_directory(d);
+            }
+            dialog.pick_folder().map(|p| p.to_string_lossy().to_string())
         })),
         // APPLOAD: AutoLISP routines only, starting where the last one was loaded from.
         pick_lisp: Some(Box::new(|dir: &str| {
             let dialog = rfd::FileDialog::new().add_filter(i18n::t("AutoLISP (LSP)"), &["lsp"]).add_filter(i18n::t("All files"), &["*"]);
-            let dialog = if dir.is_empty() { dialog } else { dialog.set_directory(dir) };
+            let dialog = if dir.is_empty() || !std::path::Path::new(dir).is_dir() { dialog } else { dialog.set_directory(dir) };
             dialog.pick_file().map(|p| p.to_string_lossy().to_string())
         })),
+        trash_file: Some(Box::new(desktop_trash_file)),
         no_file_system: false,
+    }
+}
+
+fn desktop_trash_file(path: &str) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return Err("File does not exist".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(format!(
+                "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('{}', 'OnlyErrorDialogs', 'SendToRecycleBin')",
+                path.replace('\'', "''")
+            ))
+            .status()
+            .map_err(|e| format!("Failed to execute Recycle Bin command: {e}"))?;
+        if status.success() && !p.exists() {
+            return Ok(());
+        }
+        return Err("Recycle Bin operation failed".into());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!("tell application \"Finder\" to delete POSIX file \"{}\"", path.replace('"', "\\\""));
+        let status =
+            std::process::Command::new("osascript").arg("-e").arg(&script).status().map_err(|e| format!("Failed to execute trash command: {e}"))?;
+        if status.success() && !p.exists() {
+            return Ok(());
+        }
+        return Err("Move to Trash failed".into());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Ok(status) = std::process::Command::new("gio").arg("trash").arg(path).status()
+            && status.success()
+            && !p.exists()
+        {
+            return Ok(());
+        }
+        if let Ok(status) = std::process::Command::new("trash-put").arg(path).status()
+            && status.success()
+            && !p.exists()
+        {
+            return Ok(());
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            let trash_dir = std::path::PathBuf::from(home).join(".local/share/Trash");
+            let files_dir = trash_dir.join("files");
+            let info_dir = trash_dir.join("info");
+            if std::fs::create_dir_all(&files_dir).is_ok() && std::fs::create_dir_all(&info_dir).is_ok() {
+                let fname = p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+                let dest = files_dir.join(format!("{}_{}", chrono::Utc::now().timestamp(), fname));
+                let info_file = info_dir.join(format!("{}.trashinfo", dest.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()));
+                let info_content = format!(
+                    "[Trash Info]\nPath={}\nDeletionDate={}\n",
+                    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).display(),
+                    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S")
+                );
+                if std::fs::write(&info_file, info_content).is_ok() {
+                    if std::fs::rename(p, &dest).is_ok() {
+                        return Ok(());
+                    } else {
+                        let _ = std::fs::remove_file(info_file);
+                    }
+                }
+            }
+        }
+        Err("No system trash facility available".into())
     }
 }
 

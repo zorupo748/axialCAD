@@ -150,6 +150,8 @@ struct UiChanges {
     save_version: Option<crate::SaveVersion>,
     savetime: Option<u32>,
     savefilepath: Option<String>,
+    drawings_dir: Option<Option<String>>,
+    templates_dir: Option<Option<String>>,
     time_sensitive_right_click: Option<bool>,
     interface_scale: Option<f32>,
     startup_create_drawing: Option<bool>,
@@ -177,6 +179,22 @@ fn parse_ui(key: &str, v: &Value, c: &mut UiChanges) -> Result<bool, String> {
         "saveFormat" => c.save_format = Some(crate::SaveFormat::parse(text()?).ok_or("saveFormat must be dxf or dwg")?),
         "systemCursor" => c.system_cursor = Some(v.as_bool().ok_or("systemCursor must be true or false")?),
         "startupCreateDrawing" => c.startup_create_drawing = Some(v.as_bool().ok_or("startupCreateDrawing must be true or false")?),
+        "drawingsDir" => {
+            c.drawings_dir = Some(match v {
+                Value::Null => None,
+                Value::String(s) if s.trim().is_empty() => None,
+                Value::String(s) => Some(s.trim().to_string()),
+                _ => return Err("drawingsDir must be a folder path or null".into()),
+            });
+        }
+        "templatesDir" => {
+            c.templates_dir = Some(match v {
+                Value::Null => None,
+                Value::String(s) if s.trim().is_empty() => None,
+                Value::String(s) => Some(s.trim().to_string()),
+                _ => return Err("templatesDir must be a folder path or null".into()),
+            });
+        }
         k if k.eq_ignore_ascii_case("zZeroDropHelper") || k.eq_ignore_ascii_case("showZZeroDropHelper") => {
             c.z_zero_drop_helper = Some(v.as_bool().ok_or("zZeroDropHelper must be a boolean")?);
         }
@@ -235,6 +253,8 @@ fn ui_json(app: &CadApp) -> Map<String, Value> {
     m.insert("saveVersion".into(), json!(app.ui.save_version));
     m.insert("SAVETIME".into(), json!(cadcraft_engine::autosave::savetime()));
     m.insert("SAVEFILEPATH".into(), json!(cadcraft_engine::autosave::savefilepath()));
+    m.insert("drawingsDir".into(), app.ui.default_drawings_dir.as_ref().map_or(Value::Null, |d| json!(d)));
+    m.insert("templatesDir".into(), app.ui.default_templates_dir.as_ref().map_or(Value::Null, |d| json!(d)));
     m.insert("timeSensitiveRightClick".into(), json!(o.time_sensitive_right_click));
     m.insert("startupCreateDrawing".into(), json!(app.ui.startup_create_drawing));
     m.insert("zZeroDropHelper".into(), json!(o.z_zero_drop_helper));
@@ -308,6 +328,12 @@ fn run_json(app: &mut CadApp, params: &Value) -> Result<Value, String> {
     if let Some(p) = &ui.savefilepath {
         cadcraft_engine::autosave::set_savefilepath(p);
     }
+    if let Some(d) = ui.drawings_dir {
+        app.ui.default_drawings_dir = d;
+    }
+    if let Some(d) = ui.templates_dir {
+        app.ui.default_templates_dir = d;
+    }
     if let Some(b) = ui.time_sensitive_right_click {
         app.options.time_sensitive_right_click = b;
     }
@@ -329,6 +355,8 @@ fn reset_ui(app: &mut CadApp) {
     app.ui.save_version = d.save_version;
     app.ui.system_cursor = d.system_cursor;
     app.ui.history_lines = d.history_lines;
+    app.ui.default_drawings_dir = d.default_drawings_dir;
+    app.ui.default_templates_dir = d.default_templates_dir;
     app.ui.startup_create_drawing = d.startup_create_drawing;
     app.options = UiOptions::default();
 }
@@ -351,6 +379,8 @@ impl CadApp {
             "interfaceScale": self.options.interface_scale,
             "startupCreateDrawing": self.ui.startup_create_drawing,
             "zZeroDropHelper": self.options.z_zero_drop_helper,
+            "drawingsDir": self.ui.default_drawings_dir,
+            "templatesDir": self.ui.default_templates_dir,
         })
         .to_string()
     }
@@ -376,6 +406,8 @@ impl CadApp {
             "interfaceScale",
             "startupCreateDrawing",
             "zZeroDropHelper",
+            "drawingsDir",
+            "templatesDir",
         ] {
             if let Some(value) = v.get(key) {
                 let _ = parse_ui(key, value, &mut c);
@@ -408,6 +440,12 @@ impl CadApp {
         }
         if let Some(b) = c.z_zero_drop_helper {
             self.options.z_zero_drop_helper = b;
+        }
+        if let Some(dir) = c.drawings_dir {
+            self.ui.default_drawings_dir = dir;
+        }
+        if let Some(dir) = c.templates_dir {
+            self.ui.default_templates_dir = dir;
         }
     }
 }

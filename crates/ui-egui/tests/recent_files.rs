@@ -434,7 +434,7 @@ fn test_save_coverage_menu_shortcut_cmdline() {
 
     // 1. Save via menu pick_save (ui.saveas)
     let p_saveas_clone = p_saveas.clone();
-    let services = Services { pick_save: Some(Box::new(move |_| Some(p_saveas_clone.clone()))), ..Services::default() };
+    let services = Services { pick_save: Some(Box::new(move |_, _| Some(p_saveas_clone.clone()))), ..Services::default() };
     let mut app = CadApp::new(Session::default(), services);
     app.session.new_drawing(true);
     let res = app.run("ui.saveas", serde_json::Value::Null);

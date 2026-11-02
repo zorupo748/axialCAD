@@ -777,6 +777,7 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
     let mut to_open = None;
     let mut to_pin = None;
     let mut to_forget = None;
+    let mut to_trash: Option<(String, String)> = None;
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(main_rect), |ui| {
         // Header
@@ -854,6 +855,29 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
                             let cp = ui.painter().with_clip_rect(card_rect);
                             let is_pinned = app.ui.pinned_files.contains(path);
                             let exists = crate::thumbnails::file_exists(path);
+                            let fname = crate::menus::file_name(path);
+
+                            let mut menu_action = None;
+                            resp.context_menu(|ui| {
+                                if exists && ui.button(crate::tl!("Open")).clicked() {
+                                    menu_action = Some("open");
+                                    ui.close();
+                                }
+                                if ui.button(crate::tl!("Remove from Recents")).clicked() {
+                                    menu_action = Some("forget");
+                                    ui.close();
+                                }
+                                if exists && ui.button(crate::tl!("Move to Trash...")).clicked() {
+                                    menu_action = Some("trash");
+                                    ui.close();
+                                }
+                            });
+                            match menu_action {
+                                Some("open") => to_open = Some(path.clone()),
+                                Some("forget") => to_forget = Some(path.clone()),
+                                Some("trash") => to_trash = Some((path.clone(), fname.clone())),
+                                _ => {}
+                            }
 
                             // Card background & border
                             let bg = if resp.hovered() { t.control_hover.gamma_multiply(0.35) } else { t.panel };
@@ -869,10 +893,10 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
 
                             // Thumbnail image area
                             let thumb_rect = Rect::from_min_size(pos2(card_rect.left() + 6.0, card_rect.top() + 6.0), vec2(card_w - 12.0, 106.0));
-                            if !app.thumbnail_textures.contains_key(path) {
-                                if let Some(tex) = crate::thumbnails::load_thumbnail_texture(&ctx, path) {
-                                    app.thumbnail_textures.insert(path.clone(), tex);
-                                }
+                            if !app.thumbnail_textures.contains_key(path)
+                                && let Some(tex) = crate::thumbnails::load_thumbnail_texture(&ctx, path)
+                            {
+                                app.thumbnail_textures.insert(path.clone(), tex);
                             }
 
                             if let Some(tex) = app.thumbnail_textures.get(path) {
@@ -940,7 +964,12 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
                                 t.text_dim,
                             );
 
-                            if resp.on_hover_text(path).clicked() && to_pin.is_none() && to_forget.is_none() {
+                            if resp.on_hover_text(path).clicked()
+                                && to_pin.is_none()
+                                && to_forget.is_none()
+                                && to_trash.is_none()
+                                && menu_action.is_none()
+                            {
                                 to_open = Some(path.clone());
                             }
                         }
@@ -954,6 +983,29 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
                     let cp = ui.painter().with_clip_rect(row_r);
                     let is_pinned = app.ui.pinned_files.contains(path);
                     let exists = crate::thumbnails::file_exists(path);
+                    let fname = crate::menus::file_name(path);
+
+                    let mut menu_action = None;
+                    resp.context_menu(|ui| {
+                        if exists && ui.button(crate::tl!("Open")).clicked() {
+                            menu_action = Some("open");
+                            ui.close();
+                        }
+                        if ui.button(crate::tl!("Remove from Recents")).clicked() {
+                            menu_action = Some("forget");
+                            ui.close();
+                        }
+                        if exists && ui.button(crate::tl!("Move to Trash...")).clicked() {
+                            menu_action = Some("trash");
+                            ui.close();
+                        }
+                    });
+                    match menu_action {
+                        Some("open") => to_open = Some(path.clone()),
+                        Some("forget") => to_forget = Some(path.clone()),
+                        Some("trash") => to_trash = Some((path.clone(), fname.clone())),
+                        _ => {}
+                    }
 
                     if resp.hovered() {
                         cp.rect_filled(row_r, 2.0, t.control_hover.gamma_multiply(0.4));
@@ -964,10 +1016,10 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
 
                     // Mini thumbnail
                     let mini_r = Rect::from_min_size(pos2(row_r.left() + 6.0, row_r.top() + 6.0), vec2(50.0, 34.0));
-                    if !app.thumbnail_textures.contains_key(path) {
-                        if let Some(tex) = crate::thumbnails::load_thumbnail_texture(&ctx, path) {
-                            app.thumbnail_textures.insert(path.clone(), tex);
-                        }
+                    if !app.thumbnail_textures.contains_key(path)
+                        && let Some(tex) = crate::thumbnails::load_thumbnail_texture(&ctx, path)
+                    {
+                        app.thumbnail_textures.insert(path.clone(), tex);
                     }
                     if let Some(tex) = app.thumbnail_textures.get(path) {
                         cp.image(tex.id(), mini_r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
@@ -1010,7 +1062,7 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
                         }
                     }
 
-                    if resp.on_hover_text(path).clicked() && to_pin.is_none() && to_forget.is_none() {
+                    if resp.on_hover_text(path).clicked() && to_pin.is_none() && to_forget.is_none() && to_trash.is_none() && menu_action.is_none() {
                         to_open = Some(path.clone());
                     }
                     ui.add_space(4.0);
@@ -1024,6 +1076,10 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
     }
     if let Some(path) = to_forget {
         app.forget_recent(&path);
+    }
+    if let Some((path, fname)) = to_trash {
+        let is_open = is_file_open_in_cadcraft(app, &path);
+        app.ui.pending_trash = Some(crate::PendingTrash { path, filename: fname, is_open_in_cadcraft: is_open, error: None });
     }
     if let Some(path) = to_open {
         app.open_path(&path);
@@ -1052,6 +1108,100 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
             app.start("ui.defaulttemplate.clear");
         }
         _ => {}
+    }
+}
+
+/// Returns true if the file at `path` is currently open in any document tab of `app`.
+pub fn is_file_open_in_cadcraft(app: &CadApp, path: &str) -> bool {
+    app.session.docs.iter().any(|d| d.path.as_deref().is_some_and(|dp| crate::thumbnails::is_same_file(dp, path)))
+}
+
+/// Confirmation and warning dialog for moving a file to the system trash.
+pub fn trash_confirmation_dialog(app: &mut CadApp, ctx: &egui::Context) {
+    let Some(mut pending) = app.ui.pending_trash.clone() else { return };
+    let mut close = false;
+    let mut do_trash = false;
+
+    let t = crate::theme::Tokens::get();
+    egui::Window::new(crate::tl!("Move to Trash"))
+        .id(egui::Id::new("trash_confirmation_window"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_min_width(380.0);
+            if pending.is_open_in_cadcraft {
+                ui.label(
+                    egui::RichText::new(crate::tl!("The file is currently open in CADcraft. Close it first before moving to trash."))
+                        .color(t.text_dim),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("{}:", crate::tl!("File"))).strong());
+                    ui.label(&pending.filename);
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(crate::tl!("Path:")).strong());
+                    ui.label(&pending.path);
+                });
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(crate::tl!("Close")).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            } else {
+                ui.label(crate::tl!("Are you sure you want to move this file to the system trash?"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("{}:", crate::tl!("File"))).strong());
+                    ui.label(&pending.filename);
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(crate::tl!("Path:")).strong());
+                    ui.label(&pending.path);
+                });
+                if let Some(ref err) = pending.error {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(format!("{}: {err}", crate::tl!("Error"))).color(egui::Color32::from_rgb(220, 50, 50)));
+                }
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(crate::tl!("Cancel")).clicked() {
+                            close = true;
+                        }
+                        if ui.button(crate::tl!("Move to Trash")).clicked() {
+                            do_trash = true;
+                        }
+                    });
+                });
+            }
+        });
+
+    if close {
+        app.ui.pending_trash = None;
+    } else if do_trash {
+        if is_file_open_in_cadcraft(app, &pending.path) {
+            pending.is_open_in_cadcraft = true;
+            app.ui.pending_trash = Some(pending);
+        } else if let Some(ref trash_fn) = app.services.trash_file {
+            match trash_fn(&pending.path) {
+                Ok(()) => {
+                    app.forget_recent(&pending.path);
+                    app.ui.pending_trash = None;
+                }
+                Err(err) => {
+                    pending.error = Some(err);
+                    app.ui.pending_trash = Some(pending);
+                }
+            }
+        } else {
+            pending.error = Some(crate::tl!("Trash is not available on this system.").to_string());
+            app.ui.pending_trash = Some(pending);
+        }
     }
 }
 #[cfg(test)]

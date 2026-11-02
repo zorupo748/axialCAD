@@ -117,3 +117,16 @@ pub fn file_modified_time(path: &str) -> String {
     let dt: chrono::DateTime<chrono::Local> = mod_time.into();
     dt.format("%Y-%m-%d %H:%M").to_string()
 }
+
+/// Check if two path strings refer to the same file on disk.
+pub fn is_same_file(path_a: &str, path_b: &str) -> bool {
+    if path_a == path_b {
+        return true;
+    }
+    let pa = Path::new(path_a);
+    let pb = Path::new(path_b);
+    if let (Ok(ca), Ok(cb)) = (std::fs::canonicalize(pa), std::fs::canonicalize(pb)) {
+        return ca == cb;
+    }
+    pa == pb
+}
