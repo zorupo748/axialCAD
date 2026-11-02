@@ -1,7 +1,7 @@
-name: Build Linux Package (No Release)
+name: Build and Release Linux Package
 
-# Manual and branch-restricted build workflow that packages CADCraft on an
-# Ubuntu 22.04 LTS runner (glibc 2.35 base) without creating or publishing releases.
+# Manual and branch-restricted build and release workflow that packages CADCraft
+# on an Ubuntu 22.04 LTS runner (glibc 2.35 base).
 on:
   push:
     branches:
@@ -20,6 +20,14 @@ on:
         description: "Referencia git explícita (commit SHA o rama; vacío = HEAD del evento)"
         type: string
         default: ""
+      publish_release:
+        description: "Crear borrador de prerelease en GitHub Releases (requiere release_tag)"
+        type: boolean
+        default: false
+      release_tag:
+        description: "Tag para la release (obligatorio si publish_release=true, ej: v0.12.0-preview.1)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -32,6 +40,12 @@ jobs:
   build:
     name: Build Linux x86_64 (glibc 2.35 base)
     runs-on: ubuntu-22.04
+    outputs:
+      commit_sha: ${{ steps.provenance.outputs.COMMIT_SHA }}
+      short_sha: ${{ steps.provenance.outputs.SHORT_SHA }}
+      artifact_name: ${{ steps.provenance.outputs.ARTIFACT_NAME }}
+      formats: ${{ steps.provenance.outputs.FORMATS }}
+      release_tag: ${{ steps.tag_validation.outputs.RELEASE_TAG }}
 
     steps:
       - name: Checkout source code
@@ -42,13 +56,18 @@ jobs:
 
       - name: Record source provenance
         id: provenance
+        env:
+          RAW_FORMATS: ${{ inputs.formats || 'tar appimage' }}
         run: |
           set -euo pipefail
           COMMIT_SHA="$(git rev-parse HEAD)"
           SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          ARTIFACT_NAME="cadcraft-linux-x86_64-${SHORT_SHA}"
           echo "COMMIT_SHA=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
           echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_OUTPUT"
           echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_ENV"
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          echo "FORMATS=$RAW_FORMATS" >> "$GITHUB_OUTPUT"
           echo "=================================================="
           echo "Building explicit commit: $COMMIT_SHA ($SHORT_SHA)"
           echo "Branch / Ref:             ${{ github.ref }}"
@@ -56,6 +75,74 @@ jobs:
           git status --porcelain
           test -z "$(git status --porcelain)" || { echo "error: working tree is not clean" >&2; exit 1; }
           echo "=================================================="
+
+      - name: Validate release tag parameters (if release requested)
+        id: tag_validation
+        env:
+          PUBLISH_RELEASE: ${{ inputs.publish_release || false }}
+          RELEASE_TAG: ${{ inputs.release_tag || '' }}
+          COMMIT_SHA: ${{ steps.provenance.outputs.COMMIT_SHA }}
+          TARGET_REPO: "zorupo748/CADcraft-para-pc-sobremesa"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "$PUBLISH_RELEASE" == "true" ]]; then
+            echo "Release publication requested. Validating parameters..."
+
+            # Security limit: only allow release creation in authorized target repository
+            if [[ "$GITHUB_REPOSITORY" != "$TARGET_REPO" ]]; then
+              echo "error: release publication is strictly limited to $TARGET_REPO (current: $GITHUB_REPOSITORY)" >&2
+              exit 1
+            fi
+
+            if [[ -z "$RELEASE_TAG" ]]; then
+              echo "error: release_tag must not be empty when publish_release is true" >&2
+              exit 1
+            fi
+
+            # Format validation: must follow semantic format starting with v
+            if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+)*(-[a-zA-Z0-9.-]+)?$ ]]; then
+              echo "error: invalid release_tag '$RELEASE_TAG'. Must follow 'vX.Y.Z' or 'vX.Y.Z-prerelease'" >&2
+              exit 1
+            fi
+
+            # Git ref format check
+            git check-ref-format --allow-onelevel "tags/$RELEASE_TAG" || {
+              echo "error: release_tag '$RELEASE_TAG' is not a valid git tag format" >&2
+              exit 1
+            }
+
+            # Query tag from destination repository without silencing network or auth errors
+            REMOTE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${TARGET_REPO}.git"
+            echo "Querying tag '$RELEASE_TAG' from remote repository $TARGET_REPO..."
+            TAG_OUTPUT="$(git ls-remote --tags "$REMOTE_URL" "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}")" || {
+              echo "error: failed to query remote tags from $TARGET_REPO. Network or authentication failure." >&2
+              exit 1
+            }
+
+            if [[ -n "$TAG_OUTPUT" ]]; then
+              # Resolving lightweight or annotated tags to the target commit
+              EXISTING_COMMIT="$(echo "$TAG_OUTPUT" | awk -v tag="refs/tags/${RELEASE_TAG}^{}" '$2 == tag { print $1 }')"
+              if [[ -z "$EXISTING_COMMIT" ]]; then
+                EXISTING_COMMIT="$(echo "$TAG_OUTPUT" | awk -v tag="refs/tags/${RELEASE_TAG}" '$2 == tag { print $1 }')"
+              fi
+
+              if [[ "$EXISTING_COMMIT" != "$COMMIT_SHA" ]]; then
+                echo "error: tag '$RELEASE_TAG' already exists on $TARGET_REPO pointing to $EXISTING_COMMIT, but built commit is $COMMIT_SHA" >&2
+                echo "Overwriting or moving existing tags is strictly prohibited." >&2
+                exit 1
+              fi
+              echo "Tag '$RELEASE_TAG' already exists on $TARGET_REPO and correctly points to built commit ($COMMIT_SHA)."
+            else
+              echo "Tag '$RELEASE_TAG' does not exist yet on $TARGET_REPO. It will be created pointing to $COMMIT_SHA."
+            fi
+
+            echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            echo "Release tag validation successful: $RELEASE_TAG"
+          else
+            echo "RELEASE_TAG=" >> "$GITHUB_OUTPUT"
+            echo "No release publication requested. Proceeding with standard build."
+          fi
 
       - name: Install system dependencies (Ubuntu 22.04)
         run: |
@@ -77,10 +164,10 @@ jobs:
           RAW_FORMATS: ${{ inputs.formats || 'tar appimage' }}
         run: |
           set -euo pipefail
-          # Validate allowed format combinations safely via environment variable
+          # Validate allowed format combinations safely via closed list
           case "$RAW_FORMATS" in
             "tar"|"appimage"|"tar appimage") ;;
-            *) echo "error: invalid formats requested: '$RAW_FORMATS'" >&2; exit 1 ;;
+            *) echo "error: invalid formats requested: '$RAW_FORMATS'. Allowed: 'tar', 'appimage', 'tar appimage'" >&2; exit 1 ;;
           esac
 
           mkdir -p "$DIST"
@@ -183,8 +270,15 @@ jobs:
 
           # 1. Validate tarball presence, checksum and contents if tar requested
           if [[ "$RAW_FORMATS" =~ "tar" ]]; then
-            TAR_FILE="$(ls "$DIST"/cadcraft-*-linux-x86_64.tar.gz 2>/dev/null | head -n 1)"
-            test -n "$TAR_FILE" && test -s "$TAR_FILE" || { echo "error: tarball was not generated in $DIST" >&2; exit 1; }
+            shopt -s nullglob
+            tar_candidates=( "$DIST"/cadcraft-*-linux-x86_64.tar.gz )
+            shopt -u nullglob
+            if [[ ${#tar_candidates[@]} -ne 1 ]]; then
+              echo "error: expected exactly 1 tarball in $DIST, found ${#tar_candidates[@]}: ${tar_candidates[*]}" >&2
+              exit 1
+            fi
+            TAR_FILE="${tar_candidates[0]}"
+            test -s "$TAR_FILE" || { echo "error: tarball was empty in $DIST" >&2; exit 1; }
             test -s "${TAR_FILE}.sha256" || { echo "error: tarball sha256 missing" >&2; exit 1; }
 
             echo "Verifying actual tarball SHA-256 checksum..."
@@ -243,8 +337,15 @@ jobs:
 
           # 2. Validate AppImage presence and checksum if appimage requested
           if [[ "$RAW_FORMATS" =~ "appimage" ]]; then
-            APPIMAGE_FILE="$(ls "$DIST"/cadcraft-*-linux-x86_64.AppImage 2>/dev/null | head -n 1)"
-            test -n "$APPIMAGE_FILE" && test -s "$APPIMAGE_FILE" || { echo "error: AppImage was requested but not generated" >&2; exit 1; }
+            shopt -s nullglob
+            appimage_candidates=( "$DIST"/cadcraft-*-linux-x86_64.AppImage )
+            shopt -u nullglob
+            if [[ ${#appimage_candidates[@]} -ne 1 ]]; then
+              echo "error: expected exactly 1 AppImage in $DIST, found ${#appimage_candidates[@]}: ${appimage_candidates[*]}" >&2
+              exit 1
+            fi
+            APPIMAGE_FILE="${appimage_candidates[0]}"
+            test -s "$APPIMAGE_FILE" || { echo "error: AppImage was empty in $DIST" >&2; exit 1; }
             test -s "${APPIMAGE_FILE}.sha256" || { echo "error: AppImage sha256 missing" >&2; exit 1; }
 
             echo "Verifying actual AppImage SHA-256 checksum..."
@@ -255,7 +356,7 @@ jobs:
       - name: Upload Build Artifacts (Private - No Release)
         uses: actions/upload-artifact@v4
         with:
-          name: cadcraft-linux-x86_64-${{ steps.provenance.outputs.SHORT_SHA }}
+          name: ${{ steps.provenance.outputs.ARTIFACT_NAME }}
           path: |
             dist/release/*.tar.gz
             dist/release/*.tar.gz.sha256
@@ -267,3 +368,257 @@ jobs:
             dist/release/tar-files.txt
             dist/release/tar-contents.txt
           if-no-files-found: error
+
+  release:
+    name: Create Draft Pre-release (GitHub Releases)
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Build Artifacts from this execution
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: artifacts
+
+      - name: Stage, verify explicit release assets and re-check remote status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          COMMIT_SHA: ${{ needs.build.outputs.commit_sha }}
+          RAW_FORMATS: ${{ needs.build.outputs.formats }}
+          TARGET_REPO: "zorupo748/CADcraft-para-pc-sobremesa"
+        run: |
+          set -euo pipefail
+
+          # 1. Closed-list validation of RAW_FORMATS
+          case "$RAW_FORMATS" in
+            "tar"|"appimage"|"tar appimage") ;;
+            *) echo "error: invalid formats: '$RAW_FORMATS'. Allowed: 'tar', 'appimage', 'tar appimage'" >&2; exit 1 ;;
+          esac
+
+          # 2. Re-verify authorized repository limit
+          if [[ "$GITHUB_REPOSITORY" != "$TARGET_REPO" ]]; then
+            echo "error: release creation is restricted to $TARGET_REPO (current: $GITHUB_REPOSITORY)" >&2
+            exit 1
+          fi
+
+          if [[ -z "$RELEASE_TAG" ]]; then
+            echo "error: RELEASE_TAG output from build job is empty" >&2
+            exit 1
+          fi
+
+          # 3. Check for existing GitHub Release (distinguishing 404 from API/auth failures)
+          echo "Checking whether a release already exists for tag '$RELEASE_TAG'..."
+          if RELEASE_JSON="$(gh api "repos/${TARGET_REPO}/releases/tags/${RELEASE_TAG}" 2>&1)"; then
+            echo "error: a release for tag '$RELEASE_TAG' already exists on $TARGET_REPO. Overwriting or modifying an existing release is strictly prohibited." >&2
+            exit 1
+          else
+            if echo "$RELEASE_JSON" | grep -q "HTTP 404"; then
+              echo "Confirmed: release for tag '$RELEASE_TAG' does not exist yet."
+            else
+              echo "error: GitHub API error querying release for tag '$RELEASE_TAG': $RELEASE_JSON" >&2
+              exit 1
+            fi
+          fi
+
+          # 4. Repeat remote tag check immediately prior to release creation
+          # Note on concurrency / TOCTOU limitation:
+          # Tag and release existence are checked immediately before creation.
+          # However, network calls cannot form an atomic cross-system transaction;
+          # a race condition between check and create remains theoretically possible.
+          REMOTE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${TARGET_REPO}.git"
+          echo "Repeating remote tag verification for '$RELEASE_TAG' on $TARGET_REPO..."
+          TAG_OUTPUT="$(git ls-remote --tags "$REMOTE_URL" "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}")" || {
+            echo "error: failed to query remote tags from $TARGET_REPO. Network or authentication failure." >&2
+            exit 1
+          }
+
+          if [[ -n "$TAG_OUTPUT" ]]; then
+            EXISTING_COMMIT="$(echo "$TAG_OUTPUT" | awk -v tag="refs/tags/${RELEASE_TAG}^{}" '$2 == tag { print $1 }')"
+            if [[ -z "$EXISTING_COMMIT" ]]; then
+              EXISTING_COMMIT="$(echo "$TAG_OUTPUT" | awk -v tag="refs/tags/${RELEASE_TAG}" '$2 == tag { print $1 }')"
+            fi
+
+            if [[ "$EXISTING_COMMIT" != "$COMMIT_SHA" ]]; then
+              echo "error: tag '$RELEASE_TAG' already exists on $TARGET_REPO pointing to $EXISTING_COMMIT, but built commit is $COMMIT_SHA" >&2
+              echo "Overwriting or moving existing tags is strictly prohibited." >&2
+              exit 1
+            fi
+            echo "Confirmed: tag '$RELEASE_TAG' correctly matches built commit ($COMMIT_SHA)."
+          else
+            echo "Confirmed: tag '$RELEASE_TAG' does not exist yet; will be created targeting commit $COMMIT_SHA."
+          fi
+
+          # 5. File selection with bash arrays and cardinality checks
+          mkdir -p release-assets
+
+          shopt -s nullglob
+          appimages=( artifacts/cadcraft-*-linux-x86_64.AppImage )
+          appimage_shas=( artifacts/cadcraft-*-linux-x86_64.AppImage.sha256 )
+          tarballs=( artifacts/cadcraft-*-linux-x86_64.tar.gz )
+          tarball_shas=( artifacts/cadcraft-*-linux-x86_64.tar.gz.sha256 )
+          manifests=( artifacts/cadcraft-*-linux-x86_64.manifest.txt )
+          provenances=( artifacts/build-provenance.txt )
+          shopt -u nullglob
+
+          # Helper to extract version
+          extract_pkg_version() {
+            local filename="$(basename "$1")"
+            if [[ "$filename" =~ ^cadcraft-([0-9]+(\.[0-9]+)*(-[a-zA-Z0-9.-]+)?)-linux-x86_64\..+$ ]]; then
+              echo "${BASH_REMATCH[1]}"
+            else
+              echo "error: cannot extract semantic version from filename '$filename'" >&2
+              return 1
+            fi
+          }
+
+          # Cardinality check for AppImage
+          if [[ "$RAW_FORMATS" =~ "appimage" ]]; then
+            if [[ ${#appimages[@]} -ne 1 ]]; then
+              echo "error: expected exactly 1 AppImage file, found ${#appimages[@]}: ${appimages[*]}" >&2
+              exit 1
+            fi
+            if [[ ${#appimage_shas[@]} -ne 1 ]]; then
+              echo "error: expected exactly 1 AppImage sha256 file, found ${#appimage_shas[@]}: ${appimage_shas[*]}" >&2
+              exit 1
+            fi
+          else
+            if [[ ${#appimages[@]} -ne 0 ]]; then
+              echo "error: AppImage was not requested in formats ('$RAW_FORMATS') but AppImage was found" >&2
+              exit 1
+            fi
+          fi
+
+          # Cardinality check for Tarball and Manifest
+          if [[ "$RAW_FORMATS" =~ "tar" ]]; then
+            if [[ ${#tarballs[@]} -ne 1 ]]; then
+              echo "error: expected exactly 1 tarball file, found ${#tarballs[@]}: ${tarballs[*]}" >&2
+              exit 1
+            fi
+            if [[ ${#tarball_shas[@]} -ne 1 ]]; then
+              echo "error: expected exactly 1 tarball sha256 file, found ${#tarball_shas[@]}: ${tarball_shas[*]}" >&2
+              exit 1
+            fi
+            if [[ ${#manifests[@]} -ne 1 ]]; then
+              echo "error: expected exactly 1 manifest file for tarball format, found ${#manifests[@]}: ${manifests[*]}" >&2
+              exit 1
+            fi
+          else
+            if [[ ${#tarballs[@]} -ne 0 ]]; then
+              echo "error: tarball was not requested in formats ('$RAW_FORMATS') but tarball was found" >&2
+              exit 1
+            fi
+          fi
+
+          # Cardinality check for provenance
+          if [[ ${#provenances[@]} -ne 1 ]]; then
+            echo "error: expected exactly 1 build-provenance.txt file, found ${#provenances[@]}" >&2
+            exit 1
+          fi
+
+          # Version consistency check across packages and manifest
+          COMMON_VERSION=""
+          for f in "${appimages[@]}" "${tarballs[@]}" "${manifests[@]}"; do
+            VER="$(extract_pkg_version "$f")" || exit 1
+            if [[ -z "$COMMON_VERSION" ]]; then
+              COMMON_VERSION="$VER"
+            elif [[ "$COMMON_VERSION" != "$VER" ]]; then
+              echo "error: version mismatch among package artifacts: '$f' has version '$VER', but previous artifacts had '$COMMON_VERSION'" >&2
+              exit 1
+            fi
+          done
+          echo "Verified package version consistency: $COMMON_VERSION"
+
+          # 6. Re-verify SHA-256 checksums before staging
+          if [[ "$RAW_FORMATS" =~ "appimage" ]]; then
+            echo "Re-verifying AppImage SHA-256 before staging..."
+            (cd artifacts && sha256sum -c "$(basename "${appimages[0]}").sha256")
+            cp -f "${appimages[0]}" release-assets/
+            cp -f "${appimage_shas[0]}" release-assets/
+            if [[ -s "${appimages[0]}.zsync" ]]; then
+              cp -f "${appimages[0]}.zsync" release-assets/
+            fi
+          fi
+
+          if [[ "$RAW_FORMATS" =~ "tar" ]]; then
+            echo "Re-verifying tarball SHA-256 before staging..."
+            (cd artifacts && sha256sum -c "$(basename "${tarballs[0]}").sha256")
+            cp -f "${tarballs[0]}" release-assets/
+            cp -f "${tarball_shas[0]}" release-assets/
+            cp -f "${manifests[0]}" release-assets/
+          fi
+
+          cp -f "${provenances[0]}" release-assets/
+
+          echo "Staged release assets:"
+          ls -lh release-assets/
+
+      - name: Generate Draft Pre-release notes and create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REPO: "zorupo748/CADcraft-para-pc-sobremesa"
+          COMMIT_SHA: ${{ needs.build.outputs.commit_sha }}
+          SHORT_SHA: ${{ needs.build.outputs.short_sha }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          RAW_FORMATS: ${{ needs.build.outputs.formats }}
+        run: |
+          set -euo pipefail
+
+          python3 - << 'PY'
+          import os, textwrap
+
+          commit_sha = os.environ["COMMIT_SHA"]
+          short_sha = os.environ["SHORT_SHA"]
+          release_tag = os.environ["RELEASE_TAG"]
+          raw_formats = os.environ["RAW_FORMATS"]
+
+          notes = textwrap.dedent(f"""\
+          # CADCraft Linux Preview (Borrador / Pre-release)
+
+          ### Información de Construcción y Procedencia
+          - **Commit completo:** `{commit_sha}` (`{short_sha}`)
+          - **Tag:** `{release_tag}`
+          - **Formatos incluidos:** `{raw_formats}`
+          - **Base del sistema de compilación:** Ubuntu 22.04 LTS (glibc 2.35 base)
+
+          ### Archivos y Sumas de Verificación
+          Cada archivo binario incluye su archivo `.sha256` adjunto para verificar la integridad de la descarga y la correspondencia con los artefactos producidos por el proceso de compilación:
+          - **AppImage:** `cadcraft-*-linux-x86_64.AppImage` (y `.sha256`)
+          - **Tarball de usuario:** `cadcraft-*-linux-x86_64.tar.gz` (y `.sha256`)
+          - **Manifiesto de contenido:** `cadcraft-*-linux-x86_64.manifest.txt`
+          - **Detalle de procedencia del runner:** `build-provenance.txt`
+
+          > **Nota sobre integridad:**
+          > Las sumas de comprobación SHA-256 verifican la integridad técnica de la transferencia del archivo y su concordancia con el build de GitHub Actions. **No constituyen una firma criptográfica de autoría ni una atestación de procedencia.**
+
+          ### Estado de Validación y Pruebas
+          - **Verificación en hardware real:** Se ha verificado previamente la coincidencia de checksum y el arranque correcto del AppImage correspondiente al commit `8631294` en un portátil con Fedora.
+          - **Alcance de las pruebas:** Un nuevo build o commit **no hereda automáticamente esa comprobación manual**.
+          - **Pruebas funcionales:** Las pruebas exhaustivas de todas las funciones de CADcraft **siguen pendientes**. Esta entrega es un borrador previo para validación de empaquetado y arranque.
+
+          ---
+          *Este borrador ha sido generado automáticamente de forma aislada por GitHub Actions para su revisión antes de la publicación final.*
+          """)
+
+          with open("release-notes.md", "w", encoding="utf-8") as f:
+              f.write(notes)
+          PY
+
+          echo "Generated release notes:"
+          cat release-notes.md
+
+          echo "Creating GitHub Draft Pre-release..."
+          gh release create "$RELEASE_TAG" \
+            --repo "$TARGET_REPO" \
+            --target "$COMMIT_SHA" \
+            --title "CADCraft $RELEASE_TAG (Draft Linux Preview)" \
+            --notes-file release-notes.md \
+            --draft \
+            --prerelease \
+            release-assets/*
+
+          echo "Draft Pre-release created successfully for tag: $RELEASE_TAG"
