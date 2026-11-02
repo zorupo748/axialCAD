@@ -126,6 +126,14 @@ To update CADCraft while keeping all your drawings, templates, and preferences i
 2. Run:
      ./install.sh --update
 
+ROLLBACK:
+To roll back to the previously installed version at any time:
+     ~/.local/share/cadcraft/install.sh --rollback
+   or run './install.sh --rollback' from any extracted CADCraft package.
+
+   Notice: Rolling back the binary executable does not revert configuration
+   or drawing schema migrations made by a newer version.
+
 UNINSTALLATION:
 To cleanly remove CADCraft (preserving personal preferences and drawings):
      ~/.local/share/cadcraft/uninstall.sh
