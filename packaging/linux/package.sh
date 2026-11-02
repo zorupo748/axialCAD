@@ -133,7 +133,7 @@ To cleanly remove CADCraft (preserving personal preferences and drawings):
 EOF
 
   tar -C "$WORK/tar" -czf "$DIST/$BASENAME.tar.gz" "$BASENAME"
-  sha256 "$DIST/$BASENAME.tar.gz" > "$DIST/$BASENAME.tar.gz.sha256"
+  (cd "$DIST" && echo "$(sha256 "$BASENAME.tar.gz")  $BASENAME.tar.gz" > "$BASENAME.tar.gz.sha256")
   tar -ztvf "$DIST/$BASENAME.tar.gz" > "$DIST/$BASENAME.manifest.txt"
   echo "wrote $DIST/$BASENAME.tar.gz"
   echo "wrote $DIST/$BASENAME.tar.gz.sha256"
@@ -187,7 +187,9 @@ if has appimage; then
   # so users don't need libfuse2 either. With zsyncmake on the host (CI installs the zsync
   # package) appimagetool also writes the .zsync, into its working directory, hence the cd.
   (cd "$DIST" && ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream -u "$UPDATE_INFO" "$APPDIR" "$OUT")
+  (cd "$DIST" && echo "$(sha256 "$(basename "$OUT")")  $(basename "$OUT")" > "$(basename "$OUT").sha256")
   echo "wrote $OUT"
+  echo "wrote $OUT.sha256"
   if [[ -s "$OUT.zsync" ]]; then
     echo "wrote $OUT.zsync"
   else

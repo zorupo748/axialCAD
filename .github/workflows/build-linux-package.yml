@@ -1,0 +1,269 @@
+name: Build Linux Package (No Release)
+
+# Manual and branch-restricted build workflow that packages CADCraft on an
+# Ubuntu 22.04 LTS runner (glibc 2.35 base) without creating or publishing releases.
+on:
+  push:
+    branches:
+      - "build/linux-preview"
+  workflow_dispatch:
+    inputs:
+      formats:
+        description: "Formatos a construir"
+        type: choice
+        options:
+          - "tar appimage"
+          - "tar"
+          - "appimage"
+        default: "tar appimage"
+      ref:
+        description: "Referencia git explícita (commit SHA o rama; vacío = HEAD del evento)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Linux x86_64 (glibc 2.35 base)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Record source provenance
+        id: provenance
+        run: |
+          set -euo pipefail
+          COMMIT_SHA="$(git rev-parse HEAD)"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          echo "COMMIT_SHA=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+          echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_ENV"
+          echo "=================================================="
+          echo "Building explicit commit: $COMMIT_SHA ($SHORT_SHA)"
+          echo "Branch / Ref:             ${{ github.ref }}"
+          echo "Clean working tree check:"
+          git status --porcelain
+          test -z "$(git status --porcelain)" || { echo "error: working tree is not clean" >&2; exit 1; }
+          echo "=================================================="
+
+      - name: Install system dependencies (Ubuntu 22.04)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev \
+            mesa-vulkan-drivers libgl1-mesa-dev desktop-file-utils zsync
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Build and Package Linux artifacts
+        env:
+          DIST: ${{ github.workspace }}/dist/release
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          RAW_FORMATS: ${{ inputs.formats || 'tar appimage' }}
+        run: |
+          set -euo pipefail
+          # Validate allowed format combinations safely via environment variable
+          case "$RAW_FORMATS" in
+            "tar"|"appimage"|"tar appimage") ;;
+            *) echo "error: invalid formats requested: '$RAW_FORMATS'" >&2; exit 1 ;;
+          esac
+
+          mkdir -p "$DIST"
+          ./packaging/linux/package.sh --formats "$RAW_FORMATS"
+
+      - name: Verify executables, GLIBC bounds and provenance
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          DIST: ${{ github.workspace }}/dist/release
+        run: |
+          set -euo pipefail
+          export BIN_DIR="$CARGO_TARGET_DIR/release"
+
+          # 1. Check binaries exist and are executable
+          test -x "$BIN_DIR/cadcraft" || { echo "error: $BIN_DIR/cadcraft missing or not executable" >&2; exit 1; }
+          test -x "$BIN_DIR/cadcraft-cli" || { echo "error: $BIN_DIR/cadcraft-cli missing or not executable" >&2; exit 1; }
+
+          # 2. Smoke test --version
+          echo "Running smoke tests..."
+          CADCRAFT_VER="$("$BIN_DIR/cadcraft" --version)"
+          CLI_VER="$("$BIN_DIR/cadcraft-cli" --version)"
+          echo "cadcraft:     $CADCRAFT_VER"
+          echo "cadcraft-cli: $CLI_VER"
+
+          # Record provenance evidence
+          {
+            echo "Commit:       ${{ steps.provenance.outputs.COMMIT_SHA }} (${{ steps.provenance.outputs.SHORT_SHA }})"
+            echo "Branch/Ref:   ${{ github.ref }}"
+            echo "Build Date:   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "Runner:       Ubuntu 22.04 LTS (x86_64)"
+            echo "Glibc Runner: $(ldd --version | head -n 1)"
+            echo "Rustc:        $(rustc --version)"
+            echo "Cargo:        $(cargo --version)"
+            echo ""
+            echo "cadcraft --version:"
+            echo "$CADCRAFT_VER"
+            echo ""
+            echo "cadcraft-cli --version:"
+            echo "$CLI_VER"
+          } > "$DIST/build-provenance.txt"
+
+          # 3. Inspect and verify GLIBC symbol requirements numerically (reject > 2.35)
+          python3 - << 'PY'
+          import subprocess, re, sys, os
+
+          dist = os.environ["DIST"]
+          bin_dir = os.environ["BIN_DIR"]
+          max_tuple = (2, 35, 0)
+
+          for name in ["cadcraft", "cadcraft-cli"]:
+              binary = os.path.join(bin_dir, name)
+              res = subprocess.run(["readelf", "--wide", "-V", binary], capture_output=True, text=True)
+              if res.returncode != 0:
+                  print(f"error: readelf -V failed on {name}: {res.stderr}", file=sys.stderr)
+                  sys.exit(1)
+
+              res_s = subprocess.run(["readelf", "--wide", "-s", binary], capture_output=True, text=True)
+              if res_s.returncode != 0:
+                  print(f"error: readelf -s failed on {name}: {res_s.stderr}", file=sys.stderr)
+                  sys.exit(1)
+
+              # Save full un-truncated inspection evidence to dist
+              with open(os.path.join(dist, f"glibc-inspection-{name}.txt"), "w") as f:
+                  f.write(f"=== readelf -V {name} ===\n")
+                  f.write(res.stdout)
+                  f.write(f"\n=== readelf -s {name} (GLIBC symbols) ===\n")
+                  for line in res_s.stdout.splitlines():
+                      if "@GLIBC_" in line:
+                          f.write(line + "\n")
+
+              # Extract all GLIBC version requirements as tuples (major, minor, patch)
+              raw_versions = re.findall(r'Name:\s+GLIBC_([0-9]+)\.([0-9]+)(?:\.([0-9]+))?', res.stdout)
+              if not raw_versions:
+                  print(f"error: no GLIBC symbol versions found in {name} (empty or corrupt output)", file=sys.stderr)
+                  sys.exit(1)
+
+              parsed_tuples = set((int(v[0]), int(v[1]), int(v[2]) if v[2] else 0) for v in raw_versions)
+              sorted_tuples = sorted(parsed_tuples)
+              ver_strings = ['.'.join(str(x) for x in t if x != 0 or t.index(x) < 2) for t in sorted_tuples]
+              print(f"[{name}] Detected GLIBC requirements: {ver_strings}")
+
+              violations = []
+              for t in sorted_tuples:
+                  if t > max_tuple:
+                      violations.append('.'.join(str(x) for x in t if x != 0 or t.index(x) < 2))
+
+              if violations:
+                  print(f"error: {name} requires GLIBC > 2.35: {violations}", file=sys.stderr)
+                  sys.exit(1)
+
+          print("Verification SUCCESS: all binaries strictly comply with GLIBC <= 2.35")
+          PY
+
+      - name: Validate package contents, checksums and format presence
+        env:
+          DIST: ${{ github.workspace }}/dist/release
+          RAW_FORMATS: ${{ inputs.formats || 'tar appimage' }}
+        run: |
+          set -euo pipefail
+
+          # 1. Validate tarball presence, checksum and contents if tar requested
+          if [[ "$RAW_FORMATS" =~ "tar" ]]; then
+            TAR_FILE="$(ls "$DIST"/cadcraft-*-linux-x86_64.tar.gz 2>/dev/null | head -n 1)"
+            test -n "$TAR_FILE" && test -s "$TAR_FILE" || { echo "error: tarball was not generated in $DIST" >&2; exit 1; }
+            test -s "${TAR_FILE}.sha256" || { echo "error: tarball sha256 missing" >&2; exit 1; }
+
+            echo "Verifying actual tarball SHA-256 checksum..."
+            (cd "$DIST" && sha256sum -c "$(basename "$TAR_FILE").sha256")
+
+            echo "Inspecting tarball file list: $TAR_FILE"
+            tar -tzf "$TAR_FILE" > "$DIST/tar-files.txt"
+            tar -ztvf "$TAR_FILE" > "$DIST/tar-contents.txt"
+
+            # Check mandatory application components
+            grep -E '/bin/cadcraft$' "$DIST/tar-files.txt" || { echo "error: cadcraft missing in tar" >&2; exit 1; }
+            grep -E '/bin/cadcraft-cli$' "$DIST/tar-files.txt" || { echo "error: cadcraft-cli missing in tar" >&2; exit 1; }
+            grep -E '/install\.sh$' "$DIST/tar-files.txt" || { echo "error: install.sh missing in tar" >&2; exit 1; }
+            grep -E '/uninstall\.sh$' "$DIST/tar-files.txt" || { echo "error: uninstall.sh missing in tar" >&2; exit 1; }
+            grep -E '/version\.env$' "$DIST/tar-files.txt" || { echo "error: version.env missing in tar" >&2; exit 1; }
+            grep -E '/README\.txt$' "$DIST/tar-files.txt" || { echo "error: README.txt missing in tar" >&2; exit 1; }
+            grep -E '/share/applications/ai\.storyteller\.cadcraft\.desktop$' "$DIST/tar-files.txt" || { echo "error: desktop entry missing" >&2; exit 1; }
+            grep -E '/share/icons/hicolor/.+\.png$' "$DIST/tar-files.txt" || { echo "error: icons missing in tar" >&2; exit 1; }
+            grep -E '/share/mime/packages/ai\.storyteller\.cadcraft\.xml$' "$DIST/tar-files.txt" || { echo "error: mime XML missing in tar" >&2; exit 1; }
+
+            # Security audit: exclude personal documents, .git exact component, credentials, tokens and .env files
+            python3 - << 'PY'
+            import re, sys, os
+
+            dist = os.environ["DIST"]
+            files_path = os.path.join(dist, "tar-files.txt")
+            with open(files_path, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip()]
+
+            # Patterns that must NEVER appear in the packaged paths
+            forbidden_patterns = [
+                (re.compile(r'(^|/)Drawings(/|$)'), "Drawings directory"),
+                (re.compile(r'(^|/)Templates(/|$)'), "Templates directory"),
+                (re.compile(r'(^|/)\.git(/|$)'), ".git directory or file"),
+                (re.compile(r'(^|/)\.env(\..+)?$'), "environment/secrets file (.env)"),
+                (re.compile(r'\.token$'), "control channel token (.token)"),
+                (re.compile(r'(^|/)id_rsa(\.pub)?$'), "SSH private/public key"),
+                (re.compile(r'\.(pem|key)$'), "certificate or private key file"),
+            ]
+
+            errors = []
+            for path in lines:
+                for pattern, desc in forbidden_patterns:
+                    if pattern.search(path):
+                        errors.append(f"{path} ({desc})")
+
+            if errors:
+                print("error: tarball contains forbidden files or directories:", file=sys.stderr)
+                for e in errors:
+                    print(f"  - {e}", file=sys.stderr)
+                sys.exit(1)
+
+            print("Security audit passed: tarball is completely clean of personal documents and secrets.")
+            PY
+          fi
+
+          # 2. Validate AppImage presence and checksum if appimage requested
+          if [[ "$RAW_FORMATS" =~ "appimage" ]]; then
+            APPIMAGE_FILE="$(ls "$DIST"/cadcraft-*-linux-x86_64.AppImage 2>/dev/null | head -n 1)"
+            test -n "$APPIMAGE_FILE" && test -s "$APPIMAGE_FILE" || { echo "error: AppImage was requested but not generated" >&2; exit 1; }
+            test -s "${APPIMAGE_FILE}.sha256" || { echo "error: AppImage sha256 missing" >&2; exit 1; }
+
+            echo "Verifying actual AppImage SHA-256 checksum..."
+            (cd "$DIST" && sha256sum -c "$(basename "$APPIMAGE_FILE").sha256")
+            echo "AppImage presence and checksum verified: $APPIMAGE_FILE"
+          fi
+
+      - name: Upload Build Artifacts (Private - No Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cadcraft-linux-x86_64-${{ steps.provenance.outputs.SHORT_SHA }}
+          path: |
+            dist/release/*.tar.gz
+            dist/release/*.tar.gz.sha256
+            dist/release/*.manifest.txt
+            dist/release/*.AppImage
+            dist/release/*.AppImage.sha256
+            dist/release/build-provenance.txt
+            dist/release/glibc-inspection-*.txt
+            dist/release/tar-files.txt
+            dist/release/tar-contents.txt
+          if-no-files-found: error
