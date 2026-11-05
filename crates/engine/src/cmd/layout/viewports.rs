@@ -6,7 +6,7 @@
 //! entity (a closed polyline, circle, ellipse or spline) whose outline clips what it shows
 //! ([`Viewport::clip`], DXF group 340).
 
-use cadcraft_doc::{Drawing, EntityKind, Handle, Space, Viewport, VportConfig, VportTile};
+use cadcraft_doc::{Drawing, Entity, EntityKind, Handle, Space, Viewport, VportConfig, VportTile};
 use cadcraft_geom::{Bounds2, PolyVertex, Vec2};
 use serde_json::{Value, json};
 
@@ -99,9 +99,15 @@ fn check_boundary(cmd: &str, d: &Drawing, space: &Space, h: Handle) -> Result<Bo
     if viewport_of_boundary(d, space, h).is_some() {
         return Err(bad(cmd, "the object already clips a viewport"));
     }
-    let b = boundary_bounds(&e.kind).ok_or_else(|| bad(cmd, "the object must be a closed polyline, circle, ellipse or spline"))?;
+    checked_boundary_kind(cmd, d, &e.kind)
+}
+
+/// Validate a candidate boundary before inserting it into a document.
+fn checked_boundary_kind(cmd: &str, d: &Drawing, kind: &EntityKind) -> Result<Bounds2> {
+    let b = boundary_bounds(kind).ok_or_else(|| bad(cmd, "the object must be a closed polyline, circle, ellipse or spline"))?;
     // The exact extents (the tessellated outline runs just inside curves).
-    let eb = cadcraft_doc::entity_bounds(d, e, 0);
+    let candidate = Entity::new(Handle(0), kind.clone());
+    let eb = cadcraft_doc::entity_bounds(d, &candidate, 0);
     let b = if eb.is_empty() || !eb.min.is_finite() || !eb.max.is_finite() { b } else { b.union(&eb) };
     if b.width() > 1e7 || b.height() > 1e7 {
         return Err(bad(cmd, "the viewport is too large"));
@@ -123,6 +129,11 @@ fn add_boundary(s: &mut Session, space: &Space, vs: Vec<PolyVertex>) -> Result<H
 /// A new viewport clipped by `boundary` (an entity in `space`), zoomed to the model extents.
 fn add_clipped(s: &mut Session, cmd: &str, space: &Space, boundary: Handle) -> Result<Handle> {
     let b = check_boundary(cmd, s.doc()?, space, boundary)?;
+    add_clipped_with_bounds(s, space, boundary, b)
+}
+
+/// Add a viewport whose boundary has already been validated before any mutation.
+fn add_clipped_with_bounds(s: &mut Session, space: &Space, boundary: Handle, b: Bounds2) -> Result<Handle> {
     let common = s.current_common();
     let d = s.doc_mut()?;
     let id = next_viewport_id(d);
@@ -138,8 +149,9 @@ fn mview_polygonal(s: &mut Session, p: &Value) -> Result<Value> {
     if boundary_bounds(&poly).is_none() {
         return Err(bad("mview", "the polygon has no area"));
     }
+    let b = checked_boundary_kind("mview", s.doc()?, &poly)?;
     let boundary = add_boundary(s, &space, vs)?;
-    let vp = add_clipped(s, "mview", &space, boundary)?;
+    let vp = add_clipped_with_bounds(s, &space, boundary, b)?;
     Ok(json!({ "viewport": vp.hex(), "boundary": boundary.hex() }))
 }
 
@@ -309,22 +321,28 @@ pub(super) fn run_vpclip(s: &mut Session, p: &Value) -> Result<Value> {
         s.doc_mut()?.remove_entity(b);
         return Ok(json!({ "viewport": vh.hex(), "clip": Value::Null }));
     }
-    let boundary = match (p.get("object"), p.get("points")) {
+    let (object, points, b) = match (p.get("object"), p.get("points")) {
         (Some(o), _) => {
             let h = handle_value(o).ok_or_else(|| bad(cmd, "`object` must be an object handle"))?;
-            check_boundary(cmd, s.doc()?, &space, h)?;
-            h
+            let b = check_boundary(cmd, s.doc()?, &space, h)?;
+            (Some(h), None, b)
         }
         (None, Some(_)) => {
             let vs = vertices_param(cmd, p)?;
-            if boundary_bounds(&lwpoly(vs.clone(), true)).is_none() {
+            let kind = lwpoly(vs.clone(), true);
+            if boundary_bounds(&kind).is_none() {
                 return Err(bad(cmd, "the polygon has no area"));
             }
-            add_boundary(s, &space, vs)?
+            let b = checked_boundary_kind(cmd, s.doc()?, &kind)?;
+            (None, Some(vs), b)
         }
         (None, None) => return Err(bad(cmd, "pass `object`, `points` or `delete`")),
     };
-    let b = check_boundary(cmd, s.doc()?, &space, boundary)?;
+    let boundary = match (object, points) {
+        (Some(h), None) => h,
+        (None, Some(vs)) => add_boundary(s, &space, vs)?,
+        _ => return Err(bad(cmd, "pass `object`, `points` or `delete`")),
+    };
     // The viewport takes the boundary's extents; model space stays where it was on the sheet.
     let k = cur.view_height / cur.height.max(1e-12);
     let mut v = cur;
@@ -340,7 +358,9 @@ pub(super) fn run_vpclip(s: &mut Session, p: &Value) -> Result<Value> {
     v.height = b.height();
     v.clip = Some(boundary);
     s.doc_mut()?.modify_entity(vh, |e| e.kind = EntityKind::Viewport(v))?;
-    if let Some(o) = old.filter(|o| *o != boundary) {
+    if let Some(o) = old.filter(|o| *o != boundary)
+        && viewport_of_boundary(s.doc()?, &space, o).is_none()
+    {
         s.doc_mut()?.remove_entity(o);
     }
     Ok(json!({ "viewport": vh.hex(), "clip": boundary.hex() }))

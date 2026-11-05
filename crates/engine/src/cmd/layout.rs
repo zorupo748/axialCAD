@@ -886,6 +886,36 @@ fn plot_window(s: &Session, p: &Value, cmd: &str, space: &Space) -> Result<Optio
 mod tests {
     use super::*;
 
+    type LayoutState = (Vec<(String, String)>, Vec<(String, Option<String>)>, Vec<Handle>, bool, u64, usize, usize);
+
+    fn layout_state(s: &Session, layout: &str) -> LayoutState {
+        let doc = s.doc().unwrap();
+        let sheet = doc.layout(layout).unwrap();
+        let entities = sheet.entities.iter().map(|e| (e.handle.hex(), format!("{:?}", e))).collect();
+        let clips = sheet
+            .entities
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntityKind::Viewport(v) => Some((e.handle.hex(), v.clip.map(|h| h.hex()))),
+                _ => None,
+            })
+            .collect();
+        let st = s.state().unwrap();
+        (entities, clips, st.selection.clone(), st.is_dirty(), st.revision, st.undo.len(), st.redo.len())
+    }
+
+    fn mark_clean(s: &mut Session) {
+        let saved = s.state().unwrap().doc.clone();
+        s.state_mut().unwrap().saved = saved;
+        assert!(!s.state().unwrap().is_dirty());
+    }
+
+    fn handle_changes(before: &LayoutState, after: &LayoutState) -> (Vec<String>, Vec<String>) {
+        let old: std::collections::BTreeSet<_> = before.0.iter().map(|(h, _)| h.clone()).collect();
+        let new: std::collections::BTreeSet<_> = after.0.iter().map(|(h, _)| h.clone()).collect();
+        (new.difference(&old).cloned().collect(), old.difference(&new).cloned().collect())
+    }
+
     fn session_with_model() -> Session {
         let mut s = Session::new();
         s.cmdline("line 0,0 100,0").unwrap();
@@ -1181,5 +1211,175 @@ mod tests {
         s.execute("mspace", &json!({})).unwrap();
         s.execute("layout.set", &json!({"name": "Model"})).unwrap();
         assert!(s.state().unwrap().mspace.is_none());
+    }
+
+    #[test]
+    fn a2_mview_polygonal_error_preserves_document() {
+        let mut s = session_with_model();
+        let points = json!([[0.0, 0.0], [20_000_000.0, 0.0], [0.0, 10.0]]);
+        s.execute("mview", &json!({"layout": "Layout1", "p1": [1, 1], "p2": [5, 4]})).unwrap();
+        assert!(viewports(&s, "Layout1").iter().any(|(_, v)| v.id != 1));
+        let before = layout_state(&s, "Layout1");
+        let result = s.execute("mview.polygonal", &json!({"layout": "Layout1", "points": points}));
+        let after = layout_state(&s, "Layout1");
+        let (added, removed) = handle_changes(&before, &after);
+        let error = result.as_ref().err().map(ToString::to_string).unwrap_or_else(|| "Ok".into());
+
+        assert!(error.contains("the viewport is too large"), "expected size validation error, got {error}; added={added:?}, removed={removed:?}");
+        assert_eq!(
+            after, before,
+            "document changed after MVIEW error; added={added:?}, removed={removed:?}, clip refs before={:?}, after={:?}",
+            before.1, after.1
+        );
+    }
+
+    #[test]
+    fn a2_vpclip_points_error_preserves_document() {
+        let mut s = session_with_model();
+        s.execute("layout.set", &json!({"name": "Layout1"})).unwrap();
+        s.execute("mview", &json!({"p1": [1, 1], "p2": [5, 4]})).unwrap();
+        let (vh, _) = viewports(&s, "Layout1").into_iter().find(|(_, v)| v.id != 1).unwrap();
+        let small = json!([[1.0, 1.0], [4.0, 1.0], [4.0, 3.0], [1.0, 3.0]]);
+        s.execute("vpclip", &json!({"handle": vh.hex(), "points": small})).unwrap();
+        let before = layout_state(&s, "Layout1");
+        let old_clip = before.1.iter().find(|(h, _)| h == &vh.hex()).and_then(|(_, c)| c.clone());
+        assert!(old_clip.is_some(), "fixture viewport must already reference a valid clip boundary");
+        assert!(before.0.iter().any(|(h, _)| Some(h) == old_clip.as_ref()), "the previous clip boundary must exist");
+
+        let points = json!([[0.0, 0.0], [20_000_000.0, 0.0], [0.0, 10.0]]);
+        let result = s.execute("vpclip", &json!({"handle": vh.hex(), "points": points}));
+        let after = layout_state(&s, "Layout1");
+        let (added, removed) = handle_changes(&before, &after);
+        let error = result.as_ref().err().map(ToString::to_string).unwrap_or_else(|| "Ok".into());
+
+        assert!(error.contains("the viewport is too large"), "expected size validation error, got {error}; added={added:?}, removed={removed:?}");
+        assert_eq!(
+            after, before,
+            "document changed after VPCLIP error; added={added:?}, removed={removed:?}, clip refs before={:?}, after={:?}",
+            before.1, after.1
+        );
+    }
+
+    #[test]
+    fn a2_size_errors_preserve_clean_documents() {
+        let points = json!([[0.0, 0.0], [20_000_000.0, 0.0], [0.0, 10.0]]);
+        let mut mview = session_with_model();
+        mark_clean(&mut mview);
+        let before = layout_state(&mview, "Layout1");
+        let error = mview.execute("mview.polygonal", &json!({"layout": "Layout1", "points": points.clone()})).unwrap_err().to_string();
+        let after = layout_state(&mview, "Layout1");
+        assert!(error.contains("the viewport is too large"), "unexpected MVIEW error: {error}");
+        assert!(!before.3 && !after.3, "failed MVIEW must leave the initially clean document clean");
+        assert_eq!(after, before, "failed MVIEW changed clean document state");
+
+        let mut vpclip = session_with_model();
+        vpclip.execute("layout.set", &json!({"name": "Layout1"})).unwrap();
+        vpclip.execute("mview", &json!({"p1": [1, 1], "p2": [5, 4]})).unwrap();
+        let (vh, _) = viewports(&vpclip, "Layout1").into_iter().find(|(_, v)| v.id != 1).unwrap();
+        vpclip.execute("vpclip", &json!({"handle": vh.hex(), "points": [[1, 1], [4, 1], [4, 3], [1, 3]]})).unwrap();
+        mark_clean(&mut vpclip);
+        let before = layout_state(&vpclip, "Layout1");
+        let error = vpclip.execute("vpclip", &json!({"handle": vh.hex(), "points": points.clone()})).unwrap_err().to_string();
+        let after = layout_state(&vpclip, "Layout1");
+        assert!(error.contains("the viewport is too large"), "unexpected VPCLIP error: {error}");
+        assert!(!before.3 && !after.3, "failed VPCLIP must leave the initially clean document clean");
+        assert_eq!(after, before, "failed VPCLIP changed clean document state");
+    }
+
+    #[test]
+    fn a2_mview_polygonal_valid_creates_coherent_clip_and_undo_redo() {
+        let mut s = session_with_model();
+        let points = json!([[1.0, 1.0], [7.0, 1.0], [6.0, 5.0], [2.0, 4.0]]);
+        let r = s.execute("mview.polygonal", &json!({"layout": "Layout1", "points": points})).unwrap();
+        let boundary = Handle::parse_hex(r["boundary"].as_str().unwrap()).unwrap();
+        let viewport = Handle::parse_hex(r["viewport"].as_str().unwrap()).unwrap();
+        let d = s.doc().unwrap();
+        assert!(matches!(&d.entity(boundary).unwrap().kind, EntityKind::LwPolyline(p) if p.closed && p.vertices.len() == 4));
+        assert!(matches!(&d.entity(viewport).unwrap().kind, EntityKind::Viewport(v) if v.clip == Some(boundary)));
+        assert!(s.undo().unwrap().is_some());
+        assert!(s.doc().unwrap().entity(boundary).is_none() && s.doc().unwrap().entity(viewport).is_none());
+        assert!(s.redo().unwrap().is_some());
+        assert!(matches!(&s.doc().unwrap().entity(viewport).unwrap().kind, EntityKind::Viewport(v) if v.clip == Some(boundary)));
+        assert!(s.doc().unwrap().entity(boundary).is_some());
+    }
+
+    #[test]
+    fn a2_vpclip_valid_replaces_clip_and_undo_redo_restores_references() {
+        let mut s = session_with_model();
+        s.execute("layout.set", &json!({"name": "Layout1"})).unwrap();
+        s.execute("mview", &json!({"p1": [1, 1], "p2": [5, 4]})).unwrap();
+        let (vh, _) = viewports(&s, "Layout1").into_iter().find(|(_, v)| v.id != 1).unwrap();
+        s.execute("vpclip", &json!({"handle": vh.hex(), "points": [[1, 1], [4, 1], [4, 3], [1, 3]]})).unwrap();
+        let old = match &s.doc().unwrap().entity(vh).unwrap().kind {
+            EntityKind::Viewport(v) => v.clip.unwrap(),
+            _ => unreachable!(),
+        };
+        let result = s.execute("vpclip", &json!({"handle": vh.hex(), "points": [[2, 2], [6, 2], [6, 5], [2, 5]]})).unwrap();
+        let new = Handle::parse_hex(result["clip"].as_str().unwrap()).unwrap();
+        assert_ne!(new, old);
+        assert!(matches!(&s.doc().unwrap().entity(vh).unwrap().kind, EntityKind::Viewport(v) if v.clip == Some(new)));
+        assert!(s.doc().unwrap().entity(new).is_some());
+        assert!(s.doc().unwrap().entity(old).is_none(), "unshared old contour is removed after successful replacement");
+        s.undo().unwrap();
+        assert!(matches!(&s.doc().unwrap().entity(vh).unwrap().kind, EntityKind::Viewport(v) if v.clip == Some(old)));
+        assert!(s.doc().unwrap().entity(old).is_some() && s.doc().unwrap().entity(new).is_none());
+        s.redo().unwrap();
+        assert!(matches!(&s.doc().unwrap().entity(vh).unwrap().kind, EntityKind::Viewport(v) if v.clip == Some(new)));
+        assert!(s.doc().unwrap().entity(new).is_some() && s.doc().unwrap().entity(old).is_none());
+    }
+
+    #[test]
+    fn a2_vpclip_replacement_preserves_shared_old_boundary() {
+        let mut s = session_with_model();
+        s.execute("layout.set", &json!({"name": "Layout1"})).unwrap();
+        s.execute("mview", &json!({"p1": [1, 1], "p2": [5, 4]})).unwrap();
+        let (vh, _) = viewports(&s, "Layout1").into_iter().find(|(_, v)| v.id != 1).unwrap();
+        s.execute("vpclip", &json!({"handle": vh.hex(), "points": [[1, 1], [4, 1], [4, 3], [1, 3]]})).unwrap();
+        let old = match &s.doc().unwrap().entity(vh).unwrap().kind {
+            EntityKind::Viewport(v) => v.clip.unwrap(),
+            _ => unreachable!(),
+        };
+
+        s.execute("mview", &json!({"p1": [7, 1], "p2": [11, 4]})).unwrap();
+        let other = viewports(&s, "Layout1").into_iter().find(|(h, v)| *h != vh && v.id != 1).unwrap().0;
+        s.doc_mut()
+            .unwrap()
+            .modify_entity(other, |e| {
+                if let EntityKind::Viewport(v) = &mut e.kind {
+                    v.clip = Some(old);
+                }
+            })
+            .unwrap();
+
+        let result = s.execute("vpclip", &json!({"handle": vh.hex(), "points": [[2, 2], [6, 2], [6, 5], [2, 5]]})).unwrap();
+        let new = Handle::parse_hex(result["clip"].as_str().unwrap()).unwrap();
+        assert_ne!(new, old);
+        assert!(s.doc().unwrap().entity(old).is_some(), "a boundary still referenced by another viewport must remain");
+        assert!(matches!(&s.doc().unwrap().entity(other).unwrap().kind, EntityKind::Viewport(v) if v.clip == Some(old)));
+        s.undo().unwrap();
+        assert!(matches!(&s.doc().unwrap().entity(vh).unwrap().kind, EntityKind::Viewport(v) if v.clip == Some(old)));
+        assert!(s.doc().unwrap().entity(old).is_some() && s.doc().unwrap().entity(new).is_none());
+        s.redo().unwrap();
+        assert!(matches!(&s.doc().unwrap().entity(vh).unwrap().kind, EntityKind::Viewport(v) if v.clip == Some(new)));
+        assert!(matches!(&s.doc().unwrap().entity(other).unwrap().kind, EntityKind::Viewport(v) if v.clip == Some(old)));
+        assert!(s.doc().unwrap().entity(old).is_some() && s.doc().unwrap().entity(new).is_some());
+    }
+
+    #[test]
+    fn a2_invalid_polygon_inputs_preserve_document() {
+        let degenerate = json!([[1.0, 1.0], [4.0, 1.0], [7.0, 1.0]]);
+        let mut mview = session_with_model();
+        let before = layout_state(&mview, "Layout1");
+        assert!(mview.execute("mview.polygonal", &json!({"layout": "Layout1", "points": degenerate.clone()})).is_err());
+        assert_eq!(layout_state(&mview, "Layout1"), before);
+
+        let mut vpclip = session_with_model();
+        vpclip.execute("layout.set", &json!({"name": "Layout1"})).unwrap();
+        vpclip.execute("mview", &json!({"p1": [1, 1], "p2": [5, 4]})).unwrap();
+        let (vh, _) = viewports(&vpclip, "Layout1").into_iter().find(|(_, v)| v.id != 1).unwrap();
+        vpclip.execute("vpclip", &json!({"handle": vh.hex(), "points": [[1, 1], [4, 1], [4, 3], [1, 3]]})).unwrap();
+        let before = layout_state(&vpclip, "Layout1");
+        assert!(vpclip.execute("vpclip", &json!({"handle": vh.hex(), "points": degenerate})).is_err());
+        assert_eq!(layout_state(&vpclip, "Layout1"), before);
     }
 }

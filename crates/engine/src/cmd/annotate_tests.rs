@@ -1,5 +1,7 @@
-use cadcraft_doc::{DimKind, Dimension, EntityKind, Handle};
-use cadcraft_geom::Vec2;
+use std::sync::Arc;
+
+use cadcraft_doc::{Block, DimKind, Dimension, Entity, EntityKind, Handle, Line, Space};
+use cadcraft_geom::{Vec2, Vec3};
 use serde_json::{Value, json};
 
 use crate::{Input, Session};
@@ -22,6 +24,228 @@ fn line(s: &mut Session, a: [f64; 2], b: [f64; 2]) -> Handle {
 
 fn near(a: Vec2, b: Vec2) -> bool {
     a.dist(b) < 1e-9
+}
+
+#[test]
+fn properties_set_respects_locked_layer() {
+    let mut s = Session::new();
+    let l = line(&mut s, [0.0, 0.0], [10.0, 0.0]);
+    s.execute("layer.new", &json!({ "name": "E1_LOCKED" })).unwrap();
+    s.execute("properties.set", &json!({ "handle": l.hex(), "layer": "E1_LOCKED" })).unwrap();
+    s.execute("layer.set", &json!({ "name": "E1_LOCKED", "locked": true })).unwrap();
+
+    let (layer, original_color) = {
+        let d = s.doc().unwrap();
+        let e = d.entity(l).unwrap();
+        (d.layer("E1_LOCKED").unwrap(), e.common.color)
+    };
+    assert!(layer.locked, "the test layer must be locked");
+    assert_eq!(s.doc().unwrap().entity(l).unwrap().common.layer, "E1_LOCKED");
+    let requested_color = cadcraft_color::Color::Index(1);
+    assert_ne!(original_color, requested_color, "the requested color must differ from the original");
+
+    // Check the drawing after either an Ok or Err result: the lock invariant is the behavior
+    // under test, and an error must not hide a partial mutation.
+    let _result = s.execute("properties.set", &json!({ "handle": l.hex(), "color": "red" }));
+    let after = s.doc().unwrap().entity(l).unwrap();
+    assert_eq!(after.common.color, original_color, "properties.set changed an entity on a locked layer");
+}
+
+#[test]
+fn dimstyle_edit_updates_cached_dimension_representation() {
+    fn rendered(d: &cadcraft_doc::Drawing, h: Handle) -> Vec<(cadcraft_render::Kind, Vec<Vec2>)> {
+        let list = cadcraft_render::build(d, &Space::Model, &cadcraft_render::Options::default());
+        list.prims.iter().filter(|p| p.handle == h).map(|p| (p.kind, list.points(p).to_vec())).collect()
+    }
+
+    let mut s = Session::new();
+    s.execute("dimstyle", &json!({ "name": "S", "DIMASZ": 0.1 })).unwrap();
+    let dh = h(&s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [10, 0], "at": [5, 3] })).unwrap());
+    assert_eq!(dim(&s, dh).style, "S");
+
+    let block_name = "*D_A1";
+    {
+        let d = s.doc_mut().unwrap();
+        let mut block = Block::new(block_name);
+        block.entities.push(Entity::new(d.new_handle(), EntityKind::Line(Line { a: Vec3::new(100.0, 100.0, 0.0), b: Vec3::new(110.0, 100.0, 0.0) })));
+        d.blocks.insert(block_name.into(), Arc::new(block));
+        d.modify_entity(dh, |e| {
+            if let EntityKind::Dimension(dm) = &mut e.kind {
+                dm.block = Some(block_name.into());
+            }
+        })
+        .unwrap();
+    }
+
+    let before_dim = dim(&s, dh);
+    assert_eq!(before_dim.block.as_deref(), Some(block_name));
+    assert!(!before_dim.overrides.keys().any(|k| cadcraft_doc::DimStyle::field_name(k) == Some("arrowSize")));
+    let before_style = s.doc().unwrap().dim_style("S").unwrap().arrow_size;
+    let before_render = rendered(s.doc().unwrap(), dh);
+    assert_eq!(s.doc().unwrap().block(block_name).unwrap().entities.len(), 1);
+    assert_eq!(
+        before_render,
+        vec![(cadcraft_render::Kind::Polyline, vec![Vec2::new(100.0, 100.0), Vec2::new(110.0, 100.0)])],
+        "precondition: rendered dimension must use the cached block geometry"
+    );
+
+    let new_arrow_size = 3.0;
+    assert_ne!(before_style, new_arrow_size);
+    s.execute("dimstyle", &json!({ "name": "S", "DIMASZ": new_arrow_size })).unwrap();
+    let after_style = s.doc().unwrap().dim_style("S").unwrap().arrow_size;
+    assert_eq!(after_style, new_arrow_size, "DIMSTYLE registry must accept the shared style change");
+
+    let mut regenerated_doc = s.doc().unwrap().clone();
+    regenerated_doc
+        .modify_entity(dh, |e| {
+            if let EntityKind::Dimension(dm) = &mut e.kind {
+                dm.block = None;
+            }
+        })
+        .unwrap();
+    let regenerated = rendered(&regenerated_doc, dh);
+    assert!(!regenerated.is_empty(), "updated style must produce dimension geometry");
+    assert_ne!(regenerated, before_render, "the selected style change must affect rendered geometry");
+
+    let after_render = rendered(s.doc().unwrap(), dh);
+    assert_eq!(after_render, regenerated, "dimension representation still reflects its old cached block after DIMSTYLE changed");
+}
+
+#[test]
+fn dimstyle_edit_invalidates_only_matching_cached_dimensions_everywhere() {
+    fn rendered(d: &cadcraft_doc::Drawing, h: Handle) -> Vec<(cadcraft_render::Kind, Vec<Vec2>)> {
+        let list = cadcraft_render::build(d, &Space::Model, &cadcraft_render::Options::default());
+        list.prims.iter().filter(|p| p.handle == h).map(|p| (p.kind, list.points(p).to_vec())).collect()
+    }
+    fn render_bounds(d: &cadcraft_doc::Drawing, h: Handle) -> cadcraft_geom::Bounds2 {
+        cadcraft_geom::Bounds2::from_points(rendered(d, h).iter().flat_map(|(_, points)| points.iter().copied()))
+    }
+    fn cached_line(s: &mut Session, dimension: Handle, name: &str, x: f64) {
+        let d = s.doc_mut().unwrap();
+        let mut block = Block::new(name);
+        block.entities.push(Entity::new(d.new_handle(), EntityKind::Line(Line { a: Vec3::new(x, 100.0, 0.0), b: Vec3::new(x + 10.0, 100.0, 0.0) })));
+        d.blocks.insert(name.into(), Arc::new(block));
+        d.modify_entity(dimension, |e| {
+            if let EntityKind::Dimension(dm) = &mut e.kind {
+                dm.block = Some(name.into())
+            }
+        })
+        .unwrap();
+    }
+
+    let mut s = Session::new();
+    s.execute("dimstyle", &json!({"name": "S", "DIMASZ": 0.1})).unwrap();
+    s.execute("dimstyle", &json!({"name": "OTHER", "DIMASZ": 0.6, "current": false})).unwrap();
+    let a = h(&s.execute("dimlinear", &json!({"p1": [0, 0], "p2": [10, 0], "at": [5, 3]})).unwrap());
+    let b = h(&s.execute("dimlinear", &json!({"p1": [0, 5], "p2": [10, 5], "at": [5, 8]})).unwrap());
+    s.execute("dimstyle.current", &json!({"name": "OTHER"})).unwrap();
+    let unrelated = h(&s.execute("dimlinear", &json!({"p1": [0, 10], "p2": [10, 10], "at": [5, 13]})).unwrap());
+    s.execute("dimstyle.current", &json!({"name": "S"})).unwrap();
+    s.execute("properties.set", &json!({"handle": b.hex(), "arrowSize": 1.25})).unwrap();
+    cached_line(&mut s, a, "*A1_A", 200.0);
+    cached_line(&mut s, b, "*A1_B", 220.0);
+    cached_line(&mut s, unrelated, "*A1_OTHER", 240.0);
+
+    // A dimension in a block definition is a supported model entity and must be invalidated too.
+    let mut block_dim = dim(&s, a);
+    block_dim.block = Some("*A1_BLOCK_DIM".into());
+    {
+        let d = s.doc_mut().unwrap();
+        let mut graphic = Block::new("*A1_BLOCK_DIM");
+        graphic
+            .entities
+            .push(Entity::new(d.new_handle(), EntityKind::Line(Line { a: Vec3::new(260.0, 100.0, 0.0), b: Vec3::new(270.0, 100.0, 0.0) })));
+        d.blocks.insert("*A1_BLOCK_DIM".into(), Arc::new(graphic));
+        let mut container = Block::new("A1_CONTAINER");
+        let block_dim_handle = d.new_handle();
+        container.entities.push(Entity::new(block_dim_handle, EntityKind::Dimension(block_dim)));
+        d.blocks.insert("A1_CONTAINER".into(), Arc::new(container));
+        d.add(
+            &Space::Model,
+            Default::default(),
+            EntityKind::Insert(cadcraft_doc::Insert {
+                block: "A1_CONTAINER".into(),
+                insert: Vec3::ZERO,
+                scale: Vec3::new(1.0, 1.0, 1.0),
+                rotation: 0.0,
+                attribs: Vec::new(),
+                cols: 1,
+                rows: 1,
+                col_spacing: 0.0,
+                row_spacing: 0.0,
+            }),
+        )
+        .unwrap();
+    }
+
+    let block_dim_handle =
+        s.doc().unwrap().block("A1_CONTAINER").unwrap().entities.iter().find(|e| matches!(e.kind, EntityKind::Dimension(_))).unwrap().handle;
+    let before_a = rendered(s.doc().unwrap(), a);
+    let before_b = rendered(s.doc().unwrap(), b);
+    let before_unrelated = rendered(s.doc().unwrap(), unrelated);
+    let block_dim_block = |s: &Session| {
+        let container = s.doc().unwrap().block("A1_CONTAINER").unwrap();
+        match &container.entities.get(block_dim_handle).unwrap().kind {
+            EntityKind::Dimension(dm) => dm.block.clone(),
+            other => panic!("expected a dimension in the block definition, got {other:?}"),
+        }
+    };
+    assert_eq!(before_a.len(), 1);
+    assert_eq!(before_b.len(), 1);
+    assert_eq!(before_unrelated.len(), 1);
+    assert_eq!(block_dim_block(&s).as_deref(), Some("*A1_BLOCK_DIM"));
+    assert_eq!(dim(&s, a).style, "S");
+    assert_eq!(dim(&s, b).style, "S");
+    assert_eq!(dim(&s, unrelated).style, "OTHER");
+    assert_eq!(dim(&s, b).overrides.get("arrowSize"), Some(&json!(1.25)));
+
+    s.execute("dimstyle", &json!({"name": "s", "DIMASZ": 3.0})).unwrap();
+    let after_a = rendered(s.doc().unwrap(), a);
+    let after_b = rendered(s.doc().unwrap(), b);
+    let after_unrelated = rendered(s.doc().unwrap(), unrelated);
+    assert_ne!(after_a, before_a, "edited style dimension A must render from updated style");
+    assert_ne!(after_b, before_b, "edited style dimension B must render from updated style");
+    assert_eq!(after_unrelated, before_unrelated, "unrelated style representation must remain intact");
+    assert_eq!(block_dim_block(&s), None, "dimension in a block definition must invalidate its old graphics");
+    assert_eq!(dim(&s, b).overrides.get("arrowSize"), Some(&json!(1.25)), "per-entity override must survive style editing");
+    assert_eq!(s.doc().unwrap().dim_style("S").unwrap().arrow_size, 3.0, "style lookup follows case-insensitive name rules");
+
+    s.undo().unwrap();
+    assert_eq!(s.doc().unwrap().dim_style("S").unwrap().arrow_size, 0.1);
+    assert_eq!(dim(&s, a).block.as_deref(), Some("*A1_A"));
+    assert_eq!(dim(&s, b).block.as_deref(), Some("*A1_B"));
+    assert_eq!(dim(&s, b).overrides.get("arrowSize"), Some(&json!(1.25)));
+    assert_eq!(rendered(s.doc().unwrap(), a), before_a);
+    assert_eq!(rendered(s.doc().unwrap(), b), before_b);
+    assert_eq!(rendered(s.doc().unwrap(), unrelated), before_unrelated);
+    assert_eq!(block_dim_block(&s).as_deref(), Some("*A1_BLOCK_DIM"));
+
+    s.redo().unwrap();
+    assert_eq!(s.doc().unwrap().dim_style("S").unwrap().arrow_size, 3.0);
+    assert!(dim(&s, a).block.is_none() && dim(&s, b).block.is_none());
+    assert_eq!(dim(&s, b).overrides.get("arrowSize"), Some(&json!(1.25)));
+    assert_eq!(rendered(s.doc().unwrap(), a), after_a);
+    assert_eq!(rendered(s.doc().unwrap(), b), after_b);
+    assert_eq!(rendered(s.doc().unwrap(), unrelated), after_unrelated);
+    assert_eq!(block_dim_block(&s), None);
+
+    let saved = cadcraft_io::write_dxf(s.doc().unwrap());
+    let reopened = cadcraft_io::read_dxf(saved.as_bytes()).unwrap();
+    assert_eq!(reopened.dim_style("S").unwrap().arrow_size, 3.0);
+    let reopened_b = match &reopened.entity(b).unwrap().kind {
+        EntityKind::Dimension(dm) => dm,
+        other => panic!("expected reopened dimension, got {other:?}"),
+    };
+    assert_eq!(reopened_b.overrides.get("arrowSize"), Some(&json!(1.25)));
+    for (handle, expected) in [(a, &after_a), (b, &after_b)] {
+        let expected_bounds = cadcraft_geom::Bounds2::from_points(expected.iter().flat_map(|(_, points)| points.iter().copied()));
+        let actual_bounds = render_bounds(&reopened, handle);
+        assert!(
+            actual_bounds.min.dist(expected_bounds.min) < 1e-6 && actual_bounds.max.dist(expected_bounds.max) < 1e-6,
+            "round-trip render bounds changed for {}: {actual_bounds:?} != {expected_bounds:?}",
+            handle.hex()
+        );
+    }
 }
 
 #[test]

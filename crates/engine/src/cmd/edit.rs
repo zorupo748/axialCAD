@@ -696,3 +696,7 @@ impl Interactive for CopyBaseM {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "clipboard_tests.rs"]
+mod tests;

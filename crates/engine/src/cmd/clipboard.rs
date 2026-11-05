@@ -353,7 +353,50 @@ fn adopt(d: &mut Drawing, e: &Entity, renames: &BTreeMap<String, String>) -> Ent
                 dm.block = Some(n.clone());
             }
         }
+        EntityKind::MLeader(m) => {
+            if let Some(content) = &mut m.block
+                && let Some(n) = renames.get(&content.block)
+            {
+                content.block = n.clone();
+            }
+        }
         _ => {}
     }
     e
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cadcraft_doc::{DimKind, Dimension};
+    use cadcraft_geom::Vec3;
+
+    #[test]
+    fn adopt_remaps_dimension_block_reference() {
+        let mut d = Drawing::new_imperial();
+        let entity = Entity::new(
+            d.new_handle(),
+            EntityKind::Dimension(Dimension {
+                kind: DimKind::Linear { rotation: 0.0 },
+                defpt: Vec3::ZERO,
+                text_mid: Vec3::ZERO,
+                p13: Vec3::ZERO,
+                p14: Vec3::new(10.0, 0.0, 0.0),
+                p15: Vec3::ZERO,
+                p16: Vec3::ZERO,
+                text: String::new(),
+                style: "Standard".into(),
+                measurement: 10.0,
+                text_rotation: 0.0,
+                user_text_pos: false,
+                block: Some("*D1".into()),
+                overrides: Default::default(),
+                assoc: Vec::new(),
+                marks: Default::default(),
+            }),
+        );
+        let renames = BTreeMap::from([("*D1".to_string(), "*D2".to_string())]);
+        let adopted = adopt(&mut d, &entity, &renames);
+        assert!(matches!(&adopted.kind, EntityKind::Dimension(dm) if dm.block.as_deref() == Some("*D2")));
+    }
 }

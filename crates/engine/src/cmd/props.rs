@@ -192,6 +192,11 @@ fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
         .transpose()?;
     let lw = p.get("lineweight").map(|v| super::layer::parse_lw(v).ok_or_else(|| bad("properties.set", "bad lineweight"))).transpose()?;
     let d = s.doc_mut()?;
+    // Validate every target against its original layer before applying any property (including
+    // `layer`). A mixed selection is rejected as a unit so changing the layer cannot bypass its lock.
+    if hs.iter().any(|h| d.entity(*h).and_then(|e| d.layer(&e.common.layer)).is_some_and(|l| l.locked)) {
+        return Err(crate::EngineError::Other("The object is on a locked layer.".into()));
+    }
     // An explicit object linetype must be ByLayer, ByBlock or a loaded definition (as `linetype current` requires).
     let linetype = str_param(p, "linetype")
         .map(|n| {
@@ -786,6 +791,34 @@ fn dimstyles_json(d: &cadcraft_doc::Drawing) -> Value {
     json!({ "current": d.header.str("DIMSTYLE", "Standard"), "styles": d.dim_styles.iter().map(|s| s.name.clone()).collect::<Vec<_>>() })
 }
 
+/// Invalidate only the cached graphics of dimensions using `style`, including block definitions.
+fn invalidate_dimension_blocks(d: &mut cadcraft_doc::Drawing, style: &str) -> Result<()> {
+    let uses_style = |e: &cadcraft_doc::Entity| matches!(&e.kind, EntityKind::Dimension(dm) if dm.style.eq_ignore_ascii_case(style));
+    let mut hs: Vec<_> = d.model.iter().filter(|e| uses_style(e)).map(|e| e.handle).collect();
+    hs.extend(d.layouts.iter().flat_map(|l| l.entities.iter().filter(|e| uses_style(e)).map(|e| e.handle)));
+    for h in hs {
+        d.modify_entity(h, |e| {
+            if let EntityKind::Dimension(dm) = &mut e.kind {
+                dm.block = None;
+            }
+        })?;
+    }
+    for block in d.blocks.values_mut() {
+        let hs: Vec<_> = block.entities.iter().filter(|e| uses_style(e)).map(|e| e.handle).collect();
+        if !hs.is_empty() {
+            let b = std::sync::Arc::make_mut(block);
+            for h in hs {
+                b.entities.modify(h, |e| {
+                    if let EntityKind::Dimension(dm) = &mut e.kind {
+                        dm.block = None;
+                    }
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run_dimstyle(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_param(p, "name").ok_or_else(|| bad("dimstyle", "`name` is required"))?.trim().to_string();
     if name.is_empty() || name.len() > 255 {
@@ -793,6 +826,7 @@ fn run_dimstyle(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let d = s.doc_mut()?;
     let base = d.dim_style(&d.header.str("DIMSTYLE", "Standard")).cloned().unwrap_or_default();
+    let existed = d.dim_styles.iter().any(|t| t.name.eq_ignore_ascii_case(&name));
     let idx = match d.dim_styles.iter().position(|t| t.name.eq_ignore_ascii_case(&name)) {
         Some(i) => i,
         None => {
@@ -800,11 +834,17 @@ fn run_dimstyle(s: &mut Session, p: &Value) -> Result<Value> {
             d.dim_styles.len() - 1
         }
     };
+    let before_style = d.dim_styles.get(idx).cloned();
     let mut rejected = Vec::new();
     if let (Some(st), Some(src)) = (d.dim_styles.get_mut(idx), p.as_object()) {
         let fields: serde_json::Map<String, Value> =
             src.iter().filter(|(k, _)| !matches!(k.as_str(), "name" | "current")).map(|(k, v)| (k.clone(), v.clone())).collect();
         rejected = st.apply_fields(&fields);
+    }
+    let changed_style = !existed || d.dim_styles.get(idx).is_some_and(|st| before_style.as_ref() != Some(st));
+    let style_name = d.dim_styles.get(idx).map(|st| st.name.clone());
+    if changed_style && let Some(style_name) = style_name {
+        invalidate_dimension_blocks(d, &style_name)?;
     }
     if bool_or(p, "current", true) {
         d.header.set_str("DIMSTYLE", &name);
@@ -1156,6 +1196,19 @@ mod tests {
 
     use crate::Session;
 
+    fn line(s: &mut Session, y: f64) -> cadcraft_doc::Handle {
+        s.execute("line", &json!({"points": [[0.0, y], [10.0, y]]})).unwrap();
+        s.doc().unwrap().model.last().unwrap().handle
+    }
+
+    fn locked_line(s: &mut Session, y: f64) -> cadcraft_doc::Handle {
+        let h = line(s, y);
+        s.execute("layer.new", &json!({"name": "PROPS_LOCKED"})).unwrap();
+        s.execute("properties.set", &json!({"handle": h.hex(), "layer": "PROPS_LOCKED"})).unwrap();
+        s.execute("layer.set", &json!({"name": "PROPS_LOCKED", "locked": true})).unwrap();
+        h
+    }
+
     #[test]
     fn properties_set_rejects_unloaded_linetype() {
         let mut s = Session::new();
@@ -1170,5 +1223,42 @@ mod tests {
             s.execute("properties.set", &json!({ "handles": [h], "linetype": ok })).unwrap();
             assert_eq!(lt(&s), ok);
         }
+    }
+
+    #[test]
+    fn properties_set_edits_unlocked_entity_with_undo_redo() {
+        let mut s = Session::new();
+        let h = line(&mut s, 0.0);
+        let original = s.doc().unwrap().entity(h).unwrap().common.color;
+        s.execute("properties.set", &json!({"handle": h.hex(), "color": "red"})).unwrap();
+        assert_eq!(s.doc().unwrap().entity(h).unwrap().common.color, cadcraft_color::Color::Index(1));
+        s.undo().unwrap();
+        assert_eq!(s.doc().unwrap().entity(h).unwrap().common.color, original);
+        s.redo().unwrap();
+        assert_eq!(s.doc().unwrap().entity(h).unwrap().common.color, cadcraft_color::Color::Index(1));
+    }
+
+    #[test]
+    fn properties_set_rejects_locked_entity_and_layer_change() {
+        let mut s = Session::new();
+        let h = locked_line(&mut s, 0.0);
+        let before = format!("{:?}", s.doc().unwrap().entity(h).unwrap());
+        let result = s.execute("properties.set", &json!({"handle": h.hex(), "layer": "0", "color": "red"}));
+        assert!(result.is_err(), "locked entity property edit should be rejected");
+        assert_eq!(format!("{:?}", s.doc().unwrap().entity(h).unwrap()), before);
+        assert!(s.doc().unwrap().layer("PROPS_LOCKED").unwrap().locked);
+    }
+
+    #[test]
+    fn properties_set_rejects_mixed_targets_atomically() {
+        let mut s = Session::new();
+        let unlocked = line(&mut s, 0.0);
+        let locked = locked_line(&mut s, 5.0);
+        let before_unlocked = format!("{:?}", s.doc().unwrap().entity(unlocked).unwrap());
+        let before_locked = format!("{:?}", s.doc().unwrap().entity(locked).unwrap());
+        let result = s.execute("properties.set", &json!({"handles": [unlocked.hex(), locked.hex()], "color": "red"}));
+        assert!(result.is_err(), "a mixed selection should be rejected as a unit");
+        assert_eq!(format!("{:?}", s.doc().unwrap().entity(unlocked).unwrap()), before_unlocked);
+        assert_eq!(format!("{:?}", s.doc().unwrap().entity(locked).unwrap()), before_locked);
     }
 }
