@@ -228,6 +228,26 @@ fn unknown_device(cmd: &str, name: &str) -> EngineError {
     bad(cmd, format!("unknown plotter `{name}` (devices: {})", device_names().join(", ")))
 }
 
+/// Check whether explicit PDF equivalence was requested for a referenced/external plotter.
+pub fn is_explicit_pdf_equivalent(p: &Value, name: &str) -> bool {
+    let equiv = p.get("deviceEquivalent").or_else(|| p.get("equivalent")).and_then(Value::as_str);
+    equiv.is_some_and(|eq| eq.eq_ignore_ascii_case("pdf"))
+        || (p.get("useEquivalent").and_then(Value::as_bool) == Some(true)
+            && name.to_ascii_lowercase().contains("pdf"))
+}
+
+fn make_equivalent_device(name: &str, layout: Option<&PageSetup>) -> PlotterConfig {
+    PlotterConfig {
+        name: name.to_string(),
+        description: format!("CADCraft PDF equivalent for `{name}`"),
+        output: PlotOutput::Pdf,
+        resolution: 300,
+        orientation: if layout.map_or(false, |l| l.landscape) { Orientation::Landscape } else { Orientation::Portrait },
+        default_paper: layout.map_or_else(String::new, |l| l.paper.clone()),
+        papers: Vec::new(),
+    }
+}
+
 /// PAGESETUP's `device` and the device's papers. Sets `page.device` from `device` (`"None"`:
 /// no device) and, from the page's device, the paper: `paper` when the device has it, else on a
 /// device change the current paper if the device has it or the device's default paper, with the
@@ -239,22 +259,48 @@ pub fn page_device(cmd: &str, p: &Value, page: &mut PageSetup) -> Result<bool> {
         Some(v) => Some(v.as_str().ok_or_else(|| bad(cmd, "`device` must be a plotter name"))?.trim()),
         None => None,
     };
+    let is_equiv = given.map_or_else(
+        || is_explicit_pdf_equivalent(p, &page.device),
+        |n| is_explicit_pdf_equivalent(p, n),
+    );
     let dev = match given {
         Some(n) if n.is_empty() || n.eq_ignore_ascii_case(NO_DEVICE) => {
             page.device = NO_DEVICE.into();
             return Ok(false);
         }
-        Some(n) => Some(find_device(n).ok_or_else(|| unknown_device(cmd, n))?),
-        None => find_device(&page.device),
+        Some(n) => {
+            if let Some(d) = find_device(n) {
+                Some(d)
+            } else if is_equiv {
+                Some(make_equivalent_device(n, Some(page)))
+            } else {
+                return Err(unknown_device(cmd, n));
+            }
+        }
+        None => find_device(&page.device).or_else(|| {
+            if is_equiv {
+                Some(make_equivalent_device(&page.device, Some(page)))
+            } else {
+                None
+            }
+        }),
     };
     let Some(dev) = dev else { return Ok(false) };
     let switched = !page.device.eq_ignore_ascii_case(&dev.name);
     page.device = dev.name.clone();
-    if switched && p.get("landscape").is_none() {
+    if switched && p.get("landscape").is_none() && (page.width_mm <= 0.0 || page.height_mm <= 0.0) {
         page.landscape = dev.orientation == Orientation::Landscape;
     }
     if let Some(name) = p.get("paper") {
         let name = name.as_str().ok_or_else(|| bad(cmd, "`paper` must be a paper name"))?;
+        if dev.papers.is_empty() {
+            if let Some(ps) = cadcraft_render::paper_size(name) {
+                page.paper = ps.name.into();
+                page.width_mm = ps.width_mm;
+                page.height_mm = ps.height_mm;
+                return Ok(true);
+            }
+        }
         return match device_paper(&dev, name) {
             Some(pp) => {
                 set_paper(page, pp);
@@ -267,8 +313,19 @@ pub fn page_device(cmd: &str, p: &Value, page: &mut PageSetup) -> Result<bool> {
             None => Ok(false),
         };
     }
-    if given.is_some() {
-        if let Some(pp) = device_paper(&dev, &page.paper).or_else(|| dev.default_paper()) {
+    if given.is_some() && !dev.papers.is_empty() {
+        let matched = device_paper(&dev, &page.paper)
+            .or_else(|| dev.papers.iter().find(|p| (p.width - page.width_mm).abs() < 1e-2 && (p.height - page.height_mm).abs() < 1e-2));
+        if let Some(pp) = matched {
+            page.paper = pp.name.clone();
+            page.width_mm = pp.width;
+            page.height_mm = pp.height;
+            if page.margins_mm.iter().all(|m| *m == 0.0) {
+                // Keep 0 mm margins
+            } else if p.get("margins").is_none() && (page.width_mm <= 0.0 || page.height_mm <= 0.0) {
+                page.margins_mm = pp.margins;
+            }
+        } else if let Some(pp) = dev.default_paper() {
             set_paper(page, pp);
         }
         return Ok(true);
@@ -293,8 +350,25 @@ pub(crate) fn plot_options(s: &Session, p: &Value, cmd: &str) -> Result<Value> {
     };
     let dev = match given {
         Some(n) if n.is_empty() || n.eq_ignore_ascii_case(NO_DEVICE) => None,
-        Some(n) => Some(find_device(n).ok_or_else(|| unknown_device(cmd, n))?),
-        None => layout.as_ref().and_then(|pg| find_device(&pg.device)),
+        Some(n) => {
+            if let Some(d) = find_device(n) {
+                Some(d)
+            } else if is_explicit_pdf_equivalent(p, n) {
+                Some(make_equivalent_device(n, layout.as_ref()))
+            } else {
+                return Err(unknown_device(cmd, n));
+            }
+        }
+        None => match layout.as_ref().and_then(|pg| find_device(&pg.device)) {
+            Some(d) => Some(d),
+            None => {
+                if let Some(pg) = &layout && is_explicit_pdf_equivalent(p, &pg.device) {
+                    Some(make_equivalent_device(&pg.device, Some(pg)))
+                } else {
+                    None
+                }
+            }
+        },
     };
     let mut out = if p.is_object() { p.clone() } else { json!({}) };
     let (Some(dev), Some(o)) = (dev, out.as_object_mut()) else { return Ok(out) };
@@ -303,13 +377,19 @@ pub(crate) fn plot_options(s: &Session, p: &Value, cmd: &str) -> Result<Value> {
     o.insert("output".into(), json!(output.as_str()));
     o.insert("resolution".into(), json!(dev.resolution));
     let paper = match str_param(p, "paper") {
-        Some(name) => match device_paper(&dev, name) {
-            Some(pp) => Some(pp),
-            None => {
-                let known: Vec<&str> = dev.papers.iter().map(|x| x.name.as_str()).take(50).collect();
-                return Err(bad(cmd, format!("plotter `{}` has no paper `{name}` (papers: {})", dev.name, known.join(", "))));
+        Some(name) => {
+            if dev.papers.is_empty() {
+                None
+            } else {
+                match device_paper(&dev, name) {
+                    Some(pp) => Some(pp),
+                    None => {
+                        let known: Vec<&str> = dev.papers.iter().map(|x| x.name.as_str()).take(50).collect();
+                        return Err(bad(cmd, format!("plotter `{}` has no paper `{name}` (papers: {})", dev.name, known.join(", "))));
+                    }
+                }
             }
-        },
+        }
         // A layout keeps its page setup's paper; model space takes the device's default.
         None if layout.is_none() => dev.default_paper(),
         None => None,

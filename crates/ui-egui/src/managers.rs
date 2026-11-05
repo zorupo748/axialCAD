@@ -593,8 +593,26 @@ fn page_rows(
     placement: Option<(&mut bool, &mut [f64; 2], bool)>,
 ) -> Option<(&'static str, Value)> {
     let mut change = None;
+    let is_external_device = !page.device.trim().is_empty()
+        && !page.device.eq_ignore_ascii_case("None")
+        && !choices.devices.iter().any(|d| d.name.eq_ignore_ascii_case(&page.device));
     ui.label("Printer/plotter");
-    egui::ComboBox::from_id_salt(salt.with("device")).selected_text(device_label(page)).width(190.0).show_ui(ui, |ui| {
+    let dev_label = if is_external_device {
+        format!("{} (Equivalente PDF)", page.device)
+    } else {
+        device_label(page).to_string()
+    };
+    egui::ComboBox::from_id_salt(salt.with("device")).selected_text(dev_label).width(190.0).show_ui(ui, |ui| {
+        if is_external_device {
+            let label = format!("{} (Equivalente PDF CADcraft)", page.device);
+            if ui
+                .selectable_label(true, &label)
+                .on_hover_text("Controlador de plantilla: se utiliza el exportador PDF incorporado conservando las dimensiones, márgenes y orientación de la hoja.")
+                .clicked()
+            {
+                change = Some(("device", json!(page.device)));
+            }
+        }
         if ui.selectable_label(device_label(page) == "None", "None").on_hover_text("PDF on the paper chosen below").clicked()
             && device_label(page) != "None"
         {
@@ -610,6 +628,20 @@ fn page_rows(
         }
     });
     ui.end_row();
+    if is_external_device {
+        ui.label("");
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "ℹ Dispositivo del dibujo: '{}'. CADcraft no ejecuta controladores externos PC3; se utiliza el exportador PDF incorporado como equivalencia explícita, manteniendo las dimensiones, orientación y márgenes de la hoja.",
+                    page.device
+                ))
+                .small()
+                .color(ui.visuals().weak_text_color()),
+            );
+        });
+        ui.end_row();
+    }
     // The device's papers, else the standard sizes.
     let device = choices.devices.iter().find(|dv| dv.name.eq_ignore_ascii_case(&page.device));
     ui.label("Paper size");
@@ -717,8 +749,21 @@ fn page_rows(
         change = Some(("plotTransparency", json!(transparency)));
     }
     ui.end_row();
+    let is_unavailable_style = !page.plot_style_table.trim().is_empty()
+        && !cadcraft_doc::no_plot_style_table(&page.plot_style_table)
+        && !choices.styles.iter().any(|s| s.eq_ignore_ascii_case(&page.plot_style_table));
     ui.label("Plot style table");
     egui::ComboBox::from_id_salt(salt.with("styles")).selected_text(style_label(page)).width(190.0).show_ui(ui, |ui| {
+        if is_unavailable_style {
+            let label = format!("{} (No disponible — usar dibujo)", page.plot_style_table);
+            if ui
+                .selectable_label(true, &label)
+                .on_hover_text("Tabla de estilos externa no disponible: se usarán los colores y grosores de entidad y capa del dibujo.")
+                .clicked()
+            {
+                // keep current selection
+            }
+        }
         if ui.selectable_label(style_label(page) == "None", "None").clicked() && style_label(page) != "None" {
             change = Some(("plotStyleTable", json!("None")));
         }
@@ -730,6 +775,19 @@ fn page_rows(
         }
     });
     ui.end_row();
+    if is_unavailable_style {
+        ui.label("");
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(
+                Tokens::get().warn,
+                format!(
+                    "⚠ Tabla de estilos '{}' no disponible (los archivos binarios .stb de AutoCAD no están soportados). Se utilizarán los colores y grosores de entidad y capa del dibujo como alternativa; la referencia '{}' se conserva en el dibujo.",
+                    page.plot_style_table, page.plot_style_table
+                ),
+            );
+        });
+        ui.end_row();
+    }
     change
 }
 
@@ -740,7 +798,7 @@ fn apply_page_change(page: &mut cadcraft_doc::PageSetup, key: &str, v: &Value) {
     use cadcraft_engine::cmd::plotters::page_device;
     match key {
         "device" => {
-            let _ = page_device("plot", &json!({ "device": v }), page);
+            let _ = page_device("plot", &json!({ "device": v, "deviceEquivalent": "pdf" }), page);
         }
         "paper" => {
             // A device's paper, else a standard size (no device).
@@ -861,6 +919,13 @@ fn plot_params(st: &PlotState, preview_dpi: Option<f64>) -> Value {
             }
             None if device => {
                 o.insert("device".into(), json!(page.device));
+                if cadcraft_engine::cmd::plotters::find_device(&page.device).is_none() {
+                    o.insert("deviceEquivalent".into(), json!("pdf"));
+                    o.insert("width".into(), json!(page.width_mm));
+                    o.insert("height".into(), json!(page.height_mm));
+                    o.insert("margins".into(), json!(page.margins_mm));
+                    o.insert("landscape".into(), json!(page.landscape));
+                }
                 o.insert("paper".into(), json!(page.paper));
             }
             None if cadcraft_render::paper_size(&page.paper).is_some() => {

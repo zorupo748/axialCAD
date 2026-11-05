@@ -825,6 +825,24 @@ fn run_plot(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
         None => space.tab_name().to_string(),
     };
     let pages = sheets.as_ref().map_or(1, Vec::len);
+    let table_name = opts
+        .get("plotStyleTable")
+        .and_then(Value::as_str)
+        .or_else(|| match &space {
+            Space::Paper(n) => s.doc().ok()?.layout(n).map(|l| l.page.plot_style_table.as_str()),
+            _ => None,
+        });
+    let table_warning = if let Some(tbl) = table_name {
+        if !tbl.is_empty() && !cadcraft_doc::no_plot_style_table(tbl) && cadcraft_doc::plot_style_table(s.doc()?, tbl).is_none() {
+            Some(format!(
+                "Plot style table '{tbl}' is not available (AutoCAD binary .stb/.ctb files are not supported); falling back to drawing entity and layer properties."
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     match str_param(p, "path") {
         Some(_path) => {
             #[cfg(not(target_arch = "wasm32"))]
@@ -833,15 +851,29 @@ fn run_plot(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
                 // Exclusively create a fresh temporary file and rename it into place so a planted
                 // `<path>.cadcraft-tmp` symlink cannot redirect the plot write (CWE-59).
                 crate::atomic_write::write_atomic(std::path::Path::new(path), &bytes).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
-                Ok(json!({ "path": path, "bytes": bytes.len(), "layout": layout, "pages": pages }))
+                let mut res = json!({ "path": path, "bytes": bytes.len(), "layout": layout, "pages": pages });
+                if let Some(w) = table_warning {
+                    res["warning"] = json!(w);
+                }
+                Ok(res)
             }
             #[cfg(target_arch = "wasm32")]
             {
                 super::exchange::deliver_file(cmd, _path, &bytes, super::file::deliver())?;
-                Ok(json!({ "path": _path, "bytes": bytes.len(), "layout": layout, "pages": pages }))
+                let mut res = json!({ "path": _path, "bytes": bytes.len(), "layout": layout, "pages": pages });
+                if let Some(w) = table_warning {
+                    res["warning"] = json!(w);
+                }
+                Ok(res)
             }
         }
-        None => Ok(json!({ "data": base64_encode(&bytes), "bytes": bytes.len(), "layout": layout, "pages": pages })),
+        None => {
+            let mut res = json!({ "data": base64_encode(&bytes), "bytes": bytes.len(), "layout": layout, "pages": pages });
+            if let Some(w) = table_warning {
+                res["warning"] = json!(w);
+            }
+            Ok(res)
+        }
     }
 }
 

@@ -190,3 +190,63 @@ fn plotwindow_keeps_the_picked_window_for_the_plot_dialog() {
     assert_eq!(r["window"], json!([[0.0, 0.0], [3.0, 4.0]]));
     assert!(s.execute("plotwindow", &json!({"p1": [0, 0], "p2": [3, 0]})).is_err());
 }
+
+#[test]
+fn explicit_device_equivalence_and_property_preservation() {
+    let mut s = session();
+    s.execute("layout.new", &json!({"name": "LayoutA4"})).unwrap();
+    // Custom page setup: A4 portrait, 0 mm margins
+    s.execute(
+        "pagesetup",
+        &json!({
+            "layout": "LayoutA4",
+            "device": "Trazador PDF.pc3",
+            "deviceEquivalent": "pdf",
+            "paper": "ISO A4 (210.00 x 297.00 MM)",
+            "width": 210.0,
+            "height": 297.0,
+            "landscape": false,
+            "margins": [0.0, 0.0, 0.0, 0.0],
+            "plotArea": "layout",
+            "scale": 1.0,
+            "plotStyleTable": "EGI.stb",
+        }),
+    )
+    .unwrap();
+
+    let page = s.doc().unwrap().layout("LayoutA4").unwrap().page.clone();
+    assert_eq!(page.device, "Trazador PDF.pc3");
+    assert_eq!(page.landscape, false);
+    assert_eq!(page.margins_mm, [0.0, 0.0, 0.0, 0.0]);
+    assert_eq!(page.width_mm, 210.0);
+    assert_eq!(page.height_mm, 297.0);
+    assert_eq!(page.plot_style_table, "EGI.stb");
+
+    // Without explicit equivalence, an unknown device is rejected
+    assert!(
+        s.execute("plot", &json!({"layout": "LayoutA4", "device": "Desconocido.pc3"}))
+            .is_err(),
+        "unknown device without equivalence must fail"
+    );
+
+    // With explicit equivalence, plot succeeds and warns about unavailable EGI.stb
+    let r = s
+        .execute(
+            "plot",
+            &json!({
+                "layout": "LayoutA4",
+                "device": "Trazador PDF.pc3",
+                "deviceEquivalent": "pdf"
+            }),
+        )
+        .unwrap();
+    assert!(r["data"].is_string());
+    assert!(r["warning"].as_str().unwrap().contains("EGI.stb"));
+
+    // Changing device preserves existing orientation and custom 0 mm margins
+    s.execute("pagesetup", &json!({"layout": "LayoutA4", "device": "CADCraft PDF"})).unwrap();
+    let updated = s.doc().unwrap().layout("LayoutA4").unwrap().page.clone();
+    assert_eq!(updated.device, "CADCraft PDF");
+    assert_eq!(updated.landscape, false, "portrait must not be flipped to landscape");
+    assert_eq!(updated.margins_mm, [0.0, 0.0, 0.0, 0.0], "custom 0 margins must be preserved");
+}
