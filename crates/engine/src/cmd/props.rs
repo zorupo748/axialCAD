@@ -191,29 +191,34 @@ fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
         .map(|v| v.as_f64().filter(|x| x.is_finite()).ok_or_else(|| bad("properties.set", "thickness must be a finite number")))
         .transpose()?;
     let lw = p.get("lineweight").map(|v| super::layer::parse_lw(v).ok_or_else(|| bad("properties.set", "bad lineweight"))).transpose()?;
+    let dim_over = dim_overrides(p)?;
+    let (linetype, dim_style) = {
+        let d = s.doc()?;
+        // Validate every target against its original layer before mutating the document.
+        // A mixed selection is rejected as a unit so changing the layer cannot bypass its lock,
+        // and rejecting before `doc_mut()` leaves `is_dirty()`, `revision`, and Undo/Redo intact.
+        if hs.iter().any(|h| d.entity(*h).and_then(|e| d.layer(&e.common.layer)).is_some_and(|l| l.locked)) {
+            return Err(crate::EngineError::Other("The object is on a locked layer.".into()));
+        }
+        // An explicit object linetype must be ByLayer, ByBlock or a loaded definition (as `linetype current` requires).
+        let linetype = str_param(p, "linetype")
+            .map(|n| {
+                if n.eq_ignore_ascii_case("ByLayer") || n.eq_ignore_ascii_case("ByBlock") {
+                    Ok(n.to_string())
+                } else {
+                    d.linetype(n).map(|t| t.name.clone()).ok_or_else(|| bad("properties.set", format!("linetype `{n}` is not loaded")))
+                }
+            })
+            .transpose()?;
+        let dim_style = str_param(p, "dimStyle")
+            .map(|n| d.dim_style(n).map(|st| st.name.clone()).ok_or_else(|| bad("properties.set", format!("dimension style `{n}` not found"))))
+            .transpose()?;
+        (linetype, dim_style)
+    };
     let d = s.doc_mut()?;
-    // Validate every target against its original layer before applying any property (including
-    // `layer`). A mixed selection is rejected as a unit so changing the layer cannot bypass its lock.
-    if hs.iter().any(|h| d.entity(*h).and_then(|e| d.layer(&e.common.layer)).is_some_and(|l| l.locked)) {
-        return Err(crate::EngineError::Other("The object is on a locked layer.".into()));
-    }
-    // An explicit object linetype must be ByLayer, ByBlock or a loaded definition (as `linetype current` requires).
-    let linetype = str_param(p, "linetype")
-        .map(|n| {
-            if n.eq_ignore_ascii_case("ByLayer") || n.eq_ignore_ascii_case("ByBlock") {
-                Ok(n.to_string())
-            } else {
-                d.linetype(n).map(|t| t.name.clone()).ok_or_else(|| bad("properties.set", format!("linetype `{n}` is not loaded")))
-            }
-        })
-        .transpose()?;
     if let Some(l) = str_param(p, "layer") {
         d.ensure_layer(l);
     }
-    let dim_style = str_param(p, "dimStyle")
-        .map(|n| d.dim_style(n).map(|st| st.name.clone()).ok_or_else(|| bad("properties.set", format!("dimension style `{n}` not found"))))
-        .transpose()?;
-    let dim_over = dim_overrides(p)?;
     let anno_scale = d.current_anno_scale();
     for h in &hs {
         d.modify_entity(*h, |e| {
@@ -1260,5 +1265,83 @@ mod tests {
         assert!(result.is_err(), "a mixed selection should be rejected as a unit");
         assert_eq!(format!("{:?}", s.doc().unwrap().entity(unlocked).unwrap()), before_unlocked);
         assert_eq!(format!("{:?}", s.doc().unwrap().entity(locked).unwrap()), before_locked);
+    }
+
+    #[test]
+    fn properties_set_locked_rejection_keeps_dirty_revision_and_undo_redo_clean_and_modified() {
+        // 1. Clean document (saved snapshot equals current doc), single locked and mixed selection
+        let mut s = Session::new();
+        let unlocked = line(&mut s, 0.0);
+        let locked = locked_line(&mut s, 5.0);
+        {
+            let st = s.state_mut().unwrap();
+            st.saved = st.doc.clone();
+            st.undo.clear();
+            st.redo.clear();
+        }
+        s.set_selection(vec![unlocked, locked]);
+        assert!(!s.state().unwrap().is_dirty());
+        let rev_clean = s.state().unwrap().revision;
+
+        let err = s.execute("properties.set", &json!({"handle": locked.hex(), "layer": "0", "color": "red"}));
+        assert!(err.is_err());
+        assert!(!s.state().unwrap().is_dirty(), "rejected locked edit must not dirty a clean document");
+        assert_eq!(s.state().unwrap().revision, rev_clean, "rejected locked edit must not bump revision");
+        assert_eq!(s.state().unwrap().undo.len(), 0, "rejected locked edit must not push undo");
+        assert_eq!(s.state().unwrap().redo.len(), 0);
+        assert_eq!(s.selection(), vec![unlocked, locked], "rejected edit must leave selection intact");
+
+        let err = s.execute("properties.set", &json!({"handles": [unlocked.hex(), locked.hex()], "layer": "0", "color": "red"}));
+        assert!(err.is_err());
+        assert!(!s.state().unwrap().is_dirty(), "rejected mixed edit must not dirty a clean document");
+        assert_eq!(s.state().unwrap().revision, rev_clean);
+        assert_eq!(s.state().unwrap().undo.len(), 0);
+        assert_eq!(s.state().unwrap().redo.len(), 0);
+        assert_eq!(s.selection(), vec![unlocked, locked]);
+        assert_eq!(s.doc().unwrap().entity(unlocked).unwrap().common.layer, "0");
+        assert_eq!(s.doc().unwrap().entity(locked).unwrap().common.layer, "PROPS_LOCKED");
+
+        // Implicit selection via `s.selection()` (no `handle`/`handles` parameter)
+        let err = s.execute("properties.set", &json!({"layer": "0", "color": "red"}));
+        assert!(err.is_err());
+        assert!(!s.state().unwrap().is_dirty());
+        assert_eq!(s.state().unwrap().revision, rev_clean);
+        assert_eq!(s.state().unwrap().undo.len(), 0);
+        assert_eq!(s.state().unwrap().redo.len(), 0);
+        assert_eq!(s.selection(), vec![unlocked, locked], "rejected implicit-selection edit must keep selection intact");
+
+        // 2. Modified document with existing Undo and Redo history
+        s.execute("properties.set", &json!({"handle": unlocked.hex(), "color": "green"})).unwrap();
+        s.execute("properties.set", &json!({"handle": unlocked.hex(), "color": "blue"})).unwrap();
+        s.undo().unwrap();
+        s.set_selection(vec![unlocked, locked]);
+        assert!(s.state().unwrap().is_dirty());
+        let rev_mod = s.state().unwrap().revision;
+        let undo_len = s.state().unwrap().undo.len();
+        let redo_len = s.state().unwrap().redo.len();
+        assert_eq!(undo_len, 1);
+        assert_eq!(redo_len, 1);
+
+        for params in [
+            json!({"handles": [locked.hex()], "layer": "0", "color": "yellow"}),
+            json!({"handles": [unlocked.hex(), locked.hex()], "layer": "0", "color": "yellow"}),
+            json!({"layer": "0", "color": "yellow"}),
+        ] {
+            let err = s.execute("properties.set", &params);
+            assert!(err.is_err());
+            assert!(s.state().unwrap().is_dirty());
+            assert_eq!(s.state().unwrap().revision, rev_mod, "rejected edit must not bump revision on modified document");
+            assert_eq!(s.state().unwrap().undo.len(), undo_len, "rejected edit must not push undo on modified document");
+            assert_eq!(s.state().unwrap().redo.len(), redo_len, "rejected edit must not clear redo on modified document");
+            assert_eq!(s.selection(), vec![unlocked, locked], "rejected edit must keep selection intact on modified document");
+        }
+
+        // Verify Undo and Redo still restore exact states
+        s.redo().unwrap();
+        assert_eq!(s.doc().unwrap().entity(unlocked).unwrap().common.color, cadcraft_color::Color::Index(5));
+        s.undo().unwrap();
+        assert_eq!(s.doc().unwrap().entity(unlocked).unwrap().common.color, cadcraft_color::Color::Index(3));
+        s.undo().unwrap();
+        assert!(!s.state().unwrap().is_dirty());
     }
 }

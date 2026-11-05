@@ -799,3 +799,200 @@ fn linetype_rename_updates_references() {
     assert!(s.execute("rename", &json!({ "table": "linetype", "from": "ByLayer", "to": "X" })).is_err());
     assert_eq!(s.doc().unwrap().entity(by_layer).unwrap().common.linetype, "ByLayer");
 }
+
+#[test]
+fn directrizzr_creates_continuous_arrow_without_content_or_landing_and_supports_undo_redo() {
+    fn mleader_at(s: &Session, idx: usize) -> cadcraft_doc::MLeader {
+        match &s.doc().unwrap().model.iter().nth(idx).unwrap().kind {
+            EntityKind::MLeader(m) => m.clone(),
+            other => panic!("expected MLeader at {idx}, got {other:?}"),
+        }
+    }
+
+    let spec = crate::find_command("directrizzr").expect("directrizzr command must be registered");
+    assert_eq!(spec.id, "directrizzr");
+    assert!(spec.interactive.is_some());
+
+    let mut s = Session::new();
+
+    // Two-point interactive invocation terminated with Enter.
+    s.script("directrizzr 0,0 10,5\n\n").unwrap();
+    assert!(s.running.is_none());
+    assert_eq!(s.doc().unwrap().model.len(), 1);
+    let m2 = mleader_at(&s, 0);
+    assert!(m2.text.is_none(), "directrizzr must not create MText content");
+    assert!(m2.block.is_none(), "directrizzr must not create block content");
+    assert_eq!(m2.dogleg, 0.0, "directrizzr must not add an automatic horizontal landing");
+    assert!(!m2.spline, "directrizzr must use straight segments");
+    assert_eq!(m2.leaders, vec![vec![Vec3::new(0.0, 0.0, 0.0)]]);
+    assert_eq!(m2.landing, Vec3::new(10.0, 5.0, 0.0));
+    assert_eq!(m2.leader_paths(), vec![vec![Vec2::new(0.0, 0.0), Vec2::new(10.0, 5.0)]]);
+
+    // Multi-point interactive invocation: continuous segments through all marked points, finished by Enter.
+    let pts = [Vec2::new(20.0, 0.0), Vec2::new(30.0, 10.0), Vec2::new(45.0, 10.0), Vec2::new(55.0, 25.0)];
+    s.start("directrizzr").unwrap();
+    assert_eq!(s.prompt_text(), "DIRECTRIZZR Specify leader arrowhead location:");
+    for (i, &pt) in pts.iter().enumerate() {
+        s.input(Input::Point(pt)).unwrap();
+        assert!(s.running.is_some(), "directrizzr must wait for Enter after point {i}");
+        assert_eq!(s.prompt_text(), "DIRECTRIZZR Specify next point:");
+    }
+    s.input(Input::Enter).unwrap();
+    assert!(s.running.is_none(), "Enter after >= 2 points must finish directrizzr");
+    assert_eq!(s.doc().unwrap().model.len(), 2);
+
+    let m_multi = mleader_at(&s, 1);
+    assert!(m_multi.text.is_none());
+    assert!(m_multi.block.is_none());
+    assert_eq!(m_multi.dogleg, 0.0);
+    assert!(!m_multi.spline);
+    assert_eq!(
+        m_multi.leaders,
+        vec![vec![Vec3::new(20.0, 0.0, 0.0), Vec3::new(30.0, 10.0, 0.0), Vec3::new(45.0, 10.0, 0.0)]]
+    );
+    assert_eq!(m_multi.landing, Vec3::new(55.0, 25.0, 0.0));
+    assert_eq!(m_multi.leader_paths(), vec![pts.to_vec()]);
+
+    // Rendered primitives: exactly one filled arrowhead triangle (`Kind::Tris` with tip at pts[0]) and
+    // one continuous polyline whose vertices follow the segment path and end at the last point with no landing extension.
+    let h_multi = s.doc().unwrap().model.iter().nth(1).unwrap().handle;
+    let list = cadcraft_render::build(s.doc().unwrap(), &Space::Model, &cadcraft_render::Options::default());
+    let prims: Vec<_> = list.prims.iter().filter(|p| p.handle == h_multi).collect();
+    assert_eq!(prims.len(), 2, "expected only polyline + arrowhead tris, got {prims:?}");
+    let poly = prims.iter().find(|p| p.kind == cadcraft_render::Kind::Polyline).expect("leader polyline");
+    let arrow = prims.iter().find(|p| p.kind == cadcraft_render::Kind::Tris).expect("filled arrowhead");
+    let poly_pts = list.points(poly);
+    let arrow_pts = list.points(arrow);
+    assert!(arrow_pts.iter().any(|p| p.dist(pts[0]) < 1e-9), "arrowhead must be placed at first point: {arrow_pts:?}");
+    assert_eq!(poly_pts.len(), pts.len(), "leader polyline must have one vertex per point with no extra landing segment");
+    for (actual, expected) in poly_pts.iter().skip(1).zip(pts.iter().skip(1)) {
+        assert!(actual.dist(*expected) < 1e-9, "segment continuity mismatch: {actual:?} != {expected:?}");
+    }
+
+    // Programmatic execution also produces a continuous arrow without landing or content.
+    let json_h = h(&s.execute("directrizzr", &json!({ "points": [[0, 10], [5, 15], [12, 15]] })).unwrap());
+    let EntityKind::MLeader(m_json) = &s.doc().unwrap().entity(json_h).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!(m_json.text.is_none() && m_json.block.is_none() && m_json.dogleg == 0.0);
+    assert_eq!(m_json.leader_paths(), vec![vec![Vec2::new(0.0, 10.0), Vec2::new(5.0, 15.0), Vec2::new(12.0, 15.0)]]);
+
+    // Undo / Redo round-trip.
+    assert_eq!(s.doc().unwrap().model.len(), 3);
+    s.undo().unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), 2);
+    s.undo().unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), 1);
+    s.redo().unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), 2);
+    assert_eq!(mleader_at(&s, 1).leader_paths(), vec![pts.to_vec()]);
+}
+
+#[test]
+fn directrizzr_cancel_and_early_enter_leave_document_dirty_revision_and_history_intact() {
+    // 1. Clean document: Escape at 0, 1, and 2 points, and Enter at 0 and 1 point.
+    let mut clean = Session::new();
+    let rev0 = clean.state().unwrap().revision;
+    assert!(!clean.state().unwrap().is_dirty());
+    assert_eq!(clean.state().unwrap().undo.len(), 0);
+    assert_eq!(clean.state().unwrap().redo.len(), 0);
+
+    for pts in [vec![], vec![Vec2::new(0.0, 0.0)], vec![Vec2::new(0.0, 0.0), Vec2::new(10.0, 5.0)]] {
+        clean.start("directrizzr").unwrap();
+        for p in pts {
+            clean.input(Input::Point(p)).unwrap();
+        }
+        clean.cancel();
+        assert!(clean.running.is_none());
+        assert!(clean.doc().unwrap().model.is_empty());
+        assert!(!clean.state().unwrap().is_dirty(), "Escape must not dirty a clean document");
+        assert_eq!(clean.state().unwrap().revision, rev0, "Escape must not bump revision");
+        assert_eq!(clean.state().unwrap().undo.len(), 0);
+        assert_eq!(clean.state().unwrap().redo.len(), 0);
+    }
+
+    for pts in [vec![], vec![Vec2::new(0.0, 0.0)]] {
+        clean.start("directrizzr").unwrap();
+        for p in pts {
+            clean.input(Input::Point(p)).unwrap();
+        }
+        clean.input(Input::Enter).unwrap();
+        assert!(clean.running.is_none(), "Enter before 2 points must cancel directrizzr without opening options");
+        assert!(clean.doc().unwrap().model.is_empty());
+        assert!(!clean.state().unwrap().is_dirty());
+        assert_eq!(clean.state().unwrap().revision, rev0);
+        assert_eq!(clean.state().unwrap().undo.len(), 0);
+        assert_eq!(clean.state().unwrap().redo.len(), 0);
+    }
+
+    // 2. Modified document with active Undo and Redo stacks.
+    let mut modified = Session::new();
+    let _l1 = line(&mut modified, [0.0, 0.0], [5.0, 0.0]);
+    let _l2 = line(&mut modified, [0.0, 2.0], [5.0, 2.0]);
+    modified.undo().unwrap();
+    let rev_mod = modified.state().unwrap().revision;
+    let undo_len = modified.state().unwrap().undo.len();
+    let redo_len = modified.state().unwrap().redo.len();
+    assert!(modified.state().unwrap().is_dirty());
+    assert_eq!(modified.doc().unwrap().model.len(), 1);
+    assert_eq!(redo_len, 1);
+
+    modified.start("directrizzr").unwrap();
+    modified.input(Input::Point(Vec2::new(1.0, 1.0))).unwrap();
+    modified.input(Input::Point(Vec2::new(4.0, 3.0))).unwrap();
+    modified.cancel();
+
+    assert!(modified.running.is_none());
+    assert_eq!(modified.doc().unwrap().model.len(), 1, "cancel must not leave residual entities");
+    assert!(modified.state().unwrap().is_dirty());
+    assert_eq!(modified.state().unwrap().revision, rev_mod, "cancel must not alter revision");
+    assert_eq!(modified.state().unwrap().undo.len(), undo_len, "cancel must not push undo history");
+    assert_eq!(modified.state().unwrap().redo.len(), redo_len, "cancel must not clear redo history");
+}
+
+#[test]
+fn directrizzr_preserves_remembered_mleader_options() {
+    let mut s = Session::new();
+    let c = h(&s.execute("circle", &json!({ "center": [0, 0], "radius": 2 })).unwrap());
+    s.execute("block", &json!({ "name": "TAG", "base": [0, 0], "handles": [c.hex()], "keep": "delete" })).unwrap();
+
+    // Configure non-default remembered options on normal MLEADER.
+    s.script("mleader l o l p a y c b TAG i m 3 f 45 s 30 x\n").unwrap();
+    s.cancel();
+
+    let remembered_before = s.last_used.mleader;
+    let remembered_block_before = s.last_used.mleader_block.clone();
+    assert_eq!(remembered_before.order, crate::LeaderOrder::Landing);
+    assert_eq!(remembered_before.leader_type, crate::LeaderType::Spline);
+    assert!(remembered_before.landing);
+    assert!(remembered_before.content);
+    assert!(remembered_before.block);
+    assert!(!remembered_before.block_center);
+    assert_eq!(remembered_before.max_points, 3);
+    assert_eq!(remembered_block_before, "TAG");
+
+    // Run directrizzr with 4 points (exceeding MLEADER's remembered max_points = 3) and arbitrary angles
+    // (ignoring MLEADER's 45/30 degree constraints, spline, landing-first order, landing dogleg, and block).
+    s.script("directrizzr 0,0 7,2 13,9 21,4\n\n").unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), 1);
+    let EntityKind::MLeader(m_dir) = &s.doc().unwrap().model.last().unwrap().kind else {
+        panic!("expected MLeader from directrizzr");
+    };
+    assert!(m_dir.text.is_none());
+    assert!(m_dir.block.is_none());
+    assert!(!m_dir.spline);
+    assert_eq!(m_dir.dogleg, 0.0);
+    assert_eq!(
+        m_dir.leader_paths(),
+        vec![vec![Vec2::new(0.0, 0.0), Vec2::new(7.0, 2.0), Vec2::new(13.0, 9.0), Vec2::new(21.0, 4.0)]]
+    );
+
+    // Verify normal MLEADER's remembered options are completely untouched.
+    assert_eq!(s.last_used.mleader, remembered_before);
+    assert_eq!(s.last_used.mleader_block, remembered_block_before);
+
+    // Starting normal MLEADER again still uses Landing first and remembered options.
+    s.start("mleader").unwrap();
+    assert!(s.prompt_text().contains("Specify leader landing location"));
+    s.cancel();
+}

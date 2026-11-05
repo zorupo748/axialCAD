@@ -72,6 +72,9 @@ pub fn specs() -> Vec<CommandSpec> {
             .alias(&["mld"])
             .params("{points: [[arrow], ..., [landing]] ([location] with leaderType none), text?, leaderType?: straight|spline|none, block?: name, blockAttach?: center|insertion}")
             .interactive(|s| Ok(Box::new(MLeaderM::new(s)))),
+        CommandSpec::new("directrizzr", "Directrizzr", run_directrizzr)
+            .params("{points: [[arrow], ..., [end]]}")
+            .interactive(|_| Ok(Box::new(MLeaderM::directrizzr()))),
         CommandSpec::new("leader", "Leader", run_leader).alias(&["lead"]).params("{points: [[x,y]...], text?}"),
         CommandSpec::new("dimstyle.update", "Update", run_update)
             .menu(&["Dimension", "Update"])
@@ -471,6 +474,15 @@ fn run_mleader(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let k = mleader_kind(s, &pts, str_param(p, "text").unwrap_or(""), true).ok_or_else(|| bad("mleader", "bad points"))?;
     let k = super::mleader_content::apply(s, k, &content)?;
+    Ok(json!({ "handle": s.add_entity(k)?.hex() }))
+}
+
+fn run_directrizzr(s: &mut Session, p: &Value) -> Result<Value> {
+    let pts = points_param(p, "points").ok_or_else(|| bad("directrizzr", "`points` (arrow … end) is required"))?;
+    if pts.len() < 2 {
+        return Err(bad("directrizzr", "need at least two points"));
+    }
+    let k = mleader_kind(s, &pts, "", false).ok_or_else(|| bad("directrizzr", "bad points"))?;
     Ok(json!({ "handle": s.add_entity(k)?.hex() }))
 }
 
@@ -1558,6 +1570,8 @@ struct MLeaderM {
     block: bool,
     block_name: String,
     block_center: bool,
+    /// Fixed continuous-arrow preset (`directrizzr`): ignores and leaves `last_used.mleader` untouched.
+    fixed_options: bool,
 }
 
 impl MLeaderM {
@@ -1580,10 +1594,33 @@ impl MLeaderM {
             block: o.block && s.doc().is_ok_and(|d| d.block(&s.last_used.mleader_block).is_some()),
             block_name: s.last_used.mleader_block.clone(),
             block_center: o.block_center,
+            fixed_options: false,
+        }
+    }
+    /// Continuous multi-segment leader starting with the arrowhead, without landing or content.
+    fn directrizzr() -> Self {
+        MLeaderM {
+            order: LeaderOrder::Arrowhead,
+            pts: Vec::new(),
+            leader_done: false,
+            text: None,
+            opt: None,
+            max_points: MAX_LEADER_POINTS,
+            angles: [0.0; 2],
+            landing: false,
+            content: false,
+            leader_type: crate::LeaderType::Straight,
+            block: false,
+            block_name: String::new(),
+            block_center: true,
+            fixed_options: true,
         }
     }
     /// Keep the order and Options for the next MLEADER.
     fn remember(&self, s: &mut Session) {
+        if self.fixed_options {
+            return;
+        }
         s.last_used.mleader = MLeaderOptions {
             order: self.order,
             max_points: self.max_points,
@@ -1751,7 +1788,7 @@ impl MLeaderM {
 
 impl Interactive for MLeaderM {
     fn name(&self) -> &'static str {
-        "MLEADER"
+        if self.fixed_options { "DIRECTRIZZR" } else { "MLEADER" }
     }
     fn prompt(&self, _s: &Session) -> Prompt {
         if let Some(o) = self.opt {
@@ -1759,6 +1796,9 @@ impl Interactive for MLeaderM {
         }
         if self.wants_text() {
             return Prompt::new("Enter leader text", Accept::TEXT);
+        }
+        if self.fixed_options && self.pts.is_empty() {
+            return Prompt::new("Specify leader arrowhead location", Accept::POINT);
         }
         if self.no_leader() && self.pts.is_empty() {
             let what = if self.content && self.block { "Specify location of the block" } else { "Specify location of the text" };
@@ -1798,7 +1838,7 @@ impl Interactive for MLeaderM {
                     self.leader_done = true;
                 }
             }
-            Input::Keyword(k) if self.pts.is_empty() => {
+            Input::Keyword(k) if self.pts.is_empty() && !self.fixed_options => {
                 match k.as_str() {
                     "leader Landing first" => self.order = LeaderOrder::Landing,
                     "leader arrowHead first" => self.order = LeaderOrder::Arrowhead,
@@ -1807,7 +1847,7 @@ impl Interactive for MLeaderM {
                 }
                 self.remember(s);
             }
-            Input::Enter if self.pts.is_empty() => self.opt = Some(LeaderOpt::Menu),
+            Input::Enter if self.pts.is_empty() && !self.fixed_options => self.opt = Some(LeaderOpt::Menu),
             // Enter at "next point" ends the leader at the last point.
             Input::Enter if self.pts.len() >= 2 => self.leader_done = true,
             Input::Enter => return Ok(Step::Cancel),
