@@ -26,6 +26,7 @@ mod selection_cycling;
 mod shared_controls;
 mod shortcut_menus;
 mod status_bar_toggles;
+mod snaps_and_inclined_line;
 mod style_dialogs;
 mod system_cursor;
 mod text_double_click;

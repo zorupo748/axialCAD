@@ -318,6 +318,8 @@ pub struct CadApp {
     pub hatch_dlg: Option<hatchdlg::HatchDlgState>,
     /// The Edit Block Definition dialog ([`bedit`]).
     pub bedit: bedit::State,
+    /// Runtime layout and horizontal scroll state of the bottom status bar ([`chrome`]).
+    pub status_bar: chrome::StatusBarState,
     pub thumbnail_textures: std::collections::HashMap<String, egui::TextureHandle>,
 }
 
@@ -361,6 +363,7 @@ impl CadApp {
             alias_dlg: None,
             hatch_dlg: None,
             bedit: bedit::State::default(),
+            status_bar: chrome::StatusBarState::default(),
             thumbnail_textures: std::collections::HashMap::new(),
         }
     }

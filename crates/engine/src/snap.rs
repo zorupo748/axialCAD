@@ -1169,6 +1169,70 @@ pub fn snap_3d_endpoints(
                     }
                 }
             }
+            EntityKind::LwPolyline(pl) => {
+                let elev = pl.elevation;
+                let n = pl.vertices.len();
+                if n > 0 {
+                    if osmode & mode::END != 0 {
+                        for (idx, v) in pl.vertices.iter().enumerate() {
+                            let p = Vec3::new(v.p.x, v.p.y, elev);
+                            let p_screen = cam.project_point(p);
+                            if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
+                                let dist = (p_screen - cursor_q).len();
+                                if dist <= aperture_cam {
+                                    candidates.push((dist, ent.handle, idx as u8, p, mode::END, "Endpoint"));
+                                }
+                            }
+                        }
+                    }
+                    if osmode & mode::MID != 0 && n >= 2 {
+                        let seg_count = if pl.closed { n } else { n - 1 };
+                        for i in 0..seg_count {
+                            let v1 = pl.vertices[i].p;
+                            let v2 = pl.vertices[(i + 1) % n].p;
+                            let mid = Vec3::new((v1.x + v2.x) * 0.5, (v1.y + v2.y) * 0.5, elev);
+                            let p_screen = cam.project_point(mid);
+                            if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
+                                let dist = (p_screen - cursor_q).len();
+                                if dist <= aperture_cam {
+                                    candidates.push((dist, ent.handle, (n + i) as u8, mid, mode::MID, "Midpoint"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            EntityKind::Polyline3d(pl) => {
+                let n = pl.points.len();
+                if n > 0 {
+                    if osmode & mode::END != 0 {
+                        for (idx, p) in pl.points.iter().enumerate() {
+                            let p_screen = cam.project_point(*p);
+                            if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
+                                let dist = (p_screen - cursor_q).len();
+                                if dist <= aperture_cam {
+                                    candidates.push((dist, ent.handle, idx as u8, *p, mode::END, "Endpoint"));
+                                }
+                            }
+                        }
+                    }
+                    if osmode & mode::MID != 0 && n >= 2 {
+                        let seg_count = if pl.closed { n } else { n - 1 };
+                        for i in 0..seg_count {
+                            let p1 = pl.points[i];
+                            let p2 = pl.points[(i + 1) % n];
+                            let mid = (p1 + p2) * 0.5;
+                            let p_screen = cam.project_point(mid);
+                            if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
+                                let dist = (p_screen - cursor_q).len();
+                                if dist <= aperture_cam {
+                                    candidates.push((dist, ent.handle, (n + i) as u8, mid, mode::MID, "Midpoint"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }

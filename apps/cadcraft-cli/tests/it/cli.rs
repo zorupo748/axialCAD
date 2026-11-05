@@ -52,6 +52,9 @@ fn closed_stdout_still_runs_the_commands_and_saves() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+
+
+
 #[test]
 fn cli_export_dwg_rejects_unexportable_entities_and_preserves_file() {
     let dir = std::env::temp_dir().join(format!("cc-cli-dwg-safe-{}", std::process::id()));
@@ -80,5 +83,33 @@ fn cli_export_dwg_rejects_unexportable_entities_and_preserves_file() {
     let current_bytes = std::fs::read(&target_dwg).unwrap();
     assert_eq!(current_bytes, original_bytes, "Pre-existing target file must not be overwritten or truncated");
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+
+
+#[test]
+fn cli_opens_dwt_template_and_draws_lines_at_z_zero() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Templates/EGI-ISO.dwt");
+    let dir = std::env::temp_dir().join(format!("cc-cli-dwt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out_dxf = dir.join("dwt_out.dxf");
+    let output = Command::new(env!("CARGO_BIN_EXE_cadcraft-cli"))
+        .args([
+            "run",
+            root.to_str().unwrap(),
+            "--cmd",
+            "view.swiso {}",
+            "--cmd",
+            "line {\"points\":[[10,20],[30,40],[50,60]]}",
+            "--save",
+            out_dxf.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}: {}", output.status, String::from_utf8_lossy(&output.stderr));
+    let content = std::fs::read_to_string(&out_dxf).unwrap();
+    assert!(content.contains("LINE"), "Saved DXF must contain the drawn LINE entities");
     let _ = std::fs::remove_dir_all(&dir);
 }

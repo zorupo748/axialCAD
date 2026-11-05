@@ -278,12 +278,94 @@ fn elided(p: &egui::Painter, text: &str, font: egui::FontId, color: egui::Color3
 }
 
 /// Widest layout tab name before it is cut with "…".
-const LAYOUT_TAB_TEXT: f32 = 150.0;
-/// Room the layout tabs leave for the coordinates and messages.
+const LAYOUT_TAB_TEXT: f32 = 260.0;
+/// Room the layout tabs leave for the coordinates and messages when space permits.
 const STATUS_READOUT_MIN: f32 = 150.0;
+
+/// Runtime layout and horizontal scroll state of the bottom status bar.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StatusBarState {
+    /// Horizontal scroll offset (in points) of the layout-tabs strip.
+    pub tab_scroll: f32,
+    /// Maximum horizontal scroll offset (in points) of the layout-tabs strip on the last frame.
+    pub max_tab_scroll: f32,
+    /// Bounding rectangle of the scrollable paper-layout tabs strip on the last frame.
+    pub tab_strip_rect: Option<Rect>,
+    /// Left boundary of the right-hand status controls zone on the last frame.
+    pub controls_left: f32,
+    /// `(drawing_uid, active_tab_index)` last auto-revealed so manual wheel scrolling isn't reset.
+    last_revealed_active: Option<(u64, Option<usize>)>,
+}
+
+/// Horizontal `[start, end]` intervals (with 2 pt gap between tabs) and total content width for
+/// tabs with the given full `widths` (each already including its internal padding).
+fn layout_tab_spans(widths: &[f32]) -> (Vec<(f32, f32)>, f32) {
+    let mut spans = Vec::with_capacity(widths.len());
+    let mut x = 0.0f32;
+    for (i, &w) in widths.iter().enumerate() {
+        let w = if w.is_finite() { w.max(0.0) } else { 0.0 };
+        if i > 0 {
+            x += 2.0;
+        }
+        let start = x;
+        let end = x + w;
+        spans.push((start, end));
+        x = end;
+    }
+    (spans, x)
+}
+
+/// Clamp `scroll` into `[0.0, max_scroll]` for a strip of width `room`, and when `reveal` is
+/// `Some(idx)`, move `scroll` by the minimum amount needed to keep tab `idx` within the strip.
+fn clamp_and_reveal_tab_scroll(spans: &[(f32, f32)], total_width: f32, room: f32, scroll: f32, reveal: Option<usize>) -> (f32, f32) {
+    let room = if room.is_finite() { room.max(0.0) } else { 0.0 };
+    let total = if total_width.is_finite() { total_width.max(0.0) } else { 0.0 };
+    let max_scroll = (total - room).max(0.0);
+    let mut s = if scroll.is_finite() { scroll.clamp(0.0, max_scroll) } else { 0.0 };
+    if let Some(idx) = reveal
+        && let Some(&(start, end)) = spans.get(idx)
+        && room > 0.0
+    {
+        if end > s + room {
+            s = end - room;
+        }
+        if start < s {
+            s = start;
+        }
+        s = s.clamp(0.0, max_scroll);
+    }
+    (s, max_scroll)
+}
+
+/// Consume mouse-wheel and touchpad scroll events from `i` over the status bar so they never
+/// propagate to the drawing canvas, returning the horizontal scroll delta in points (converting
+/// normal vertical mouse-wheel steps into horizontal tab scrolling without requiring Shift).
+fn consume_status_wheel(i: &mut egui::InputState, opts: &egui::InputOptions, page: f32) -> f32 {
+    let mut event_points = 0.0f32;
+    i.raw.events.retain(|e| match e {
+        egui::Event::MouseWheel { unit, delta, modifiers, .. } => {
+            if !modifiers.matches_any(opts.zoom_modifier) {
+                let per = match unit {
+                    egui::MouseWheelUnit::Point => 1.0,
+                    egui::MouseWheelUnit::Line => opts.line_scroll_speed,
+                    egui::MouseWheelUnit::Page => page,
+                };
+                let d = -(delta.x + delta.y) * per;
+                if d.is_finite() {
+                    event_points += d;
+                }
+            }
+            false
+        }
+        _ => true,
+    });
+    i.smooth_scroll_delta = egui::Vec2::ZERO;
+    event_points
+}
 
 /// Which of the tabs with these `widths` to show in `room`: all of them when they fit, else a run
 /// that holds the `active` one (shown even when it alone is too wide), starting as early as it can.
+#[cfg(test)]
 fn visible_tabs(widths: &[f32], active: Option<usize>, room: f32) -> std::ops::Range<usize> {
     let fits = |range: std::ops::Range<usize>| widths.get(range).is_some_and(|w| w.iter().sum::<f32>() <= room);
     let mut end = 0;
@@ -346,8 +428,33 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
             }
             x += 22.0;
         }
-        x = x.max(r.left() + if app.ui.show_toolsets { 232.0 } else { 60.0 });
-        // Right side: toggles, right-aligned.
+
+        // Collect Model and paper layout tabs first so we know the left zone's minimum footprint.
+        let mut tabs: Vec<String> = vec!["Model".into()];
+        let cur = app.session.state().map(|s| match &s.space {
+            cadcraft_doc::Space::Model => "Model".to_string(),
+            cadcraft_doc::Space::Paper(n) => n.clone(),
+        });
+        if let Ok(st) = app.session.state() {
+            let mut ls: Vec<_> = st.doc.layouts.iter().collect();
+            ls.sort_by_key(|l| l.tab_order);
+            tabs.extend(ls.iter().map(|l| l.name.clone()));
+        }
+        let shown_name = |i: usize, name: &str| if i == 0 { crate::tl!("Model").to_string() } else { name.to_string() };
+        let labels: Vec<_> =
+            tabs.iter().enumerate().map(|(i, n)| elided(&p, &shown_name(i, n), crate::theme::body(), t.text, LAYOUT_TAB_TEXT)).collect();
+        let model_w = labels.first().map_or(64.0, |(g, _)| g.size().x + 26.0);
+        let layout_widths: Vec<f32> = labels.iter().skip(1).map(|(g, _)| g.size().x + 26.0).collect();
+        let (tab_spans, total_layouts_w) = layout_tab_spans(&layout_widths);
+        let active_tab = tabs.iter().position(|n| cur.as_deref().is_ok_and(|c| c == n));
+        let active_layout = active_tab.and_then(|a| a.checked_sub(1));
+
+        let min_x_model = x.max(r.left() + 60.0);
+        let pinned_left_end = min_x_model + model_w + 2.0 + 22.0;
+        let min_strip_reserve = if tab_spans.is_empty() { 0.0 } else { total_layouts_w.min(96.0) + 22.0 };
+        let right_zone_min_x = (pinned_left_end + min_strip_reserve + 8.0).min(r.right() - 28.0).max(pinned_left_end + 4.0);
+
+        // Right side: toggles and drafting/space controls, right-aligned and bounded by `right_zone_min_x`.
         let s = app.session.settings.clone();
         let anno_all = app.session.doc().is_ok_and(|d| d.anno_all_visible());
         use cadcraft_engine::snap::mode;
@@ -369,62 +476,13 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
             (Icon::Gear, false, "ui.dialog.dsettings", "Drafting Settings"),
         ];
         let size = 20.0;
-        let mut rx = r.right() - 8.0 - toggles.len() as f32 * (size + 4.0);
-        // Coordinates.
-        let coord = app.canvas.cursor3.map(|cursor| {
-            let (lu, lp) = app.session.doc().map(|d| (d.header.i64("LUNITS", 2), d.header.i64("LUPREC", 4))).unwrap_or((2, 4));
-            format_cursor_coordinates(cursor, app.session.drawing_plane(), lu, lp)
-        });
-        // MODEL / PAPER (layouts only): toggles MSPACE and PSPACE like AutoCAD's status button.
-        let mut coord_right = rx - 8.0;
+        let step = size + 4.0;
 
-        // Drawing plane button: XY / XZ / YZ
         let plane = app.session.drawing_plane();
         let plane_text = crate::tf!("Plane: {plane}", plane = plane.name());
-        let br_plane = Rect::from_min_max(pos2(coord_right - 62.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
-        let resp_plane = ui.interact(br_plane, ui.id().with("drawing_plane_toggle"), Sense::click());
-        let plane_hovered = resp_plane.hovered();
-        let is_non_xy = plane != cadcraft_geom::DrawingPlane::XY;
-        icons::describe_control(ui, &resp_plane, &plane_text, Some(is_non_xy), false);
-        p.rect_filled(
-            br_plane,
-            3.0,
-            if plane_hovered {
-                t.control_hover
-            } else if is_non_xy {
-                t.toggle_on.gamma_multiply(0.25)
-            } else {
-                t.chrome
-            },
-        );
-        p.rect_stroke(
-            br_plane,
-            3.0,
-            Stroke::new(
-                1.0,
-                if is_non_xy {
-                    t.toggle_on
-                } else if plane_hovered {
-                    t.text_dim
-                } else {
-                    t.border
-                },
-            ),
-            egui::StrokeKind::Inside,
-        );
-        p.text(br_plane.center(), egui::Align2::CENTER_CENTER, &plane_text, crate::theme::small(), if is_non_xy { t.toggle_on } else { t.text });
-        if resp_plane.on_hover_text(crate::tf!("Drawing plane: {plane} (click to cycle XY -> XZ -> YZ)", plane = plane.name())).clicked() {
-            let next = match plane {
-                cadcraft_geom::DrawingPlane::XY => cadcraft_geom::DrawingPlane::XZ,
-                cadcraft_geom::DrawingPlane::XZ => cadcraft_geom::DrawingPlane::YZ,
-                cadcraft_geom::DrawingPlane::YZ => cadcraft_geom::DrawingPlane::XY,
-            };
-            app.session.set_drawing_plane(next);
-            app.session.echo(crate::tf!("Active drawing plane: {plane}.", plane = next.name()));
-        }
-        coord_right = br_plane.left() - 6.0;
+        let plane_galley_w = p.layout_no_wrap(plane_text.clone(), crate::theme::small(), t.text).size().x;
+        let plane_w = (plane_galley_w + 8.0).max(58.0);
 
-        // Elevation / Cota button with mouse adjust and origin return
         let elev_offset = app.session.effective_drawing_plane_offset();
         let elev_manual = app.session.drawing_plane_offset_is_manual();
         let elev_active = elev_manual || app.canvas.height_adjust;
@@ -435,58 +493,265 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
         } else {
             crate::tf!("Elev: {offset}", offset = format!("{elev_offset:+.2}"))
         };
-        let br_elev = Rect::from_min_max(pos2(coord_right - 88.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
-        let resp_elev = ui.interact(br_elev, ui.id().with("drawing_plane_elev_toggle"), Sense::click());
-        let elev_hovered = resp_elev.hovered();
-        icons::describe_control(ui, &resp_elev, &elev_text, Some(elev_active), false);
-        p.rect_filled(
-            br_elev,
-            3.0,
-            if app.canvas.height_adjust {
-                t.toggle_on
-            } else if elev_hovered {
-                t.control_hover
-            } else if elev_active {
-                t.toggle_on.gamma_multiply(0.25)
-            } else {
-                t.chrome
-            },
-        );
-        p.rect_stroke(
-            br_elev,
-            3.0,
-            Stroke::new(
-                1.0,
-                if app.canvas.height_adjust || elev_active {
+        let elev_galley_w = p.layout_no_wrap(elev_text.clone(), crate::theme::small(), t.text).size().x;
+        let elev_w = (elev_galley_w + 8.0).max(84.0);
+
+        let zlock = app.session.settings.zlock;
+        let zlock_text = if zlock { "● V-LOCK" } else { "V-LOCK" };
+        let zlock_galley_w = p.layout_no_wrap(zlock_text.to_string(), crate::theme::small(), t.text).size().x;
+        let zlock_w = (zlock_galley_w + 8.0).max(60.0);
+
+        let is_paper = matches!(app.session.layout_space(), cadcraft_doc::Space::Paper(_));
+        let model_in_vp = app.session.state().is_ok_and(|st| st.mspace.is_some());
+        let mspace_label = if model_in_vp { "MODEL" } else { "PAPER" };
+        let mspace_translated = crate::i18n::t(mspace_label).to_string();
+        let mspace_galley_w = p.layout_no_wrap(mspace_translated.clone(), crate::theme::small(), t.text).size().x;
+        let mspace_w = (mspace_galley_w + 10.0).max(54.0);
+
+        let total_toggles_w = toggles.len() as f32 * step;
+        let mode_est_w = 8.0 + (plane_w + 6.0) + (elev_w + 6.0) + (zlock_w + 6.0) + if is_paper { mspace_w + 6.0 + 86.0 } else { 56.0 };
+        let needs_overflow = r.right() - 8.0 - total_toggles_w - mode_est_w < right_zone_min_x;
+        let min_ctrl_x = if needs_overflow { right_zone_min_x + 24.0 } else { right_zone_min_x };
+
+        let avail_toggles_w = (r.right() - 8.0 - min_ctrl_x).max(0.0);
+        let shown_toggles = ((avail_toggles_w / step).floor().max(0.0) as usize).min(toggles.len());
+        let mut rx = r.right() - 8.0 - shown_toggles as f32 * step;
+        let mut coord_right = rx - 8.0;
+
+        // Coordinates.
+        let coord = app.canvas.cursor3.map(|cursor| {
+            let (lu, lp) = app.session.doc().map(|d| (d.header.i64("LUNITS", 2), d.header.i64("LUPREC", 4))).unwrap_or((2, 4));
+            format_cursor_coordinates(cursor, app.session.drawing_plane(), lu, lp)
+        });
+
+        let mut cycle_plane = false;
+        let mut toggle_elev = false;
+        let mut reset_elev = false;
+        let mut toggle_zlock = false;
+        let mut toggle_mspace = false;
+
+        // Drawing plane button: XY / XZ / YZ
+        let mut plane_overflow = false;
+        if coord_right - 4.0 - plane_w >= min_ctrl_x {
+            let br_plane = Rect::from_min_max(pos2(coord_right - 4.0 - plane_w, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
+            let resp_plane = ui.interact(br_plane, ui.id().with("drawing_plane_toggle"), Sense::click());
+            let plane_hovered = resp_plane.hovered();
+            let is_non_xy = plane != cadcraft_geom::DrawingPlane::XY;
+            icons::describe_control(ui, &resp_plane, &plane_text, Some(is_non_xy), false);
+            p.rect_filled(
+                br_plane,
+                3.0,
+                if plane_hovered {
+                    t.control_hover
+                } else if is_non_xy {
+                    t.toggle_on.gamma_multiply(0.25)
+                } else {
+                    t.chrome
+                },
+            );
+            p.rect_stroke(
+                br_plane,
+                3.0,
+                Stroke::new(
+                    1.0,
+                    if is_non_xy {
+                        t.toggle_on
+                    } else if plane_hovered {
+                        t.text_dim
+                    } else {
+                        t.border
+                    },
+                ),
+                egui::StrokeKind::Inside,
+            );
+            p.text(br_plane.center(), egui::Align2::CENTER_CENTER, &plane_text, crate::theme::small(), if is_non_xy { t.toggle_on } else { t.text });
+            if resp_plane.on_hover_text(crate::tf!("Drawing plane: {plane} (click to cycle XY -> XZ -> YZ)", plane = plane.name())).clicked() {
+                cycle_plane = true;
+            }
+            coord_right = br_plane.left() - 6.0;
+        } else {
+            plane_overflow = true;
+        }
+
+        // Elevation / Cota button with mouse adjust and origin return
+        let mut elev_overflow = false;
+        if !plane_overflow && coord_right - 4.0 - elev_w >= min_ctrl_x {
+            let br_elev = Rect::from_min_max(pos2(coord_right - 4.0 - elev_w, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
+            let resp_elev = ui.interact(br_elev, ui.id().with("drawing_plane_elev_toggle"), Sense::click());
+            let elev_hovered = resp_elev.hovered();
+            icons::describe_control(ui, &resp_elev, &elev_text, Some(elev_active), false);
+            p.rect_filled(
+                br_elev,
+                3.0,
+                if app.canvas.height_adjust {
                     t.toggle_on
                 } else if elev_hovered {
-                    t.text_dim
+                    t.control_hover
+                } else if elev_active {
+                    t.toggle_on.gamma_multiply(0.25)
                 } else {
-                    t.border
+                    t.chrome
                 },
-            ),
-            egui::StrokeKind::Inside,
-        );
-        p.text(
-            br_elev.center(),
-            egui::Align2::CENTER_CENTER,
-            &elev_text,
-            crate::theme::small(),
-            if app.canvas.height_adjust {
-                t.chrome_dark
-            } else if elev_active {
-                t.toggle_on
+            );
+            p.rect_stroke(
+                br_elev,
+                3.0,
+                Stroke::new(
+                    1.0,
+                    if app.canvas.height_adjust || elev_active {
+                        t.toggle_on
+                    } else if elev_hovered {
+                        t.text_dim
+                    } else {
+                        t.border
+                    },
+                ),
+                egui::StrokeKind::Inside,
+            );
+            p.text(
+                br_elev.center(),
+                egui::Align2::CENTER_CENTER,
+                &elev_text,
+                crate::theme::small(),
+                if app.canvas.height_adjust {
+                    t.chrome_dark
+                } else if elev_active {
+                    t.toggle_on
+                } else {
+                    t.text
+                },
+            );
+            let elev_clicked = resp_elev.clicked();
+            let elev_sec_clicked = resp_elev.secondary_clicked();
+            let _ = resp_elev.on_hover_text(crate::tf!(
+                "Drawing plane offset: {offset} (Click: adjust manually, right-click: return to automatic)",
+                offset = if elev_manual { format!("{elev_offset:.2}") } else { crate::tl!("Automatic").to_string() }
+            ));
+            if elev_clicked {
+                toggle_elev = true;
+            }
+            if elev_sec_clicked {
+                reset_elev = true;
+            }
+            coord_right = br_elev.left() - 6.0;
+        } else {
+            elev_overflow = true;
+        }
+
+        let mut zlock_overflow = false;
+        if !elev_overflow && coord_right - 4.0 - zlock_w >= min_ctrl_x {
+            let br_zlock = Rect::from_min_max(pos2(coord_right - 4.0 - zlock_w, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
+            let resp_zlock = ui.interact(br_zlock, ui.id().with("zlock_toggle"), Sense::click());
+            let zlock_hovered = resp_zlock.hovered();
+            icons::describe_control(ui, &resp_zlock, zlock_text, Some(zlock), false);
+            if zlock {
+                p.rect_filled(br_zlock, 3.0, t.toggle_on);
+                p.rect_stroke(br_zlock, 3.0, Stroke::new(1.5, egui::Color32::WHITE), egui::StrokeKind::Inside);
+                p.text(br_zlock.center(), egui::Align2::CENTER_CENTER, zlock_text, crate::theme::small(), t.chrome_dark);
             } else {
-                t.text
-            },
-        );
-        let elev_clicked = resp_elev.clicked();
-        let elev_sec_clicked = resp_elev.secondary_clicked();
-        let _ = resp_elev.on_hover_text(crate::tf!(
-            "Drawing plane offset: {offset} (Click: adjust manually, right-click: return to automatic)",
-            offset = if elev_manual { format!("{elev_offset:.2}") } else { crate::tl!("Automatic").to_string() }
-        ));
-        if elev_clicked {
+                p.rect_filled(br_zlock, 3.0, if zlock_hovered { t.control_hover } else { t.chrome });
+                p.rect_stroke(br_zlock, 3.0, Stroke::new(1.0, if zlock_hovered { t.text_dim } else { t.border }), egui::StrokeKind::Inside);
+                p.text(
+                    br_zlock.center(),
+                    egui::Align2::CENTER_CENTER,
+                    zlock_text,
+                    crate::theme::small(),
+                    if zlock_hovered { t.text } else { t.text_dim },
+                );
+            }
+            if resp_zlock
+                .on_hover_text(if zlock {
+                    crate::tl!("Vertical lock (V): ON (click to turn off)")
+                } else {
+                    crate::tl!("Vertical lock (V): OFF (click to turn on)")
+                })
+                .clicked()
+            {
+                toggle_zlock = true;
+            }
+            coord_right = br_zlock.left() - 6.0;
+        } else {
+            zlock_overflow = true;
+        }
+
+        // The annotation scale list (model space) or MODEL/PAPER + viewport scale/lock (paper space).
+        let mut mspace_overflow = false;
+        if !is_paper {
+            if !zlock_overflow && coord_right - 56.0 >= min_ctrl_x {
+                coord_right = annoscale::status(app, ui, coord_right, r.center().y);
+            }
+        } else {
+            if !zlock_overflow && coord_right - 4.0 - mspace_w >= min_ctrl_x {
+                let br = Rect::from_min_max(pos2(coord_right - 4.0 - mspace_w, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
+                let resp = ui.interact(br, ui.id().with("mspace_toggle"), Sense::click());
+                p.rect_filled(br, 3.0, if resp.hovered() { t.control_hover } else { t.toggle_on.gamma_multiply(0.25) });
+                p.text(br.center(), egui::Align2::CENTER_CENTER, &mspace_translated, crate::theme::small(), t.text);
+                icons::describe_control(ui, &resp, mspace_label, None, false);
+                if resp.on_hover_text(crate::tl!("Switch between model space in a viewport and paper space")).clicked() {
+                    toggle_mspace = true;
+                }
+                coord_right = br.left() - 6.0;
+                // Scale and lock of the active or selected viewport, placed to the left of MODEL/PAPER.
+                if coord_right - 86.0 >= min_ctrl_x {
+                    let vp_left = crate::vpscale::status(app, ui, coord_right, r.center().y);
+                    if vp_left < coord_right {
+                        coord_right = vp_left - 6.0;
+                    }
+                }
+            } else {
+                mspace_overflow = true;
+            }
+        }
+
+        let mut toggle_cmd: Option<&str> = None;
+        let has_overflow = shown_toggles < toggles.len() || plane_overflow || elev_overflow || zlock_overflow || mspace_overflow;
+        if has_overflow {
+            let ox = (coord_right - 20.0).max(right_zone_min_x);
+            let or_rect = Rect::from_min_size(pos2(ox, r.top() + 4.0), vec2(18.0, 18.0));
+            let oresp = ui.interact(or_rect, ui.id().with("status_overflow"), Sense::click());
+            if oresp.hovered() {
+                p.rect_filled(or_rect, 3.0, t.control_hover.gamma_multiply(0.5));
+            }
+            icons::paint(&p, or_rect.shrink(2.0), Icon::ChevronDown, false);
+            icons::describe_control(ui, &oresp, "More status controls", None, false);
+            let oresp = oresp.on_hover_text(crate::tl!("More status controls"));
+            egui::Popup::from_toggle_button_response(&oresp).width(210.0).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                if plane_overflow && ui.button(&plane_text).clicked() {
+                    cycle_plane = true;
+                    ui.close();
+                }
+                if elev_overflow && ui.button(&elev_text).clicked() {
+                    toggle_elev = true;
+                    ui.close();
+                }
+                if zlock_overflow && ui.selectable_label(zlock, zlock_text).clicked() {
+                    toggle_zlock = true;
+                    ui.close();
+                }
+                if mspace_overflow && is_paper && ui.button(&mspace_translated).clicked() {
+                    toggle_mspace = true;
+                    ui.close();
+                }
+                for &(_, on, cmd, tip) in toggles.iter().skip(shown_toggles) {
+                    if ui.selectable_label(on, crate::i18n::t(tip)).clicked() {
+                        toggle_cmd = Some(cmd);
+                        ui.close();
+                    }
+                }
+            });
+            coord_right = (or_rect.left() - 6.0).max(right_zone_min_x);
+        }
+
+        if cycle_plane {
+            let next = match plane {
+                cadcraft_geom::DrawingPlane::XY => cadcraft_geom::DrawingPlane::XZ,
+                cadcraft_geom::DrawingPlane::XZ => cadcraft_geom::DrawingPlane::YZ,
+                cadcraft_geom::DrawingPlane::YZ => cadcraft_geom::DrawingPlane::XY,
+            };
+            app.session.set_drawing_plane(next);
+            app.session.echo(crate::tf!("Active drawing plane: {plane}.", plane = next.name()));
+        }
+        if toggle_elev {
             app.canvas.height_adjust = !app.canvas.height_adjust;
             if app.canvas.height_adjust {
                 let plane = app.session.drawing_plane();
@@ -501,133 +766,145 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
                 app.session.echo(crate::tl!("Graphical plane offset adjustment started (move the mouse, click to fix, Esc to cancel)."));
             }
         }
-        if elev_sec_clicked {
+        if reset_elev {
             app.canvas.height_adjust = false;
             app.session.set_drawing_plane_automatic();
             app.session.set_drawing_plane_offset_automatic();
             app.session.echo(crate::tl!("Drawing plane elevation returned to automatic mode."));
         }
-        coord_right = br_elev.left() - 6.0;
-
-        let zlock = app.session.settings.zlock;
-        let br_zlock = Rect::from_min_max(pos2(coord_right - 64.0, r.center().y - 10.0), pos2(coord_right - 4.0, r.center().y + 10.0));
-        let resp_zlock = ui.interact(br_zlock, ui.id().with("zlock_toggle"), Sense::click());
-        let zlock_hovered = resp_zlock.hovered();
-        let zlock_text = if zlock { "● V-LOCK" } else { "V-LOCK" };
-        icons::describe_control(ui, &resp_zlock, zlock_text, Some(zlock), false);
-        if zlock {
-            p.rect_filled(br_zlock, 3.0, t.toggle_on);
-            p.rect_stroke(br_zlock, 3.0, Stroke::new(1.5, egui::Color32::WHITE), egui::StrokeKind::Inside);
-            p.text(br_zlock.center(), egui::Align2::CENTER_CENTER, zlock_text, crate::theme::small(), t.chrome_dark);
-        } else {
-            p.rect_filled(br_zlock, 3.0, if zlock_hovered { t.control_hover } else { t.chrome });
-            p.rect_stroke(br_zlock, 3.0, Stroke::new(1.0, if zlock_hovered { t.text_dim } else { t.border }), egui::StrokeKind::Inside);
-            p.text(
-                br_zlock.center(),
-                egui::Align2::CENTER_CENTER,
-                zlock_text,
-                crate::theme::small(),
-                if zlock_hovered { t.text } else { t.text_dim },
-            );
-        }
-        if resp_zlock
-            .on_hover_text(if zlock {
-                crate::tl!("Vertical lock (V): ON (click to turn off)")
-            } else {
-                crate::tl!("Vertical lock (V): OFF (click to turn on)")
-            })
-            .clicked()
-        {
+        if toggle_zlock {
             app.session.settings.zlock = !app.session.settings.zlock;
             let state = if app.session.settings.zlock { crate::tl!("On") } else { crate::tl!("Off") };
             app.session.echo(crate::tf!("Vertical lock {state}.", state = state));
         }
-        coord_right = br_zlock.left() - 6.0;
-        // The annotation scale list (model space).
-        coord_right = annoscale::status(app, ui, coord_right, r.center().y);
-        if matches!(app.session.layout_space(), cadcraft_doc::Space::Paper(_)) {
-            let model = app.session.state().is_ok_and(|st| st.mspace.is_some());
-            let label = if model { "MODEL" } else { "PAPER" };
-            let br = Rect::from_min_max(pos2(rx - 60.0, r.center().y - 9.0), pos2(rx - 6.0, r.center().y + 9.0));
-            let resp = ui.interact(br, ui.id().with("mspace_toggle"), Sense::click());
-            p.rect_filled(br, 3.0, if resp.hovered() { t.control_hover } else { t.toggle_on.gamma_multiply(0.25) });
-            p.text(br.center(), egui::Align2::CENTER_CENTER, crate::i18n::t(label), crate::theme::small(), t.text);
-            icons::describe_control(ui, &resp, label, None, false);
-            if resp.on_hover_text(crate::tl!("Switch between model space in a viewport and paper space")).clicked() {
-                let _ = app.run(if model { "pspace" } else { "mspace" }, json!({}));
-                app.canvas.list = None;
-            }
-            coord_right = br.left() - 10.0;
-            // Scale and lock of the active or selected viewport.
-            coord_right = crate::vpscale::status(app, ui, coord_right + 4.0, r.center().y) - 10.0;
+        if toggle_mspace {
+            let _ = app.run(if model_in_vp { "pspace" } else { "mspace" }, json!({}));
+            app.canvas.list = None;
         }
-        // Layout tabs: Model, "+", then the layouts that fit before the right-hand controls (the
-        // current one always); the layout list reaches the rest.
-        let mut tabs: Vec<String> = vec!["Model".into()];
-        let cur = app.session.state().map(|s| match &s.space {
-            cadcraft_doc::Space::Model => "Model".to_string(),
-            cadcraft_doc::Space::Paper(n) => n.clone(),
-        });
-        if let Ok(st) = app.session.state() {
-            let mut ls: Vec<_> = st.doc.layouts.iter().collect();
-            ls.sort_by_key(|l| l.tab_order);
-            tabs.extend(ls.iter().map(|l| l.name.clone()));
+
+        app.status_bar.controls_left = coord_right;
+
+        // Left zone: pinned Model tab and "+", followed by the bounded scrollable paper-layouts strip.
+        if app.ui.show_toolsets {
+            let needed = model_w + 2.0 + 22.0 + total_layouts_w + STATUS_READOUT_MIN;
+            x = (coord_right - needed).clamp(min_x_model, r.left() + 232.0);
+        } else {
+            x = min_x_model;
         }
-        let shown_name = |i: usize, name: &str| if i == 0 { crate::tl!("Model").to_string() } else { name.to_string() };
-        let limit = (coord_right - STATUS_READOUT_MIN).max(x);
-        let labels: Vec<_> =
-            tabs.iter().enumerate().map(|(i, n)| elided(&p, &shown_name(i, n), crate::theme::body(), t.text, LAYOUT_TAB_TEXT)).collect();
-        let widths: Vec<f32> = labels.iter().map(|(g, _)| g.size().x + 26.0 + 2.0).collect();
-        let active_tab = tabs.iter().position(|n| cur.as_deref().is_ok_and(|c| c == n));
-        // Model and "+" stay; the layouts share what is left.
-        let layouts = widths.get(1..).unwrap_or_default();
-        let room = limit - x - widths.first().copied().unwrap_or(0.0) - 22.0;
-        let active_layout = active_tab.and_then(|a| a.checked_sub(1));
-        let mut shown = visible_tabs(layouts, active_layout, room);
-        let hidden = shown.len() < layouts.len();
-        if hidden {
-            shown = visible_tabs(layouts, active_layout, room - 22.0);
-        }
-        let clip = Rect::from_min_max(r.min, pos2(limit.max(r.left()), r.bottom()));
-        let tp = p.with_clip_rect(clip);
+        let x_model = x;
         let mut switch = None;
-        for (i, (name, (g, cut))) in tabs.iter().zip(labels).enumerate() {
-            if i > 0 && !shown.contains(&(i - 1)) {
-                continue;
-            }
-            let w = g.size().x + 26.0;
-            let tr = Rect::from_min_size(pos2(x, r.top() + 1.0), vec2(w, r.height() - 2.0)).intersect(clip);
-            let active = active_tab == Some(i);
-            let resp = ui.interact(tr, ui.id().with(("lt", i)), Sense::click());
+
+        // Pinned Model tab (index 0) and "+" button.
+        if let Some((name, (g, cut))) = tabs.first().zip(labels.first()) {
+            let left_clip = Rect::from_min_max(r.min, pos2(coord_right.max(r.left()), r.bottom()));
+            let mp = p.with_clip_rect(left_clip);
+            let full_tr = Rect::from_min_size(pos2(x, r.top() + 1.0), vec2(model_w, r.height() - 2.0));
+            let tr = full_tr.intersect(left_clip);
+            let active = active_tab == Some(0);
+            let resp = ui.interact(tr, ui.id().with(("lt", 0usize)), Sense::click());
             if active {
-                tp.rect_filled(tr, 2.0, t.tab_active);
+                mp.rect_filled(full_tr, 2.0, t.tab_active);
             } else if resp.hovered() {
-                tp.rect_filled(tr, 2.0, t.control.gamma_multiply(0.5));
+                mp.rect_filled(full_tr, 2.0, t.control.gamma_multiply(0.5));
             }
-            tp.galley(pos2(tr.left() + 13.0, tr.center().y - g.size().y / 2.0), g, if active { t.text } else { t.text_dim });
+            mp.galley(pos2(full_tr.left() + 13.0, full_tr.center().y - g.size().y / 2.0), g.clone(), if active { t.text } else { t.text_dim });
             icons::describe_control(ui, &resp, name, Some(active), true);
-            let resp = if cut { resp.on_hover_text(shown_name(i, name)) } else { resp };
+            let resp = if *cut { resp.on_hover_text(shown_name(0, name)) } else { resp };
             if resp.clicked() {
                 switch = Some(name.clone());
             }
             crate::shortcut_menus::attach(app, &resp, |app| crate::shortcut_menus::layout_tab_entries(app, name));
-            x += w + 2.0;
-            if i == 0 {
-                let pr = Rect::from_min_size(pos2(x, r.top() + 5.0), vec2(16.0, 16.0));
-                let presp = ui.interact(pr, ui.id().with("layout_plus"), Sense::click());
-                icons::paint(&p, pr.shrink(2.0), Icon::Plus, false);
-                icons::describe_control(ui, &presp, "New layout", None, false);
-                if presp.on_hover_text(crate::tl!("New layout")).clicked()
-                    && let Ok(v) = app.run("layout.new", json!({}))
-                    && let Some(n) = v.get("name").and_then(serde_json::Value::as_str)
-                {
-                    switch = Some(n.to_string());
-                }
-                x += 22.0;
+            x += model_w + 2.0;
+
+            let pr = Rect::from_min_size(pos2(x, r.top() + 5.0), vec2(16.0, 16.0));
+            let presp = ui.interact(pr, ui.id().with("layout_plus"), Sense::click());
+            icons::paint(&p, pr.shrink(2.0), Icon::Plus, false);
+            icons::describe_control(ui, &presp, "New layout", None, false);
+            if presp.on_hover_text(crate::tl!("New layout")).clicked()
+                && let Ok(v) = app.run("layout.new", json!({}))
+                && let Some(n) = v.get("name").and_then(serde_json::Value::as_str)
+            {
+                switch = Some(n.to_string());
+            }
+            x += 22.0;
+        }
+
+        // Bounded scrollable strip for paper layout tabs.
+        let strip_left = x;
+        let avail = (coord_right - strip_left).max(0.0);
+        let readout_reserve = if avail >= 300.0 {
+            STATUS_READOUT_MIN
+        } else {
+            (avail - (total_layouts_w + 22.0).min(140.0)).clamp(0.0, STATUS_READOUT_MIN)
+        };
+        let max_tabs_w = (avail - readout_reserve).max(0.0);
+        let hidden = total_layouts_w > max_tabs_w + 0.5;
+        let chevron_w = if hidden && max_tabs_w >= 36.0 { 22.0 } else { 0.0 };
+        let strip_w = if hidden { (max_tabs_w - chevron_w).max(0.0) } else { total_layouts_w.min(max_tabs_w) };
+        let strip_rect = Rect::from_min_size(pos2(strip_left, r.top()), vec2(strip_w, r.height()));
+        app.status_bar.tab_strip_rect = Some(strip_rect);
+
+        let doc_uid = app.session.state().map(|st| st.uid).unwrap_or(0);
+        let active_key = (doc_uid, active_tab);
+        let reveal = if app.status_bar.last_revealed_active != Some(active_key) && strip_w > 0.0 {
+            app.status_bar.last_revealed_active = Some(active_key);
+            active_layout
+        } else {
+            None
+        };
+        let (scroll_x, max_scroll) = clamp_and_reveal_tab_scroll(&tab_spans, total_layouts_w, strip_w, app.status_bar.tab_scroll, reveal);
+        app.status_bar.tab_scroll = scroll_x;
+        app.status_bar.max_tab_scroll = max_scroll;
+
+        let wheel_rect = Rect::from_min_max(pos2(x_model, r.top()), pos2((strip_rect.right() + chevron_w).min(coord_right), r.bottom()));
+        let pointer_pos = ui.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.interact_pos()));
+        let over_tabs = pointer_pos.is_some_and(|pt| wheel_rect.contains(pt));
+        let over_status = pointer_pos.is_some_and(|pt| r.contains(pt));
+        let mut wheel_scrolled = false;
+        if over_tabs || over_status {
+            let opts = ui.ctx().options(|o| o.input_options);
+            let delta = ui.ctx().input_mut(|i| consume_status_wheel(i, &opts, strip_w.max(100.0)));
+            if over_tabs && delta.abs() > 1e-4 && max_scroll > 0.0 {
+                app.status_bar.tab_scroll = (app.status_bar.tab_scroll + delta).clamp(0.0, max_scroll);
+                wheel_scrolled = true;
             }
         }
-        // The layouts that didn't fit, behind a button after the last tab shown.
-        let more = hidden.then(|| {
+
+        let tp = p.with_clip_rect(strip_rect);
+        for (idx, ((name, (g, cut)), &(start, end))) in tabs.iter().skip(1).zip(labels.into_iter().skip(1)).zip(&tab_spans).enumerate() {
+            let i = idx + 1;
+            let w = end - start;
+            let tab_x = strip_rect.left() - app.status_bar.tab_scroll + start;
+            let full_tr = Rect::from_min_size(pos2(tab_x, r.top() + 1.0), vec2(w, r.height() - 2.0));
+            let tr = full_tr.intersect(strip_rect);
+            if tr.width() <= 1.0 || !tr.is_positive() {
+                continue;
+            }
+            let active = active_tab == Some(i);
+            let resp = ui.interact(tr, ui.id().with(("lt", i)), Sense::click());
+            if active {
+                tp.rect_filled(full_tr, 2.0, t.tab_active);
+            } else if resp.hovered() {
+                tp.rect_filled(full_tr, 2.0, t.control.gamma_multiply(0.5));
+            }
+            tp.galley(pos2(full_tr.left() + 13.0, full_tr.center().y - g.size().y / 2.0), g, if active { t.text } else { t.text_dim });
+            icons::describe_control(ui, &resp, name, Some(active), true);
+            let resp = if cut { resp.on_hover_text(shown_name(i, name)) } else { resp };
+            if resp.clicked() && !wheel_scrolled {
+                switch = Some(name.clone());
+            }
+            crate::shortcut_menus::attach(app, &resp, |app| crate::shortcut_menus::layout_tab_entries(app, name));
+        }
+        if app.status_bar.tab_scroll > 0.5 {
+            p.vline(strip_rect.left(), (r.top() + 3.0)..=(r.bottom() - 3.0), Stroke::new(1.0, t.border));
+        }
+        if app.status_bar.tab_scroll + 0.5 < max_scroll {
+            p.vline(strip_rect.right(), (r.top() + 3.0)..=(r.bottom() - 3.0), Stroke::new(1.0, t.border));
+        }
+        x = strip_rect.right();
+
+        // The layouts that didn't fit, also reachable from the dropdown button after the strip.
+        let more = (hidden && chevron_w > 0.0).then(|| {
             let mr = Rect::from_min_size(pos2(x + 2.0, r.top() + 5.0), vec2(16.0, 16.0));
             let resp = ui.interact(mr, ui.id().with("layout_more"), Sense::click());
             if resp.hovered() {
@@ -652,6 +929,12 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
         }
         if let Some(n) = switch {
             let _ = app.run("layout.set", json!({ "name": n }));
+            let new_active_tab = tabs.iter().position(|t_name| t_name == &n);
+            let new_active_layout = new_active_tab.and_then(|a| a.checked_sub(1));
+            let (new_scroll, new_max) = clamp_and_reveal_tab_scroll(&tab_spans, total_layouts_w, strip_w, app.status_bar.tab_scroll, new_active_layout);
+            app.status_bar.tab_scroll = new_scroll;
+            app.status_bar.max_tab_scroll = new_max;
+            app.status_bar.last_revealed_active = Some((doc_uid, new_active_tab));
         }
         // A transient message occupies the same bounded readout slot as coordinates.
         // Ellipsis and a tooltip keep either value readable without covering layout tabs.
@@ -673,8 +956,7 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
                 ui.interact(rect, ui.id().with("status_readout"), Sense::hover()).on_hover_text(text);
             }
         }
-        let mut toggle_cmd = None;
-        for (icon, on, cmd, tip) in toggles {
+        for &(icon, on, cmd, tip) in toggles.iter().take(shown_toggles) {
             let br = Rect::from_min_size(pos2(rx, r.center().y - size / 2.0), vec2(size, size));
             let resp = ui.interact(br, ui.id().with(("tg", tip)), Sense::click());
             if on {
@@ -691,7 +973,7 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
             if resp.on_hover_text(crate::i18n::t(tip)).clicked() {
                 toggle_cmd = Some(cmd);
             }
-            rx += size + 4.0;
+            rx += step;
         }
         // The toggles don't cancel the active command (#1108); the dialog buttons start theirs.
         match toggle_cmd {
@@ -1242,5 +1524,34 @@ mod tests {
         let cursor = Vec3::new(3.0, 9.0, 4.0);
         assert_eq!(format_cursor_coordinates(cursor, DrawingPlane::XZ, 2, 4), "[WCS] 3.0000, 9.0000, 4.0000");
         assert_eq!(DrawingPlane::XZ.embed(Vec2::new(3.0, 4.0), 9.0), cursor);
+    }
+
+    #[test]
+    fn layout_tab_strip_scroll_clamps_and_reveals_minimally() {
+        let widths = [120.0, 130.0, 90.0, 90.0, 110.0, 110.0, 110.0, 140.0];
+        let (spans, total) = layout_tab_spans(&widths);
+        // 8 tabs + 7 gaps of 2 pt = 900 + 14 = 914 pt.
+        assert_eq!(total, 914.0);
+        assert_eq!(spans[0], (0.0, 120.0));
+        assert_eq!(spans[1], (122.0, 252.0));
+        assert_eq!(spans[7], (774.0, 914.0));
+
+        // Few tabs or wide strip: no overflow, scroll clamped to 0.
+        assert_eq!(clamp_and_reveal_tab_scroll(&spans, total, 1000.0, 50.0, Some(7)), (0.0, 0.0));
+
+        // Strip of 300 pt: max_scroll = 614 pt.
+        // Revealing tab 0 or 1 (already inside 0..300) leaves scroll at 0.
+        assert_eq!(clamp_and_reveal_tab_scroll(&spans, total, 300.0, 0.0, Some(0)), (0.0, 614.0));
+        assert_eq!(clamp_and_reveal_tab_scroll(&spans, total, 300.0, 0.0, Some(1)), (0.0, 614.0));
+        // Revealing tab 2 (254..344) shifts scroll only by 44 pt (to 44.0), not centering or resetting.
+        assert_eq!(clamp_and_reveal_tab_scroll(&spans, total, 300.0, 0.0, Some(2)), (44.0, 614.0));
+        // Revealing last tab 7 (774..914) shifts scroll to 614.0.
+        assert_eq!(clamp_and_reveal_tab_scroll(&spans, total, 300.0, 44.0, Some(7)), (614.0, 614.0));
+        // Without a reveal request (user scrolling manually), arbitrary scroll within bounds is kept.
+        assert_eq!(clamp_and_reveal_tab_scroll(&spans, total, 300.0, 250.0, None), (250.0, 614.0));
+        // Revealing tab 1 (122..252) from 614.0 scrolls left only to tab 1's start (122.0), not 0.0.
+        assert_eq!(clamp_and_reveal_tab_scroll(&spans, total, 300.0, 614.0, Some(1)), (122.0, 614.0));
+        // Hostile numbers never panic.
+        assert_eq!(clamp_and_reveal_tab_scroll(&spans, f32::NAN, -10.0, f32::NAN, Some(99)), (0.0, 0.0));
     }
 }

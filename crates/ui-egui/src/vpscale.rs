@@ -125,6 +125,7 @@ pub fn status(app: &mut CadApp, ui: &mut egui::Ui, right: f32, cy: f32) -> f32 {
         p.rect_filled(lr, 3.0, t.control_hover.gamma_multiply(0.5));
     }
     icons::paint(&p, lr.shrink(2.0), if vp.locked { Icon::Lock } else { Icon::Unlock }, false);
+    icons::describe_control(ui, &lresp, "Lock viewport", Some(vp.locked), false);
     let tip = if vp.locked { crate::tl!("Unlock viewport") } else { crate::tl!("Lock viewport") };
     if lresp.on_hover_text(tip).clicked() {
         let r = app.run("viewport.set", json!({ "handle": h.hex(), "locked": !vp.locked }));
@@ -144,6 +145,7 @@ pub fn status(app: &mut CadApp, ui: &mut egui::Ui, right: f32, cy: f32) -> f32 {
     let (ax, ay) = (sr.right() - 9.0, sr.center().y);
     p.line_segment([pos2(ax - 3.0, ay - 1.5), pos2(ax, ay + 1.5)], egui::Stroke::new(1.2, t.text_dim));
     p.line_segment([pos2(ax, ay + 1.5), pos2(ax + 3.0, ay - 1.5)], egui::Stroke::new(1.2, t.text_dim));
+    icons::describe_control(ui, &sresp, "Viewport scale", None, false);
     let sresp = sresp.on_hover_text(if vp.locked { crate::tl!("Viewport is locked") } else { crate::tl!("Viewport scale") });
     let mut pick = None;
     if !vp.locked {

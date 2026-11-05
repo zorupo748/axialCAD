@@ -1969,15 +1969,17 @@ fn resolve_global_z0_point(app: &mut CadApp, hp: Pos2, xf: &Xf, dyn_frame: Optio
     }
 
     let osmode = app.session.snap_override().unwrap_or(app.session.settings.osmode);
-    if osmode & snap::mode::END != 0
-        && osmode & snap::mode::OFF == 0
+    let snap_modes_3d = snap::mode::END | snap::mode::MID | snap::mode::CEN | snap::mode::NOD;
+    if (osmode & snap_modes_3d != 0)
+        && (osmode & snap::mode::OFF == 0)
         && let Ok(st) = app.session.state()
-        && let Some(mut hit) = snap::snap_3d_line_endpoints(
+        && let Some(mut hit) = snap::snap_3d_endpoints(
             &st.doc,
             &st.edit_space(),
             &cam,
             q,
             app.session.settings.aperture / xf.scale,
+            osmode,
             app.canvas.snap_cycle.map_or(0, |cycle| cycle.index),
         )
         && let Some(point) = hit.point3
@@ -2010,6 +2012,7 @@ fn soft_axis_track(
     base: Vec3,
     scale: f64,
     previous: Option<cadcraft_geom::Axis3D>,
+    min_z: f64,
 ) -> Option<(cadcraft_geom::Axis3D, Vec3, f64)> {
     let view = cam.view_dir();
     let screen_base = cam.project_point(base);
@@ -2038,6 +2041,9 @@ fn soft_axis_track(
         }
         let distance_pixels = (delta.x * screen_axis.y - delta.y * screen_axis.x).abs() / axis_len * scale;
         let Some(coordinate) = cam.unproject_axis_coordinate(q, base, direction) else { continue };
+        if axis == cadcraft_geom::Axis3D::Z && base.z <= min_z + 1e-6 && coordinate < base.z - 1e-6 {
+            continue;
+        }
         let point = match axis {
             cadcraft_geom::Axis3D::X => Vec3::new(coordinate, base.y, base.z),
             cadcraft_geom::Axis3D::Y => Vec3::new(base.x, coordinate, base.z),
@@ -2103,10 +2109,12 @@ fn resolve_effective_point(
     if line_prompt && z0_mode {
         return resolve_global_z0_point(app, hp, xf, dyn_frame);
     }
+    let is_near_plan_or_oblique = cam.principal_drawing_plane().is_none_or(|p| p == cadcraft_geom::DrawingPlane::XY);
     let is_auto_oblique_line = line_prompt
         && !app.session.drawing_plane_is_manual()
         && !app.session.drawing_plane_offset_is_manual()
-        && cam.principal_drawing_plane().is_none();
+        && !cam.is_plan()
+        && is_near_plan_or_oblique;
     let plane = if is_auto_oblique_line { cadcraft_geom::DrawingPlane::XY } else { app.session.drawing_plane() };
     let continuation_offset = if is_auto_oblique_line { 0.0 } else { app.session.drawing_plane_offset_for(prompt_base3) };
     let plane_point = xf.to_world3_with_offset(hp, plane, continuation_offset);
@@ -2152,16 +2160,21 @@ fn resolve_effective_point(
         return Some((q_grip, prompt_point(q_grip)));
     }
 
-    // Priority 2: 3D LINE Endpoint Snap (when in 3D camera view)
+    // Priority 2: 3D Object Snap (when in 3D camera view)
     let wants_point = app.session.current_prompt().as_ref().is_some_and(cadcraft_engine::pointmod::accepts);
     let over = app.session.snap_override();
     let osmode = over.unwrap_or(base_osmode);
-    let is_end_active = (osmode & snap::mode::END != 0) && (osmode & snap::mode::OFF == 0);
-    if wants_point && app.session.pending_window.is_none() && is_end_active && !cam.is_plan() {
+    let snap_modes_3d = if app.session.drawing_plane_is_manual() && app.session.drawing_plane() != cadcraft_geom::DrawingPlane::XY {
+        snap::mode::END
+    } else {
+        snap::mode::END | snap::mode::MID | snap::mode::CEN | snap::mode::NOD
+    };
+    let is_3d_active = (osmode & snap_modes_3d != 0) && (osmode & snap::mode::OFF == 0);
+    if wants_point && app.session.pending_window.is_none() && is_3d_active && !cam.is_plan() {
         let ap_cam = aperture / xf.scale;
         let cycle_idx = app.canvas.snap_cycle.map_or(0, |c| c.index);
         if let Ok(st) = app.session.state()
-            && let Some(hit3d) = snap::snap_3d_line_endpoints(&st.doc, &st.edit_space(), &cam, q, ap_cam, cycle_idx)
+            && let Some(hit3d) = snap::snap_3d_endpoints(&st.doc, &st.edit_space(), &cam, q, ap_cam, osmode & snap_modes_3d, cycle_idx)
         {
             let p3 = hit3d.point3.unwrap_or_else(|| Vec3::new(hit3d.point.x, hit3d.point.y, 0.0));
             let at2 = if line_prompt { plane.coordinates(p3) } else { p3.xy() };
@@ -2237,7 +2250,8 @@ fn resolve_effective_point(
         && app.options.z_zero_drop_helper
         && !app.session.drawing_plane_is_manual()
         && !app.session.drawing_plane_offset_is_manual()
-        && cam.principal_drawing_plane().is_none()
+        && !cam.is_plan()
+        && is_near_plan_or_oblique
         && app.session.pending_window.is_none()
         && let Some(base) = prompt_base3
         && base.z.abs() > z0_tolerance(base)
@@ -2265,9 +2279,10 @@ fn resolve_effective_point(
         && !orthomode
         && !zlock
         && app.session.pending_window.is_none()
-        && cam.principal_drawing_plane().is_none()
+        && !cam.is_plan()
+        && is_near_plan_or_oblique
     {
-        soft_axis_track(&cam, q, base3, xf.scale, app.canvas.active_axis_3d)
+        soft_axis_track(&cam, q, base3, xf.scale, app.canvas.active_axis_3d, continuation_offset)
     } else {
         None
     };
@@ -2345,7 +2360,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     let Ok(st) = app.session.state() else { return };
     let view = st.view();
     let scale = f64::from(rect.height()) / view.height.max(1e-12);
-    let camera = Some(st.camera);
+    let camera = if matches!(st.space, cadcraft_doc::Space::Paper(_)) && st.mspace.is_none() { None } else { Some(app.session.camera()) };
     let xf = Xf { rect, center: view.center, scale, camera };
     app.canvas.xf = Some(xf);
 
@@ -2502,7 +2517,11 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         return;
     }
     // Re-read the view after navigation.
-    let (view, camera) = app.session.state().map(|s| (s.view(), Some(s.camera))).unwrap_or((view, camera));
+    let (view, camera) = app
+        .session
+        .state()
+        .map(|s| (s.view(), if matches!(s.space, cadcraft_doc::Space::Paper(_)) && s.mspace.is_none() { None } else { Some(app.session.camera()) }))
+        .unwrap_or((view, camera));
     let scale = f64::from(rect.height()) / view.height.max(1e-12);
     let xf = Xf { rect, center: view.center, scale, camera };
     app.canvas.xf = Some(xf);
@@ -4446,18 +4465,18 @@ mod hatch_pick_tests {
             let screen_y = cam.project_point(Vec3::new(0.0, 1.0, 0.0)) - cam.project_point(base);
             let between = (screen_x.normalized() + screen_y.normalized()).normalized() * (12.0 / test_xf(&app).scale);
             let q = cam.project_point(base) + between;
-            let retained_x = super::super::soft_axis_track(&cam, q, base, test_xf(&app).scale, Some(cadcraft_geom::Axis3D::X));
-            let retained_y = super::super::soft_axis_track(&cam, q, base, test_xf(&app).scale, Some(cadcraft_geom::Axis3D::Y));
+            let retained_x = super::super::soft_axis_track(&cam, q, base, test_xf(&app).scale, Some(cadcraft_geom::Axis3D::X), 0.0);
+            let retained_y = super::super::soft_axis_track(&cam, q, base, test_xf(&app).scale, Some(cadcraft_geom::Axis3D::Y), 0.0);
             assert_eq!(retained_x.map(|candidate| candidate.0), Some(cadcraft_geom::Axis3D::X));
             assert_eq!(retained_y.map(|candidate| candidate.0), Some(cadcraft_geom::Axis3D::Y));
-            let first = super::super::soft_axis_track(&cam, q, base, test_xf(&app).scale, None).map(|candidate| candidate.0);
-            let second = super::super::soft_axis_track(&cam, q, base, test_xf(&app).scale, None).map(|candidate| candidate.0);
+            let first = super::super::soft_axis_track(&cam, q, base, test_xf(&app).scale, None, 0.0);
+            let second = super::super::soft_axis_track(&cam, q, base, test_xf(&app).scale, None, 0.0);
             assert_eq!(first, second, "ambiguous projected axes must resolve deterministically");
 
             let distant_base = Vec3::new(0.0, 0.0, 100.0);
             let distant_ground = cam.project_point(Vec3::ZERO);
             let low_zoom = 0.4;
-            let distant_z = super::super::soft_axis_track(&cam, distant_ground, distant_base, low_zoom, None);
+            let distant_z = super::super::soft_axis_track(&cam, distant_ground, distant_base, low_zoom, None, 0.0);
             assert!(
                 distant_z.is_some_and(|(axis, point, _)| axis == cadcraft_geom::Axis3D::Z && point.dist(Vec3::ZERO) < 1e-6),
                 "a visibly long axis remains trackable when one world unit is less than one pixel"
@@ -4469,12 +4488,12 @@ mod hatch_pick_tests {
                 let seven_pixels = cam.project_point(base) + (x_dir * 30.0 + x_normal * 7.0) / scale;
                 let nine_pixels = cam.project_point(base) + (x_dir * 30.0 + x_normal * 9.0) / scale;
                 assert_eq!(
-                    super::super::soft_axis_track(&cam, seven_pixels, base, scale, None).map(|candidate| candidate.0),
+                    super::super::soft_axis_track(&cam, seven_pixels, base, scale, None, 0.0).map(|candidate| candidate.0),
                     Some(cadcraft_geom::Axis3D::X),
                     "the acquire radius is pixel-based at zoom scale {scale}"
                 );
                 assert!(
-                    super::super::soft_axis_track(&cam, nine_pixels, base, scale, None).is_none(),
+                    super::super::soft_axis_track(&cam, nine_pixels, base, scale, None, 0.0).is_none(),
                     "outside the acquire radius at zoom scale {scale}"
                 );
             }
@@ -4483,7 +4502,7 @@ mod hatch_pick_tests {
             edge_on.set_view_dir(Vec3::new(1.0, 0.0, 0.0));
             let axis_projection = edge_on.project_point(Vec3::new(4.0, 0.0, 0.0));
             assert!(
-                super::super::soft_axis_track(&edge_on, axis_projection, base, test_xf(&app).scale, None).is_none(),
+                super::super::soft_axis_track(&edge_on, axis_projection, base, test_xf(&app).scale, None, 0.0).is_none(),
                 "an axis near-parallel to the view must not acquire an unstable depth"
             );
         }

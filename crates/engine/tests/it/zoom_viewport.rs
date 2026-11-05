@@ -107,3 +107,63 @@ fn zoom_in_a_locked_viewport_or_on_the_model_tab_is_unchanged() {
     s.cmdline("zoom 2xp").unwrap();
     assert!((s.state().unwrap().view().height - v.height / 2.0).abs() < 1e-9);
 }
+
+#[test]
+fn pan_in_a_locked_viewport_moves_sheet_without_changing_viewport_or_exploding_zoom() {
+    let (mut s, h) = session();
+    // Layout1 has a viewport `h`. Set scale to 1:50 (0.02) and center to (500, 250).
+    s.execute("viewport.set", &json!({"handle": h, "scale": 0.02, "center": [500, 250]})).unwrap();
+    // User is in MSPACE (active viewport).
+    s.execute("mspace", &json!({"handle": h})).unwrap();
+    // User locks the viewport.
+    s.execute("viewport.set", &json!({"handle": h, "locked": true})).unwrap();
+
+    let vp_before = viewport(&s, &h);
+    assert_eq!(vp_before.locked, true);
+    assert!((vp_before.view_height - vp_before.height / 0.02).abs() < 1e-9);
+    let paper_before = s.state().unwrap().paper_view();
+
+    // Now pan repeatedly with middle mouse button drag (e.g. 50 drag steps)
+    for step in 0..50 {
+        let view = s.state().unwrap().view();
+        let scale = 900.0 / view.height.max(1e-12);
+        s.pan_step(10.0, -5.0, scale).unwrap();
+
+        let paper_now = s.state().unwrap().paper_view();
+        // Paper height MUST NOT change!
+        assert!(
+            (paper_now.height - paper_before.height).abs() < 1e-6,
+            "step {step}: paper height changed from {} to {}",
+            paper_before.height,
+            paper_now.height
+        );
+        assert!(paper_now.center.is_finite());
+        assert!(paper_now.height.is_finite());
+
+        // Viewport scale and framing MUST NOT change!
+        let vp_now = viewport(&s, &h);
+        assert_eq!(vp_now.view_center, vp_before.view_center, "step {step}: vp view_center changed");
+        assert_eq!(vp_now.view_height, vp_before.view_height, "step {step}: vp view_height changed");
+    }
+
+    // Switch to another layout and return
+    s.execute("layout.set", &json!({"name": "Layout2"})).unwrap();
+    let layout2_paper = s.state().unwrap().paper_view();
+    assert!(layout2_paper.height > 10.0);
+
+    // Switch back to Layout1
+    s.execute("layout.set", &json!({"name": "Layout1"})).unwrap();
+    let vp_after_return = viewport(&s, &h);
+    assert_eq!(vp_after_return.view_center, vp_before.view_center);
+    assert_eq!(vp_after_return.view_height, vp_before.view_height);
+
+    // Unlock viewport and verify navigation inside the viewport now works
+    s.execute("mspace", &json!({"handle": h})).unwrap();
+    s.execute("viewport.set", &json!({"handle": h, "locked": false})).unwrap();
+    let view = s.state().unwrap().view();
+    let scale = 900.0 / view.height.max(1e-12);
+    s.pan_step(20.0, 0.0, scale).unwrap();
+    let vp_unlocked_panned = viewport(&s, &h);
+    assert_ne!(vp_unlocked_panned.view_center, vp_before.view_center);
+    assert_eq!(vp_unlocked_panned.view_height, vp_before.view_height);
+}

@@ -363,6 +363,10 @@ fn run_layout_set(s: &mut Session, p: &Value) -> Result<Value> {
         let (w, h) = if page.landscape { (page.height_mm, page.width_mm) } else { (page.width_mm, page.height_mm) };
         let unit = if st.doc.header.i64("MEASUREMENT", 0) == 1 { 1.0 } else { 1.0 / 25.4 };
         st.set_view_quiet(View { center: Vec2::new(w * unit / 2.0, h * unit / 2.0), height: h * unit * 1.15 });
+    } else if space == Space::Model && st.camera.is_plan() {
+        let v = st.view();
+        st.camera.target = cadcraft_geom::Vec3::new(v.center.x, v.center.y, st.camera.target.z);
+        st.camera.height = v.height;
     }
     s.touch();
     ok()
@@ -643,6 +647,9 @@ impl Session {
     }
     /// One step of 3D orbit drag of (dx, dy) pixels.
     pub fn orbit_step(&mut self, dx: f64, dy: f64) -> Result<()> {
+        if self.layout_space() != cadcraft_doc::Space::Model {
+            return Ok(());
+        }
         let (w, h) = self.viewport_px;
         let mut cam = self.camera();
         if cam.target == cadcraft_geom::Vec3::ZERO

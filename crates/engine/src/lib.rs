@@ -279,10 +279,12 @@ impl DocState {
         true
     }
     fn put_paper_view(&mut self, v: View) {
-        if self.camera.is_plan() {
-            self.camera.target = cadcraft_geom::Vec3::new(v.center.x, v.center.y, self.camera.target.z);
+        if self.space == Space::Model {
+            if self.camera.is_plan() {
+                self.camera.target = cadcraft_geom::Vec3::new(v.center.x, v.center.y, self.camera.target.z);
+            }
+            self.camera.height = v.height;
         }
-        self.camera.height = v.height;
         match self.views.iter_mut().find(|(s, _)| *s == self.space) {
             Some((_, slot)) => *slot = v,
             None => self.views.push((self.space.clone(), v)),
@@ -845,11 +847,29 @@ impl Session {
         self.docs.get_mut(self.active).ok_or(EngineError::NoDocument)
     }
     pub fn camera(&self) -> cadcraft_geom::OrbitCamera {
-        self.state().map(|st| st.camera).unwrap_or_default()
+        self.state()
+            .map(|st| {
+                let v = st.view();
+                if matches!(st.space, Space::Paper(_)) && st.mspace.is_none() {
+                    cadcraft_geom::OrbitCamera::plan(cadcraft_geom::Vec3::new(v.center.x, v.center.y, 0.0), v.height)
+                } else if st.camera.is_plan() {
+                    let mut c = st.camera;
+                    c.target = cadcraft_geom::Vec3::new(v.center.x, v.center.y, c.target.z);
+                    c.height = v.height;
+                    c
+                } else {
+                    let mut c = st.camera;
+                    c.height = v.height;
+                    c
+                }
+            })
+            .unwrap_or_default()
     }
     pub fn set_camera(&mut self, camera: cadcraft_geom::OrbitCamera) {
         if let Ok(st) = self.state_mut() {
-            st.camera = camera;
+            if !matches!(st.space, Space::Paper(_)) || st.mspace.is_some() {
+                st.camera = camera;
+            }
             let center = cadcraft_geom::Vec2::new(camera.target.x, camera.target.y);
             st.set_view_quiet(View { center, height: camera.height });
         }
