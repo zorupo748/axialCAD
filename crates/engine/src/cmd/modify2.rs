@@ -2209,6 +2209,7 @@ fn run_textedit(s: &mut Session, p: &Value) -> Result<Value> {
 #[derive(Default)]
 struct TextEditM {
     h: Option<(Handle, String)>,
+    mtext: Option<cadcraft_doc::MText>,
     /// Edits made in this run, newest last: each object as it was before (the Undo option).
     edits: Vec<(Handle, EntityKind)>,
     /// Single mode: end after one edit (the Mode option; Multiple by default).
@@ -2221,6 +2222,20 @@ impl Interactive for TextEditM {
     fn name(&self) -> &'static str {
         "TEXTEDIT"
     }
+    fn begin(&mut self, s: &mut Session) -> Result<Step> {
+        if let Some(h) = s.selection().first().copied() {
+            if let Ok(ent) = curves::entity(s, h) {
+                if let Some(old) = text_of(&ent.kind) {
+                    self.mtext = match &ent.kind {
+                        EntityKind::MText(m) => Some(m.clone()),
+                        _ => None,
+                    };
+                    self.h = Some((h, old));
+                }
+            }
+        }
+        Ok(Step::Continue)
+    }
     fn prompt(&self, _s: &Session) -> Prompt {
         if self.mode {
             let current = if self.single { "Single" } else { "Multiple" };
@@ -2230,6 +2245,12 @@ impl Interactive for TextEditM {
             None => Prompt::new("Select an annotation object", Accept::POINT).kw(&["Undo", "Mode"]),
             Some((_, old)) => Prompt::new("Enter new text", Accept::TEXT).default(old.chars().take(40).collect::<String>()),
         }
+    }
+    fn editing_mtext(&self) -> Option<cadcraft_doc::MText> {
+        self.mtext.clone()
+    }
+    fn editing_text_entity(&self) -> Option<Handle> {
+        self.h.as_ref().map(|(h, _)| *h)
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
         if self.mode {
@@ -2245,7 +2266,12 @@ impl Interactive for TextEditM {
         match (&self.h, i) {
             (None, Input::Point(p)) => {
                 let h = curves::pick_at(s, p).ok_or_else(|| other("*Invalid selection*"))?;
-                let old = text_of(&curves::entity(s, h)?.kind).ok_or_else(|| other("Select a text, mtext, attribute definition or dimension."))?;
+                let ent = curves::entity(s, h)?;
+                let old = text_of(&ent.kind).ok_or_else(|| other("Select a text, mtext, attribute definition or dimension."))?;
+                self.mtext = match &ent.kind {
+                    EntityKind::MText(m) => Some(m.clone()),
+                    _ => None,
+                };
                 self.h = Some((h, old));
                 Ok(Step::Continue)
             }
@@ -2255,10 +2281,12 @@ impl Interactive for TextEditM {
                 set_text(s, h, &t)?;
                 self.edits.push((h, before));
                 self.h = None;
+                self.mtext = None;
                 Ok(if self.single { Step::Done } else { Step::Continue })
             }
             (Some(_), Input::Enter) => {
                 self.h = None;
+                self.mtext = None;
                 Ok(if self.single { Step::Done } else { Step::Continue })
             }
             (None, Input::Enter) => Ok(Step::Done),

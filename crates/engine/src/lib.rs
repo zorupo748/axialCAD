@@ -1568,6 +1568,11 @@ impl Session {
         self.running.as_ref().and_then(|r| r.machine.editing_mtext())
     }
 
+    /// The entity handle being edited in-place by a text editor.
+    pub fn editing_text_entity(&self) -> Option<Handle> {
+        self.running.as_ref().and_then(|r| r.machine.editing_text_entity())
+    }
+
     pub fn current_prompt(&self) -> Option<Prompt> {
         if let Some(p) = self.lisp_prompt() {
             return Some(p);

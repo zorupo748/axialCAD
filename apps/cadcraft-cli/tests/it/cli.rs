@@ -113,3 +113,45 @@ fn cli_opens_dwt_template_and_draws_lines_at_z_zero() {
     assert!(content.contains("LINE"), "Saved DXF must contain the drawn LINE entities");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn cli_dwt_template_edits_cajetin_title_and_scale_and_preserves_on_reload() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Templates/EGI-ISO.dwt");
+    let dir = std::env::temp_dir().join(format!("cc-cli-dwt-edit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out_dxf = dir.join("dwt_edited.dxf");
+    let output = Command::new(env!("CARGO_BIN_EXE_cadcraft-cli"))
+        .args([
+            "run",
+            root.to_str().unwrap(),
+            "--cmd",
+            "layout.set {\"name\":\"Formato A4 vertical\"}",
+            "--cmd",
+            "textedit {\"handle\":\"153\",\"text\":\"1:5\"}",
+            "--cmd",
+            "textedit {\"handle\":\"154\",\"text\":\"NUEVO TITULO AUDITORIA\"}",
+            "--save",
+            out_dxf.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}: {}", output.status, String::from_utf8_lossy(&output.stderr));
+
+    let inspect_output = Command::new(env!("CARGO_BIN_EXE_cadcraft-cli"))
+        .args([
+            "run",
+            out_dxf.to_str().unwrap(),
+            "--cmd",
+            "layout.set {\"name\":\"Formato A4 vertical\"}",
+            "--cmd",
+            "drawing.inspect {\"entities\":true}",
+        ])
+        .output()
+        .unwrap();
+    assert!(inspect_output.status.success());
+    let stdout = String::from_utf8_lossy(&inspect_output.stdout);
+    assert!(stdout.contains("1:5"), "Saved DXF must contain edited scale 1:5");
+    assert!(stdout.contains("NUEVO TITULO AUDITORIA"), "Saved DXF must contain edited title");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

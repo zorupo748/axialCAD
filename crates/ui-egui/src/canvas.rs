@@ -2536,6 +2536,16 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     };
     // A clipped active viewport's outline (picks and its heavy border follow it).
     let active_clip = app.session.state().ok().and_then(|st| st.active_viewport().and_then(|(h, v)| cadcraft_render::viewport_clip(&st.doc, h, &v)));
+    // Double-click text to edit it, as in AutoCAD: TEXTEDIT with that object already picked.
+    if inside
+        && dbl_primary
+        && app.session.running.is_none()
+        && let Some(hp) = hover_pos
+        && edit_text_at(app, xf.to_world(hp))
+    {
+        return;
+    }
+
     // Double-click a viewport to work inside it; double-click the sheet outside it to return.
     if inside
         && dbl_primary
@@ -2558,15 +2568,6 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             app.canvas.list = None;
             return;
         }
-    }
-    // Double-click text to edit it, as in AutoCAD: TEXTEDIT with that object already picked.
-    if inside
-        && dbl_primary
-        && app.session.running.is_none()
-        && let Some(hp) = hover_pos
-        && edit_text_at(app, xf.to_world(hp))
-    {
-        return;
     }
 
     // Double-click a hatch (no command running) to edit it in the Hatch Edit dialog. The click is
@@ -3277,15 +3278,27 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
 /// offers Edit Text for); false when there is none.
 fn edit_text_at(app: &mut CadApp, p: Vec2) -> bool {
     use cadcraft_engine::doc::EntityKind;
-    let is_text = cadcraft_engine::cmd::curves::pick_at(&app.session, p).and_then(|h| {
-        app.session.doc().ok()?.entity(h).map(|e| matches!(e.kind, EntityKind::Text(_) | EntityKind::MText(_) | EntityKind::AttDef(_)))
+    let target = cadcraft_engine::cmd::curves::pick_at(&app.session, p).and_then(|h| {
+        let e = app.session.doc().ok()?.entity(h)?;
+        match &e.kind {
+            EntityKind::Text(_) | EntityKind::MText(_) | EntityKind::AttDef(_) => Some((h, false)),
+            EntityKind::Insert(i) if !i.attribs.is_empty() => Some((h, true)),
+            _ => None,
+        }
     });
-    if is_text != Some(true) {
+    let Some((_h, is_insert)) = target else {
         return false;
-    }
-    app.start("textedit");
-    if let Err(e) = app.session.input(Input::Point(p)) {
-        app.session.echo(e.to_string());
+    };
+    if is_insert {
+        app.start("attedit");
+        if let Err(e) = app.session.input(Input::Point(p)) {
+            app.session.echo(e.to_string());
+        }
+    } else {
+        app.start("textedit");
+        if let Err(e) = app.session.input(Input::Point(p)) {
+            app.session.echo(e.to_string());
+        }
     }
     true
 }

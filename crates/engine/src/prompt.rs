@@ -283,6 +283,10 @@ pub trait Interactive: Send {
     fn editing_mtext(&self) -> Option<cadcraft_doc::MText> {
         None
     }
+    /// An entity being edited by an in-place text editor.
+    fn editing_text_entity(&self) -> Option<Handle> {
+        None
+    }
 }
 
 /// See [`Interactive::drag`].

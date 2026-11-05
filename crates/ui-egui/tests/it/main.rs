@@ -1,4 +1,5 @@
 mod animation_effects;
+mod cajetin_text_editing;
 mod chrome_geometry;
 mod context_menu;
 mod context_menus;

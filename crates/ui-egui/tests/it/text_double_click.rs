@@ -69,6 +69,26 @@ fn double_click_on_text_starts_textedit_for_that_object() {
 }
 
 #[test]
+fn double_click_on_text_in_paper_space() {
+    let mut app = CadApp::new(Session::new(), Services::default());
+    app.run("layout.set", json!({ "name": "Layout1" })).unwrap();
+    app.run("text", json!({ "at": [100, 20], "text": "TITULO", "height": 5.0 })).unwrap();
+    app.session.execute("view.set", &json!({ "center": [100, 20], "height": 50 })).unwrap();
+    app.canvas.zoom_pending = false;
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut CadApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(5);
+    double_click(&mut h, Vec2::new(100.0, 20.0));
+    let s = &h.state().session;
+    assert_eq!(s.running.as_ref().map(|r| r.id.as_str()), Some("textedit"));
+}
+
+#[test]
 fn double_click_elsewhere_starts_no_command() {
     for at in [Vec2::new(30.0, 5.0), Vec2::new(15.0, 30.0)] {
         let mut h = harness();
