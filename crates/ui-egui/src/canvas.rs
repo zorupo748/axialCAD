@@ -198,6 +198,8 @@ pub struct CanvasState {
     /// The right-click that opened the shortcut menu held Shift or Ctrl: it is the object snap
     /// menu ([`crate::context_menu`]).
     pub snap_menu: bool,
+    /// Whether any egui popup or menu was open at the beginning of the frame.
+    pub popup_open: bool,
     /// Tab was pressed over a snap marker: show the next candidate ([`SnapCycle`]).
     pub snap_tab: bool,
     pub snap_cycle: Option<SnapCycle>,
@@ -891,6 +893,17 @@ fn screen_entity_polylines(doc: &cadcraft_doc::Drawing, entity: &cadcraft_doc::E
         cadcraft_doc::EntityKind::Line(line) if line.a.z != 0.0 || line.b.z != 0.0 => {
             vec![vec![line.a, line.b].into_iter().map(|point| xf.to_screen3(point)).collect()]
         }
+        cadcraft_doc::EntityKind::Circle(c) if !entity.common.extrusion.near(Vec3::Z, 1e-6) || c.center.z.abs() > 1e-6 => {
+            let pts = c.sample_points_3d(entity.common.extrusion, 64);
+            vec![pts.into_iter().map(|p| xf.to_screen3(p)).collect()]
+        }
+        cadcraft_doc::EntityKind::LwPolyline(pl) if !entity.common.extrusion.near(Vec3::Z, 1e-6) || pl.elevation.abs() > 1e-6 => {
+            let mut pts = pl.vertices_3d(entity.common.extrusion);
+            if pl.closed && !pts.is_empty() {
+                pts.push(pts[0]);
+            }
+            vec![pts.into_iter().map(|p| xf.to_screen3(p)).collect()]
+        }
         _ => cadcraft_engine::select::hit_polylines(doc, entity, (0.5 / xf.scale.max(1e-12)).max(1e-9))
             .into_iter()
             .map(|path| path.into_iter().map(|point| xf.to_screen3(Vec3::new(point.x, point.y, 0.0))).collect())
@@ -1023,38 +1036,66 @@ fn draw_spatial_lines(app: &CadApp, painter: &egui::Painter, xf: &Xf) {
         if !st.doc.is_visible(e) {
             continue;
         }
-        if let cadcraft_doc::EntityKind::Line(l) = &e.kind
-            && (l.a.z != 0.0 || l.b.z != 0.0)
-        {
-            let p1 = xf.to_screen3(l.a);
-            let p2 = xf.to_screen3(l.b);
-            let is_sel = sel.contains(&e.handle);
-            let look = if is_sel {
-                selection_look
-            } else if app.canvas.hover == Some(e.handle) {
-                Some(preview_look)
-            } else {
-                None
-            };
-            let color = if is_sel && look.is_some() {
-                t.selection
-            } else if !is_sel && look.is_some() {
-                t.hover
-            } else {
-                let layer_color = st.doc.layer(&e.common.layer).map_or(cadcraft_color::Color::WHITE, |layer| layer.color);
-                let rgb = e.common.color.resolve(layer_color, cadcraft_color::Color::WHITE);
-                Color32::from_rgb(rgb.0, rgb.1, rgb.2)
-            };
-            if let Some(look) = look {
-                let stroke = Stroke::new(look.width, color);
-                if look.dashed {
+        let is_sel = sel.contains(&e.handle);
+        let look = if is_sel {
+            selection_look
+        } else if app.canvas.hover == Some(e.handle) {
+            Some(preview_look)
+        } else {
+            None
+        };
+        let color = if is_sel && look.is_some() {
+            t.selection
+        } else if !is_sel && look.is_some() {
+            t.hover
+        } else {
+            let layer_color = st.doc.layer(&e.common.layer).map_or(cadcraft_color::Color::WHITE, |layer| layer.color);
+            let rgb = e.common.color.resolve(layer_color, cadcraft_color::Color::WHITE);
+            Color32::from_rgb(rgb.0, rgb.1, rgb.2)
+        };
+        let width = look.map(|l| l.width).unwrap_or(1.0);
+        let stroke = Stroke::new(width, color);
+
+        match &e.kind {
+            cadcraft_doc::EntityKind::Line(l) if l.a.z != 0.0 || l.b.z != 0.0 => {
+                let p1 = xf.to_screen3(l.a);
+                let p2 = xf.to_screen3(l.b);
+                if look.is_some_and(|l| l.dashed) {
                     painter.extend(Shape::dashed_line(&[p1, p2], stroke, 6.0, 4.0));
                 } else {
                     painter.line_segment([p1, p2], stroke);
                 }
-            } else {
-                painter.line_segment([p1, p2], Stroke::new(1.0, color));
             }
+            cadcraft_doc::EntityKind::Circle(c)
+                if c.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
+            {
+                let pts3 = c.sample_points_3d(e.common.extrusion, 64);
+                let screen_pts: Vec<Pos2> = pts3.into_iter().map(|p| xf.to_screen3(p)).collect();
+                if screen_pts.len() >= 2 {
+                    if look.is_some_and(|l| l.dashed) {
+                        painter.extend(Shape::dashed_line(&screen_pts, stroke, 6.0, 4.0));
+                    } else {
+                        painter.add(Shape::line(screen_pts, stroke));
+                    }
+                }
+            }
+            cadcraft_doc::EntityKind::LwPolyline(pl)
+                if pl.elevation.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
+            {
+                let mut pts3 = pl.vertices_3d(e.common.extrusion);
+                if pl.closed && !pts3.is_empty() {
+                    pts3.push(pts3[0]);
+                }
+                let screen_pts: Vec<Pos2> = pts3.into_iter().map(|p| xf.to_screen3(p)).collect();
+                if screen_pts.len() >= 2 {
+                    if look.is_some_and(|l| l.dashed) {
+                        painter.extend(Shape::dashed_line(&screen_pts, stroke, 6.0, 4.0));
+                    } else {
+                        painter.add(Shape::line(screen_pts, stroke));
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -2104,11 +2145,13 @@ fn resolve_effective_point(
     let prompt_base3 = app.session.current_prompt().as_ref().and_then(|p| p.base3);
     let base3 = prompt_base3.unwrap_or(app.session.last_point3);
     let was_z_zero = app.canvas.axis_track_z_zero;
-    let line_prompt = app.session.running.as_ref().is_some_and(|r| r.id == "line");
+    let line_prompt = app.session.running.as_ref().is_some_and(|r| matches!(r.id.as_str(), "line" | "ucs" | "ucs.3point"));
     let z0_mode = app.session.current_prompt().is_some_and(|p| p.global_xy_zero);
     if line_prompt && z0_mode {
         return resolve_global_z0_point(app, hp, xf, dyn_frame);
     }
+    let ucs = app.session.ucs();
+    let is_world_ucs = ucs.is_world();
     let is_near_plan_or_oblique = cam.principal_drawing_plane().is_none_or(|p| p == cadcraft_geom::DrawingPlane::XY);
     let is_auto_oblique_line = line_prompt
         && !app.session.drawing_plane_is_manual()
@@ -2117,10 +2160,23 @@ fn resolve_effective_point(
         && is_near_plan_or_oblique;
     let plane = if is_auto_oblique_line { cadcraft_geom::DrawingPlane::XY } else { app.session.drawing_plane() };
     let continuation_offset = if is_auto_oblique_line { 0.0 } else { app.session.drawing_plane_offset_for(prompt_base3) };
-    let plane_point = xf.to_world3_with_offset(hp, plane, continuation_offset);
-    let raw2 = if line_prompt { plane_point.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
+    let (plane_point, raw2) = if !is_world_ucs {
+        let ucs_pt3 = cam.unproject_to_ucs(q, &ucs);
+        let r2 = ucs_pt3.map_or(raw_world, |p| ucs.to_local(p).xy());
+        (ucs_pt3, r2)
+    } else {
+        let pp = xf.to_world3_with_offset(hp, plane, continuation_offset);
+        let r2 = if line_prompt { pp.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
+        (pp, r2)
+    };
     let prompt_point = |p: Vec2| {
-        if prompt_base.is_some() && !line_prompt { Vec3::new(p.x, p.y, base3.z) } else { plane.embed(p, continuation_offset) }
+        if !is_world_ucs {
+            ucs.to_world2(p)
+        } else if prompt_base.is_some() && !line_prompt {
+            Vec3::new(p.x, p.y, base3.z)
+        } else {
+            plane.embed(p, continuation_offset)
+        }
     };
 
     // Priority 1: Locked Dynamic Input or Grip Held
@@ -2177,7 +2233,13 @@ fn resolve_effective_point(
             && let Some(hit3d) = snap::snap_3d_endpoints(&st.doc, &st.edit_space(), &cam, q, ap_cam, osmode & snap_modes_3d, cycle_idx)
         {
             let p3 = hit3d.point3.unwrap_or_else(|| Vec3::new(hit3d.point.x, hit3d.point.y, 0.0));
-            let at2 = if line_prompt { plane.coordinates(p3) } else { p3.xy() };
+            let at2 = if !is_world_ucs {
+                ucs.to_local(p3).xy()
+            } else if line_prompt {
+                plane.coordinates(p3)
+            } else {
+                p3.xy()
+            };
             let (now, shift) = ctx.input(|i| (i.time, i.modifiers.shift));
             let cand = Some(snap::tracking::Acquired::Point { at: at2, at3: Some(p3), name: hit3d.name, ext: None });
             let wait = app.session.tracking.hover(cand, now, app.session.settings.polar_flags & snap::tracking::polarmode::SHIFT_ACQUIRE != 0, shift);
@@ -2300,7 +2362,14 @@ fn resolve_effective_point(
     match plane_point {
         Some(p3) => {
             app.canvas.parallel_plane_warning = false;
-            Some((if line_prompt { plane.coordinates(p3) } else { p3.xy() }, p3))
+            let pt2 = if !is_world_ucs {
+                ucs.to_local(p3).xy()
+            } else if line_prompt {
+                plane.coordinates(p3)
+            } else {
+                p3.xy()
+            };
+            Some((pt2, p3))
         }
         None => {
             app.canvas.parallel_plane_warning = true;
@@ -2381,12 +2450,15 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // or a floating palette lives on a layer above the canvas, where `hovered()` alone still
     // counts the canvas. Over those the OS cursor stays visible and the crosshair stays put, as
     // over the menu bar (#1701).
-    let inside = hover_pos.is_some_and(|p| {
-        rect.contains(p)
-            && ui.ctx().layer_id_at(p) == Some(ui.layer_id())
-            && resp.hovered()
-            && !crate::viewcube::Layout::blocks_canvas_pointer(rect, p)
-    });
+    let any_popup_open = egui::Popup::is_any_open(ui.ctx());
+    app.canvas.popup_open = any_popup_open;
+    let inside = !any_popup_open
+        && hover_pos.is_some_and(|p| {
+            rect.contains(p)
+                && ui.ctx().layer_id_at(p) == Some(ui.layer_id())
+                && resp.hovered()
+                && !crate::viewcube::Layout::blocks_canvas_pointer(rect, p)
+        });
     if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         app.canvas.selection_window = None;
         app.canvas.drag_window = false;
@@ -2671,7 +2743,12 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         app.session.pending_window = None;
         app.canvas.drag_window = false;
     }
-    let pressed_primary = pressed_primary && !app.canvas.height_adjust && !offset_adjust_confirmed && !picked && !hatch_dialog && !idle_dbl;
+    let pressed_primary = pressed_primary && !app.session.in_script && !app.canvas.height_adjust && !offset_adjust_confirmed && !picked && !hatch_dialog && !idle_dbl;
+    let pressed_secondary = pressed_secondary && !app.session.in_script;
+    if app.session.in_script {
+        app.canvas.selection_window = None;
+        app.canvas.drag_window = false;
+    }
     let key: CycleKey = (
         app.session.running.as_ref().map(|r| r.id.clone()),
         app.session.current_prompt().map(|p| p.message),
@@ -2822,21 +2899,24 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // command menu); otherwise it opens the shortcut menu (Repeat, Clipboard, …).
     // Shift/Ctrl+right-click opens the object snap menu.
     let idle = !app.session.prompting();
-    if inside && pressed_secondary {
+    let over_ucs_icon = hover_pos.is_some_and(|p| crate::viewcube::ucs_blocks_pointer(app, rect, p));
+    if inside && pressed_secondary && !over_ucs_icon {
         app.canvas.snap_menu = mods.shift || mods.ctrl;
     }
-    if crate::context_menu::in_command(app, ui, inside, pressed_secondary) {
+    if !over_ucs_icon && crate::context_menu::in_command(app, ui, inside, pressed_secondary) {
         let _ = app.session.input(Input::Enter);
     }
     // Right-click on a grip with options (polyline vertex, line end…) opens the grip menu.
-    if inside && pressed_secondary && idle && !app.canvas.snap_menu {
+    if inside && pressed_secondary && idle && !app.canvas.snap_menu && !over_ucs_icon {
         app.canvas.grip_menu = grip_at(app, &xf, hover_pos).filter(|g| !grip_options(app, *g).is_empty());
     }
     crate::dyngrips::menu(app, ui.ctx(), &xf);
-    if idle && !app.canvas.snap_menu && app.canvas.grip_menu.is_some() {
-        grip_menu(app, &resp);
-    } else if idle || app.canvas.snap_menu {
-        crate::context_menu::show(app, &resp);
+    if !over_ucs_icon {
+        if idle && !app.canvas.snap_menu && app.canvas.grip_menu.is_some() {
+            grip_menu(app, &resp);
+        } else if idle || app.canvas.snap_menu {
+            crate::context_menu::show(app, &resp);
+        }
     }
 
     // Hover highlight (throttled to cursor movement).
@@ -3088,13 +3168,38 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         {
             let list = rebuilt_preview(&st.doc, ents.iter(), scale);
             draw_list(&painter, &xf, &list, bg, false);
+            let ucs = app.session.ucs();
             for k in &ents {
-                if let cadcraft_doc::EntityKind::Line(l) = &k.kind
-                    && (l.a.z != 0.0 || l.b.z != 0.0)
-                {
-                    let p1 = xf.to_screen3(l.a);
-                    let p2 = xf.to_screen3(l.b);
-                    painter.line_segment([p1, p2], Stroke::new(1.0, t.canvas_ink));
+                match &k.kind {
+                    cadcraft_doc::EntityKind::Line(l) if l.a.z != 0.0 || l.b.z != 0.0 => {
+                        let p1 = xf.to_screen3(l.a);
+                        let p2 = xf.to_screen3(l.b);
+                        painter.line_segment([p1, p2], Stroke::new(1.0, t.canvas_ink));
+                    }
+                    cadcraft_doc::EntityKind::Circle(c)
+                        if c.center.z.abs() > 1e-6 || !k.common.extrusion.near(Vec3::Z, 1e-6) || !ucs.z_axis.near(Vec3::Z, 1e-6) =>
+                    {
+                        let ext = if !k.common.extrusion.near(Vec3::Z, 1e-6) { k.common.extrusion } else { ucs.z_axis };
+                        let pts3 = c.sample_points_3d(ext, 64);
+                        let screen_pts: Vec<Pos2> = pts3.into_iter().map(|p| xf.to_screen3(p)).collect();
+                        if screen_pts.len() >= 2 {
+                            painter.add(Shape::line(screen_pts, Stroke::new(1.0, t.canvas_ink)));
+                        }
+                    }
+                    cadcraft_doc::EntityKind::LwPolyline(pl)
+                        if pl.elevation.abs() > 1e-6 || !k.common.extrusion.near(Vec3::Z, 1e-6) || !ucs.z_axis.near(Vec3::Z, 1e-6) =>
+                    {
+                        let ext = if !k.common.extrusion.near(Vec3::Z, 1e-6) { k.common.extrusion } else { ucs.z_axis };
+                        let mut pts3 = pl.vertices_3d(ext);
+                        if pl.closed && !pts3.is_empty() {
+                            pts3.push(pts3[0]);
+                        }
+                        let screen_pts: Vec<Pos2> = pts3.into_iter().map(|p| xf.to_screen3(p)).collect();
+                        if screen_pts.len() >= 2 {
+                            painter.add(Shape::line(screen_pts, Stroke::new(1.0, t.canvas_ink)));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -3155,7 +3260,8 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         draw_snap_marker(&painter, marker_pos, &hit);
     }
     // 3D axis guide and coordinate readout; it sits below the dynamic-input prompt.
-    if let (Some(axis), Some(base3), Some(c3)) = (app.canvas.active_axis_3d, prompt_base.map(|_| app.session.last_point3), app.canvas.cursor3) {
+    let axis_base3 = prompt_base3.or_else(|| prompt_base.map(|_| app.session.last_point3));
+    if let (Some(axis), Some(base3), Some(c3)) = (app.canvas.active_axis_3d, axis_base3, app.canvas.cursor3) {
         let p1 = xf.to_screen3(base3);
         let p2 = xf.to_screen3(c3);
         let col = match axis {
@@ -3228,8 +3334,11 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     draw_tiles(app, ui, &tiles);
     // UCS icon, ViewCube and viewport label.
     if app.ui.show_ucs_icon {
-        draw_ucs_icon(&painter, rect);
-        crate::viewcube::ucs_icon(app, ui, rect);
+        let ucs_pos = crate::viewcube::ucs_icon_pos(app, rect);
+        let ucs_hovered = hover_pos.is_some_and(|hp| ucs_pos.bounds.contains(hp));
+        draw_ucs_icon(app, &painter, rect, ucs_hovered);
+        let ucs_right_click = pressed_secondary && ucs_hovered;
+        crate::viewcube::ucs_icon(app, ui, rect, ucs_right_click);
     }
     if app.ui.show_viewcube && sheet.is_none() {
         draw_viewcube(app, ui, rect);
@@ -3889,16 +3998,72 @@ fn draw_lock(p: &egui::Painter, c: Pos2, color: Color32) {
     ));
 }
 
-fn draw_ucs_icon(p: &egui::Painter, rect: Rect) {
+fn draw_ucs_icon(app: &CadApp, p: &egui::Painter, rect: Rect, hovered: bool) {
     let t = Tokens::get();
-    let o = pos2(rect.left() + 36.0, rect.bottom() - 34.0);
-    let st = Stroke::new(1.0, t.canvas_ink);
-    p.line_segment([o, o + vec2(60.0, 0.0)], st);
-    p.line_segment([o, o + vec2(0.0, -60.0)], st);
-    p.rect_stroke(Rect::from_center_size(o, vec2(9.0, 9.0)), 0.0, st, egui::StrokeKind::Middle);
-    let f = egui::FontId::proportional(13.0);
-    p.text(o + vec2(70.0, 0.0), egui::Align2::LEFT_CENTER, crate::tl!("X"), f.clone(), t.canvas_ink);
-    p.text(o + vec2(0.0, -70.0), egui::Align2::CENTER_BOTTOM, crate::tl!("Y"), f, t.canvas_ink);
+    let pos_info = crate::viewcube::ucs_icon_pos(app, rect);
+    let o = pos_info.origin;
+    let ucs = app.session.ucs();
+    let cam = app.session.camera();
+    let is_world = ucs.is_world();
+    const UCS_HOVER_COLOR: Color32 = Color32::from_rgb(255, 215, 0); // Yellow/gold hover confirmation
+    let st = if hovered {
+        Stroke::new(2.0, UCS_HOVER_COLOR)
+    } else {
+        Stroke::new(1.0, t.canvas_ink)
+    };
+
+    if is_world && cam.is_plan() {
+        p.line_segment([o, o + vec2(60.0, 0.0)], st);
+        p.line_segment([o, o + vec2(0.0, -60.0)], st);
+        if pos_info.is_at_origin {
+            p.rect_stroke(Rect::from_center_size(o, vec2(9.0, 9.0)), 0.0, st, egui::StrokeKind::Middle);
+            p.line_segment([o + vec2(-4.0, 0.0), o + vec2(4.0, 0.0)], st);
+            p.line_segment([o + vec2(0.0, -4.0), o + vec2(0.0, 4.0)], st);
+        } else {
+            p.rect_stroke(Rect::from_center_size(o, vec2(7.0, 7.0)), 0.0, st, egui::StrokeKind::Middle);
+        }
+        let f = egui::FontId::proportional(13.0);
+        let text_col = if hovered { UCS_HOVER_COLOR } else { t.canvas_ink };
+        p.text(o + vec2(70.0, 0.0), egui::Align2::LEFT_CENTER, crate::tl!("X"), f.clone(), text_col);
+        p.text(o + vec2(0.0, -70.0), egui::Align2::CENTER_BOTTOM, crate::tl!("Y"), f, text_col);
+        return;
+    }
+
+    // 3D projected UCS icon
+    let proj_dir = |v: Vec3| -> Vec2 {
+        Vec2::new(v.dot(cam.right_dir()), -v.dot(cam.up_dir()))
+    };
+    let arm_len = 50.0;
+    let f = egui::FontId::proportional(12.0);
+
+    // Origin box/marker
+    if pos_info.is_at_origin {
+        p.rect_stroke(Rect::from_center_size(o, vec2(8.0, 8.0)), 0.0, st, egui::StrokeKind::Middle);
+        p.line_segment([o + vec2(-4.0, 0.0), o + vec2(4.0, 0.0)], st);
+        p.line_segment([o + vec2(0.0, -4.0), o + vec2(0.0, 4.0)], st);
+    } else {
+        p.rect_stroke(Rect::from_center_size(o, vec2(6.0, 6.0)), 0.0, st, egui::StrokeKind::Middle);
+    }
+
+    let axes = [
+        (ucs.x_axis, "X", Color32::from_rgb(0xd3, 0x2f, 0x2f)),
+        (ucs.y_axis, "Y", Color32::from_rgb(0x38, 0x8e, 0x3c)),
+        (ucs.z_axis, "Z", Color32::from_rgb(0x19, 0x76, 0xd2)),
+    ];
+
+    for (axis_vec, name, color) in axes {
+        let dir = proj_dir(axis_vec);
+        let len = dir.len();
+        if len > 0.08 {
+            let ndir = dir.normalized();
+            let tip = o + vec2((ndir.x * arm_len) as f32, (ndir.y * arm_len) as f32);
+            let stroke = if hovered { Stroke::new(2.5, UCS_HOVER_COLOR) } else { Stroke::new(1.8, color) };
+            p.line_segment([o, tip], stroke);
+            let text_pos = tip + vec2((ndir.x * 12.0) as f32, (ndir.y * 12.0) as f32);
+            let text_col = if hovered { UCS_HOVER_COLOR } else { color };
+            p.text(text_pos, egui::Align2::CENTER_CENTER, name, f.clone(), text_col);
+        }
+    }
 }
 
 fn viewport_label(p: &egui::Painter, rect: Rect) {
@@ -6318,5 +6483,124 @@ mod hatch_pick_tests {
         assert!((lines[0].b.x - 0.0).abs() < 1e-4, "Under zlock with fresh base, End X must remain 0.0, got {}", lines[0].b.x);
         assert!((lines[0].b.y - 0.0).abs() < 1e-4, "Under zlock with fresh base, End Y must remain 0.0, got {}", lines[0].b.y);
         assert!(lines[0].b.z > 1.0, "Under zlock with fresh base, End Z must be vertical (> 1.0), got {}", lines[0].b.z);
+    }
+
+    #[test]
+    fn test_line_osnap_3d_endpoints_on_inclined_ucs_preserves_wcs_z_and_depth() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+
+        // 1. Define an inclined UCS:
+        // Origin: (0, 0, 5), X axis: (10, 0, 5), Y point: (0, 10, 15)
+        app.session.execute("ucs.3point", &serde_json::json!({
+            "origin": [0.0, 0.0, 5.0],
+            "x_axis": [10.0, 0.0, 5.0],
+            "y_pt": [0.0, 10.0, 15.0],
+        })).unwrap();
+
+        let ucs = app.session.ucs();
+        assert!(!ucs.is_world(), "UCS must be active and non-world");
+
+        // 2. Create existing 3D lines with endpoints that have different local Z coordinates
+        // and are strictly outside the UCS XY plane:
+        let pt1 = Vec3::new(10.0, 5.0, 30.0);
+        let pt2 = Vec3::new(25.0, 40.0, -15.0);
+
+        let loc1 = ucs.to_local(pt1);
+        let loc2 = ucs.to_local(pt2);
+        assert!(loc1.z.abs() > 1.0, "pt1 must be outside UCS XY plane, loc Z={}", loc1.z);
+        assert!(loc2.z.abs() > 1.0, "pt2 must be outside UCS XY plane, loc Z={}", loc2.z);
+        assert!((loc1.z - loc2.z).abs() > 1.0, "pt1 and pt2 must have different local Zs");
+
+        // Add reference lines to drawing
+        app.session.add_entity(cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: pt1, b: Vec3::new(0.0, 0.0, 0.0) })).unwrap();
+        app.session.add_entity(cadcraft_doc::EntityKind::Line(cadcraft_doc::Line { a: pt2, b: Vec3::new(50.0, 50.0, 0.0) })).unwrap();
+
+        // 3. Enable 3D endpoint snap (OSNAP END)
+        app.session.settings.osmode = cadcraft_engine::snap::mode::END;
+
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0)));
+        let mut time = 0.0;
+        let mut frame = |app: &mut CadApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, events, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+
+        // Zoom extents so pt1 and pt2 are in view, then render initial frame
+        app.session.zoom_extents().unwrap();
+        frame(&mut app, Vec::new());
+        frame(&mut app, Vec::new());
+        let xf = app.canvas.xf.expect("xf must be set");
+        let _ = app.session.zoom_about(0.7, xf.to_world(xf.rect.center()));
+        frame(&mut app, Vec::new());
+        let xf = app.canvas.xf.expect("xf must be set");
+
+        // 4. Start LINE command
+        app.session.cmdline("line").unwrap();
+        assert!(app.session.prompting(), "LINE must be prompting");
+
+        // 5. Hover and snap to endpoint 1 (pt1)
+        let screen_pt1 = xf.to_screen3(pt1);
+        frame(&mut app, vec![egui::Event::PointerMoved(screen_pt1)]);
+
+        // Verify that 3D OSNAP hit pt1 with its full 3D WCS coordinates:
+        assert!(app.canvas.snap.is_some(), "3D snap must hit pt1");
+        assert_eq!(app.canvas.snap.as_ref().unwrap().point3, Some(pt1), "snap hit must preserve pt1 in WCS");
+        assert_eq!(app.canvas.cursor3, Some(pt1), "canvas.cursor3 must match pt1 in WCS");
+
+        // Click to place first point on pt1
+        frame(&mut app, vec![button(screen_pt1, true), button(screen_pt1, false)]);
+        frame(&mut app, Vec::new());
+
+        // 6. Hover and snap to endpoint 2 (pt2)
+        let screen_pt2 = xf.to_screen3(pt2);
+        frame(&mut app, vec![egui::Event::PointerMoved(screen_pt2)]);
+
+        // Verify that 3D OSNAP hit pt2 with its full 3D WCS coordinates:
+        assert!(app.canvas.snap.is_some(), "3D snap must hit pt2");
+        assert_eq!(app.canvas.snap.as_ref().unwrap().point3, Some(pt2), "snap hit must preserve pt2 in WCS");
+        assert_eq!(app.canvas.cursor3, Some(pt2), "canvas.cursor3 must match pt2 in WCS");
+
+        // Click to place second point on pt2
+        frame(&mut app, vec![button(screen_pt2, true), button(screen_pt2, false)]);
+        frame(&mut app, Vec::new());
+
+        // 7. Finish LINE with Enter
+        app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+        // 8. Verify the newly drawn line in the document:
+        let doc = app.session.doc().unwrap();
+        let store = doc.space(&cadcraft_doc::Space::Model).unwrap();
+        let lines: Vec<_> = store
+            .iter()
+            .filter_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Line(l) => Some(l.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // Last line must be the one we just drew
+        let drawn_line = lines.last().expect("newly drawn line must exist");
+
+        // MUST MATCH ORIGINAL WCS 3D POSITIONS: NOT FLATTENED, NOT PROJECTED TO UCS PLANE
+        assert!(drawn_line.a.near(pt1, 1e-4), "Start point must match original pt1 WCS: got {:?}, expected {:?}", drawn_line.a, pt1);
+        assert!(drawn_line.b.near(pt2, 1e-4), "End point must match original pt2 WCS: got {:?}, expected {:?}", drawn_line.b, pt2);
+
+        // Verify that the local Z of the line endpoints relative to the UCS is preserved:
+        let drawn_loc_a = ucs.to_local(drawn_line.a);
+        let drawn_loc_b = ucs.to_local(drawn_line.b);
+        assert!((drawn_loc_a.z - loc1.z).abs() < 1e-4, "Endpoint 1 local Z must match loc1.z: got {}, expected {}", drawn_loc_a.z, loc1.z);
+        assert!((drawn_loc_b.z - loc2.z).abs() < 1e-4, "Endpoint 2 local Z must match loc2.z: got {}, expected {}", drawn_loc_b.z, loc2.z);
     }
 }

@@ -60,6 +60,13 @@ pub enum FeatureOp {
         /// Extrusion axis vector.
         axis: Vec3,
     },
+    /// Spherical primitive.
+    Sphere {
+        /// Center of the sphere.
+        center: Vec3,
+        /// Radius of the sphere.
+        radius: f64,
+    },
     /// Linear sweep of a closed 2D/3D polygon.
     Extrusion {
         /// Closed boundary vertex sequence.
@@ -255,4 +262,37 @@ impl Solid3d {
             }
         }
     }
+}
+
+/// Generates a discrete tessellated mesh of quad and triangle `Face3d`s representing a sphere.
+///
+/// Discretization uses a standard UV-sphere subdivision with `lat_segments` latitude rows
+/// and `lon_segments` longitude columns.
+pub fn sphere_faces(center: Vec3, radius: f64, lat_segments: usize, lon_segments: usize) -> Vec<crate::Face3d> {
+    let mut faces = Vec::new();
+    let lat_n = lat_segments.max(4);
+    let lon_n = lon_segments.max(8);
+    for i in 0..lat_n {
+        let theta0 = std::f64::consts::PI * (i as f64) / (lat_n as f64);
+        let theta1 = std::f64::consts::PI * ((i + 1) as f64) / (lat_n as f64);
+        let (sin_t0, cos_t0) = (theta0.sin(), theta0.cos());
+        let (sin_t1, cos_t1) = (theta1.sin(), theta1.cos());
+        for j in 0..lon_n {
+            let phi0 = std::f64::consts::TAU * (j as f64) / (lon_n as f64);
+            let phi1 = std::f64::consts::TAU * ((j + 1) as f64) / (lon_n as f64);
+            let (sin_p0, cos_p0) = (phi0.sin(), phi0.cos());
+            let (sin_p1, cos_p1) = (phi1.sin(), phi1.cos());
+
+            let p00 = center + Vec3::new(radius * sin_t0 * cos_p0, radius * sin_t0 * sin_p0, radius * cos_t0);
+            let p01 = center + Vec3::new(radius * sin_t0 * cos_p1, radius * sin_t0 * sin_p1, radius * cos_t0);
+            let p11 = center + Vec3::new(radius * sin_t1 * cos_p1, radius * sin_t1 * sin_p1, radius * cos_t1);
+            let p10 = center + Vec3::new(radius * sin_t1 * cos_p0, radius * sin_t1 * sin_p0, radius * cos_t1);
+
+            faces.push(crate::Face3d {
+                corners: [p00, p01, p11, p10],
+                hidden_edges: 0,
+            });
+        }
+    }
+    faces
 }

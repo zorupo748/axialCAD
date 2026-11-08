@@ -136,14 +136,44 @@ impl Mat4 {
     pub fn from_mat3(t: &Mat3) -> Mat4 {
         Mat4 { m: [[t.a, t.c, 0.0, t.e], [t.b, t.d, 0.0, t.f], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]] }
     }
-    /// The "arbitrary axis algorithm" frame for an extrusion direction (DXF OCS → WCS).
-    pub fn ocs(normal: Vec3) -> Mat4 {
+    /// Returns the orthonormal OCS basis (ax, ay, az) for a given extrusion vector (DXF arbitrary axis algorithm).
+    pub fn ocs_basis(normal: Vec3) -> (Vec3, Vec3, Vec3) {
         let n = normal.normalized();
         if n == Vec3::ZERO || (n.x.abs() < 1e-12 && n.y.abs() < 1e-12 && n.z > 0.0) {
-            return Mat4::IDENTITY;
+            return (Vec3::X, Vec3::Y, Vec3::Z);
         }
-        let ax = if n.x.abs() < 1.0 / 64.0 && n.y.abs() < 1.0 / 64.0 { Vec3::new(0.0, 1.0, 0.0).cross(n) } else { Vec3::Z.cross(n) }.normalized();
+        let ax = if n.x.abs() < 1.0 / 64.0 && n.y.abs() < 1.0 / 64.0 {
+            Vec3::new(0.0, 1.0, 0.0).cross(n)
+        } else {
+            Vec3::Z.cross(n)
+        }
+        .normalized();
         let ay = n.cross(ax).normalized();
-        Mat4 { m: [[ax.x, ay.x, n.x, 0.0], [ax.y, ay.y, n.y, 0.0], [ax.z, ay.z, n.z, 0.0], [0.0, 0.0, 0.0, 1.0]] }
+        (ax, ay, n)
+    }
+
+    /// Transforms a point from WCS to OCS for a given extrusion normal.
+    pub fn wcs_to_ocs(normal: Vec3, p: Vec3) -> Vec3 {
+        let (ax, ay, az) = Self::ocs_basis(normal);
+        Vec3::new(p.dot(ax), p.dot(ay), p.dot(az))
+    }
+
+    /// Transforms a point from OCS to WCS for a given extrusion normal.
+    pub fn ocs_to_wcs(normal: Vec3, p: Vec3) -> Vec3 {
+        let (ax, ay, az) = Self::ocs_basis(normal);
+        ax * p.x + ay * p.y + az * p.z
+    }
+
+    /// The "arbitrary axis algorithm" frame for an extrusion direction (DXF OCS → WCS).
+    pub fn ocs(normal: Vec3) -> Mat4 {
+        let (ax, ay, n) = Self::ocs_basis(normal);
+        Mat4 {
+            m: [
+                [ax.x, ay.x, n.x, 0.0],
+                [ax.y, ay.y, n.y, 0.0],
+                [ax.z, ay.z, n.z, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
     }
 }

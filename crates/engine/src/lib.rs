@@ -149,12 +149,19 @@ pub struct DocState {
     pub block_edit: Option<blockedit::BlockEdit>,
     pub camera: cadcraft_geom::OrbitCamera,
     pub drawing_plane: cadcraft_geom::DrawingPlane,
+    pub ucs: cadcraft_geom::UcsFrame,
+    pub ucs_history: Vec<cadcraft_geom::UcsFrame>,
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl DocState {
     pub fn new(doc: Drawing, title: &str, path: Option<String>) -> Self {
+        let ucs = if let (Some(org), Some(xdir), Some(ydir)) = (doc.header.point("UCSORG"), doc.header.point("UCSXDIR"), doc.header.point("UCSYDIR")) {
+            cadcraft_geom::UcsFrame::from_3_points(org, org + xdir, org + ydir).unwrap_or(cadcraft_geom::UcsFrame::WORLD)
+        } else {
+            cadcraft_geom::UcsFrame::WORLD
+        };
         let doc = Arc::new(doc);
         DocState {
             saved: doc.clone(),
@@ -177,6 +184,8 @@ impl DocState {
             block_edit: None,
             camera: cadcraft_geom::OrbitCamera::default(),
             drawing_plane: cadcraft_geom::DrawingPlane::XY,
+            ucs,
+            ucs_history: Vec::new(),
         }
     }
     /// The drawing has changes not saved to its file, or the Block Editor has changes not yet
@@ -678,7 +687,9 @@ pub struct Session {
     pub settings: Settings,
     pub running: Option<Running>,
     /// A script is running ([`Session::script`]); a SCRIPT command inside it is refused.
-    in_script: bool,
+    pub in_script: bool,
+    /// Incremental runner for the active script.
+    pub script_runner: Option<ScriptExecution>,
     /// The command suspended while a transparent command (`'ZOOM`, `'PAN`…) prompts inside it;
     /// it resumes when that command ends. One level, as in AutoCAD.
     pub suspended: Option<Running>,
@@ -762,6 +773,7 @@ impl Session {
             settings: Settings::default(),
             running: None,
             in_script: false,
+            script_runner: None,
             suspended: None,
             log: Vec::new(),
             last_command: None,
@@ -872,6 +884,46 @@ impl Session {
             }
             let center = cadcraft_geom::Vec2::new(camera.target.x, camera.target.y);
             st.set_view_quiet(View { center, height: camera.height });
+        }
+    }
+    pub fn ucs(&self) -> cadcraft_geom::UcsFrame {
+        self.state().map(|st| st.ucs).unwrap_or(cadcraft_geom::UcsFrame::WORLD)
+    }
+    pub fn set_ucs(&mut self, ucs: cadcraft_geom::UcsFrame) -> Result<()> {
+        if let Ok(st) = self.state_mut() {
+            if st.ucs != ucs {
+                st.ucs_history.push(st.ucs);
+                if st.ucs_history.len() > 10 {
+                    st.ucs_history.remove(0);
+                }
+                st.ucs = ucs;
+            }
+        }
+        if let Ok(doc) = self.doc_mut() {
+            doc.header.set("UCSORG", cadcraft_doc::HVal::Point(ucs.origin));
+            doc.header.set("UCSXDIR", cadcraft_doc::HVal::Point(ucs.x_axis));
+            doc.header.set("UCSYDIR", cadcraft_doc::HVal::Point(ucs.y_axis));
+        }
+        Ok(())
+    }
+    pub fn restore_previous_ucs(&mut self) -> Result<bool> {
+        let prev = if let Ok(st) = self.state_mut() {
+            st.ucs_history.pop()
+        } else {
+            None
+        };
+        if let Some(ucs) = prev {
+            if let Ok(st) = self.state_mut() {
+                st.ucs = ucs;
+            }
+            if let Ok(doc) = self.doc_mut() {
+                doc.header.set("UCSORG", cadcraft_doc::HVal::Point(ucs.origin));
+                doc.header.set("UCSXDIR", cadcraft_doc::HVal::Point(ucs.x_axis));
+                doc.header.set("UCSYDIR", cadcraft_doc::HVal::Point(ucs.y_axis));
+            }
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
     pub fn drawing_plane(&self) -> cadcraft_geom::DrawingPlane {
@@ -1011,13 +1063,18 @@ impl Session {
 
     /// Add an entity to the current space with current properties.
     pub fn add_entity(&mut self, kind: EntityKind) -> Result<Handle> {
-        let common = self.current_common();
+        self.add_entity_with_extrusion(kind, cadcraft_geom::Vec3::Z)
+    }
+
+    /// Add an entity to the current space with current properties and a specified extrusion normal.
+    pub fn add_entity_with_extrusion(&mut self, kind: EntityKind, extrusion: cadcraft_geom::Vec3) -> Result<Handle> {
+        let mut common = self.current_common();
         let space = self.space();
         let true_color = self.doc()?.header.get("CECOLOR_RGB").and_then(|v| v.as_i64());
-        let mut common = common;
         if let Some(rgb) = true_color {
             common.color = cadcraft_color::Color::True(cadcraft_color::Rgb::from_u32(rgb as u32));
         }
+        common.extrusion = extrusion;
         // Text, dimensions, multileaders, hatches and block references of annotative styles are
         // annotative, supporting the current annotation scale.
         let d = self.doc()?;
@@ -1025,6 +1082,13 @@ impl Session {
             common.anno_scales = vec![d.current_anno_scale()];
         }
         let h = self.doc_mut()?.add(&space, common, kind)?;
+        Ok(h)
+    }
+
+    /// Add an entity with custom preconfigured entity envelope.
+    pub fn add_entity_direct(&mut self, ent: cadcraft_doc::Entity) -> Result<Handle> {
+        let space = self.space();
+        let h = self.doc_mut()?.add(&space, ent.common, ent.kind)?;
         Ok(h)
     }
 
@@ -1040,6 +1104,14 @@ impl Session {
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         let id_lower = id.to_ascii_lowercase();
         let real_id = if find_command(&id_lower).is_some() { id_lower } else { cmd::resolve_alias(&id_lower) };
+        if self.in_script
+            && let Some(reason) = is_script_forbidden(&real_id)
+        {
+            return Err(EngineError::BadParams {
+                cmd: real_id,
+                msg: format!("command `{id}` is restricted in scripts: {reason}"),
+            });
+        }
         let spec = find_command(&real_id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
         (spec.enabled)(self).map_err(|m| EngineError::Disabled(spec.id.into(), m))?;
         if let Some(why) = cmd::blocks::bedit::refused_in_editor(self, spec.id) {
@@ -1113,6 +1185,14 @@ impl Session {
         // A command-line form with an id of its own (-ATTEDIT) is not the command it prefixes.
         let dashed = cmd::resolve_alias(&name.trim_start_matches(['_', '.']).to_ascii_lowercase());
         let id = if find_command(&dashed).is_some() { dashed } else { cmd::resolve_alias(&lower) };
+        if self.in_script
+            && let Some(reason) = is_script_forbidden(&id)
+        {
+            return Err(EngineError::BadParams {
+                cmd: id,
+                msg: format!("command `{name}` is restricted in scripts: {reason}"),
+            });
+        }
         let Some(spec) = find_command(&id) else {
             // A command defined in LISP: (defun c:NAME …).
             if !transparent && let Some(f) = self.lisp_command(&lower) {
@@ -1125,7 +1205,7 @@ impl Session {
             }
             // A bare system variable name (ORTHOMODE, GRIDMODE…) acts as SETVAR on that variable.
             let var = lower.to_ascii_uppercase();
-            if !name.starts_with(['_', '.', '-']) && sysvars::get(self, &var).is_some() {
+            if !name.starts_with('-') && sysvars::get(self, &var).is_some() {
                 self.start(if transparent { "'setvar" } else { "setvar" })?;
                 return self.input(Input::Text(var));
             }
@@ -1399,7 +1479,25 @@ impl Session {
             Some(Input::Cancel) => Ok(Step::Cancel),
             Some(i) => {
                 let i = match i {
-                    Input::Point3(p3) if run.id != "line" => Input::Point(p3.xy()),
+                    Input::Point3(p3)
+                        if !matches!(
+                            run.id.as_str(),
+                            "line"
+                                | "3dface"
+                                | "cylinder"
+                                | "solid.cylinder"
+                                | "sphere"
+                                | "solid.sphere"
+                                | "mtext"
+                                | "ucs"
+                                | "ucs.3point"
+                                | "ucs.origin"
+                                | "circle"
+                                | "rectang"
+                        ) =>
+                    {
+                        Input::Point(p3.xy())
+                    }
                     other => other,
                 };
                 if let Input::Point(p) = &i {
@@ -1464,6 +1562,11 @@ impl Session {
             Err(e) => {
                 // Invalid input: report and keep prompting (AutoCAD re-prompts).
                 self.echo(e.to_string());
+                if self.in_script {
+                    self.finish(run, true);
+                    self.resume_suspended();
+                    return Err(e);
+                }
                 self.running = Some(run);
                 Ok(())
             }
@@ -1687,9 +1790,21 @@ impl Session {
                 if let Some((name, json)) = rest.trim().split_once(' ')
                     && json.trim_start().starts_with('{')
                 {
+                    if script && let Some(reason) = is_script_forbidden(name) {
+                        return Err(EngineError::BadParams {
+                            cmd: name.into(),
+                            msg: format!("command `{name}` is restricted in scripts: {reason}"),
+                        });
+                    }
                     let params: Value =
                         serde_json::from_str(json.trim()).map_err(|e| EngineError::BadParams { cmd: name.into(), msg: e.to_string() })?;
                     let id = cmd::resolve_alias(&name.to_ascii_lowercase());
+                    if script && let Some(reason) = is_script_forbidden(&id) {
+                        return Err(EngineError::BadParams {
+                            cmd: id,
+                            msg: format!("command `{name}` is restricted in scripts: {reason}"),
+                        });
+                    }
                     let r = self.execute(&id, &params)?;
                     if !r.is_null() {
                         self.echo(r.to_string());
@@ -1706,12 +1821,24 @@ impl Session {
             } else if tok.trim().is_empty() {
                 self.input(Input::Enter)?;
             } else if lisp_expression(tok) {
+                if script {
+                    return Err(EngineError::BadParams {
+                        cmd: "script".into(),
+                        msg: "AutoLISP expressions are not allowed in scripts".into(),
+                    });
+                }
                 // `(expression)` or `!variable` at Command: evaluates LISP and shows the value.
                 let src = tok.trim().strip_prefix('!').unwrap_or(tok.trim()).to_string();
                 if let Err(e) = self.lisp_eval(&src, true, false, Vec::new()) {
                     self.echo(e.to_string());
                 }
             } else {
+                if script && let Some(reason) = is_script_forbidden(tok) {
+                    return Err(EngineError::BadParams {
+                        cmd: tok.into(),
+                        msg: format!("command `{tok}` is restricted in scripts: {reason}"),
+                    });
+                }
                 self.start(tok)?;
             }
             match more {
@@ -1725,6 +1852,8 @@ impl Session {
     fn typed(&mut self, t: &str) -> Result<()> {
         let Some(prompt) = self.current_prompt() else { return Ok(()) };
         let tt = t.trim();
+        let unquoted = tt.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(tt);
+        let tt = if prompt.accept.text || prompt.accept.point || prompt.accept.number { unquoted } else { tt };
         if tt.is_empty() {
             return self.input(Input::Enter);
         }
@@ -1734,11 +1863,25 @@ impl Session {
         }
         // Transparent command.
         if tt.starts_with('\'') {
+            if self.in_script
+                && let Some(reason) = is_script_forbidden(tt.trim_start_matches('\''))
+            {
+                return Err(EngineError::BadParams {
+                    cmd: tt.into(),
+                    msg: format!("command `{tt}` is restricted in scripts: {reason}"),
+                });
+            }
             return self.start(tt);
         }
         // A LISP expression typed at a command's prompt: its value is the answer.
         // Not at a free-text prompt: there the text is the answer (CAL takes "(3+4)*2").
         if lisp_expression(tt) && !prompt.accept.text && self.lisp_prompt().is_none() && !self.lisp_groups_undo() {
+            if self.in_script {
+                return Err(EngineError::BadParams {
+                    cmd: "script".into(),
+                    msg: "AutoLISP expressions are not allowed in scripts".into(),
+                });
+            }
             let src = tt.strip_prefix('!').unwrap_or(tt).to_string();
             let v = match self.lisp_eval(&src, false, true, Vec::new()) {
                 Ok(Some(Ok(v))) => v,
@@ -1786,15 +1929,26 @@ impl Session {
             let angles = self.angle_settings();
             if let Some((p3, has_z)) = prompt::parse_point3_opt(tt, self.last_point3, &angles) {
                 self.last_polar = prompt::parse_polar_text(tt, &self.angle_settings());
-                let world_2d = tt.starts_with('*') || tt.strip_prefix('@').is_some_and(|rest| rest.trim_start().starts_with('*'));
+                let explicit_world = tt.starts_with('*') || tt.strip_prefix('@').is_some_and(|rest| rest.trim_start().starts_with('*'));
+                let is_relative = tt.starts_with('@') || tt.starts_with("*@") || tt.starts_with("@*");
+                let transformed_p3 = if explicit_world {
+                    p3
+                } else if is_relative {
+                    let delta = p3 - self.last_point3;
+                    let ucs = self.ucs();
+                    self.last_point3 + ucs.x_axis * delta.x + ucs.y_axis * delta.y + ucs.z_axis * delta.z
+                } else {
+                    self.ucs().to_world(p3)
+                };
                 if line_prompt
                     && !has_z
-                    && !world_2d
+                    && self.ucs().is_world()
+                    && !explicit_world
                     && let Some(point) = prompt::parse_point_with(tt, self.last_point, &angles)
                 {
                     return self.input(Input::Point(point));
                 }
-                return self.input(Input::Point3(p3));
+                return self.input(Input::Point3(transformed_p3));
             }
             // Direct distance entry along the tracking path the cursor is on, from the point it
             // comes from (an acquired or temporary tracking point needs no base point).
@@ -1833,6 +1987,134 @@ impl Session {
         self.input(Input::Text(tt.to_string()))
     }
 
+    /// Whether a script is currently running.
+    pub fn is_script_running(&self) -> bool {
+        self.in_script
+    }
+
+    /// Prepare a script for execution.
+    pub fn start_script(&mut self, name: &str, text: &str) -> Result<()> {
+        self.start_script_opts(name, text, false)
+    }
+
+    /// Prepare a script file for execution (checking for EOF pending commands).
+    pub fn start_script_file(&mut self, name: &str, text: &str) -> Result<()> {
+        self.start_script_opts(name, text, true)
+    }
+
+    fn start_script_opts(&mut self, name: &str, text: &str, check_eof_pending: bool) -> Result<()> {
+        if self.in_script {
+            return Err(EngineError::BadParams {
+                cmd: "script".into(),
+                msg: "a script is already running; nested scripts are not supported".into(),
+            });
+        }
+        let lines: Vec<String> = text
+            .lines()
+            .map(|l| l.trim_end_matches(|c: char| c.is_whitespace() && c != ' ').to_string())
+            .collect();
+        self.in_script = true;
+        self.script_runner = Some(ScriptExecution {
+            name: name.to_string(),
+            lines,
+            index: 0,
+            check_eof_pending,
+        });
+        Ok(())
+    }
+
+    /// Execute one line of the active script.
+    pub fn step_script(&mut self) -> ScriptStep {
+        let Some(mut runner) = self.script_runner.take() else {
+            self.in_script = false;
+            return ScriptStep::Done { total: 0 };
+        };
+
+        if runner.index >= runner.lines.len() {
+            self.in_script = false;
+            if runner.check_eof_pending && let Some(r) = &self.running {
+                let cmd = r.id.clone();
+                self.cancel();
+                return ScriptStep::EofPending {
+                    line: runner.lines.len(),
+                    total: runner.lines.len(),
+                    command: cmd,
+                };
+            }
+            return ScriptStep::Done { total: runner.lines.len() };
+        }
+
+        let line_idx = runner.index;
+        let line_num = line_idx + 1;
+        let total = runner.lines.len();
+        let line_text = runner.lines[line_idx].clone();
+        runner.index += 1;
+
+        if line_text.trim_start().starts_with(';') {
+            if runner.index >= runner.lines.len() {
+                self.in_script = false;
+                if runner.check_eof_pending && let Some(r) = &self.running {
+                    let cmd = r.id.clone();
+                    self.cancel();
+                    return ScriptStep::EofPending {
+                        line: line_num,
+                        total,
+                        command: cmd,
+                    };
+                }
+                return ScriptStep::Done { total };
+            }
+            self.script_runner = Some(runner);
+            return ScriptStep::Progress { line: line_num, total };
+        }
+
+        let res = self.input_line(&line_text, true);
+
+        match res {
+            Ok(()) => {
+                if runner.index >= runner.lines.len() {
+                    self.in_script = false;
+                    if runner.check_eof_pending && let Some(r) = &self.running {
+                        let cmd = r.id.clone();
+                        self.cancel();
+                        return ScriptStep::EofPending {
+                            line: line_num,
+                            total,
+                            command: cmd,
+                        };
+                    }
+                    return ScriptStep::Done { total };
+                }
+                self.script_runner = Some(runner);
+                ScriptStep::Progress { line: line_num, total }
+            }
+            Err(e) => {
+                self.cancel();
+                self.in_script = false;
+                ScriptStep::Error {
+                    line: line_num,
+                    total,
+                    line_text,
+                    error: e.to_string(),
+                }
+            }
+        }
+    }
+
+    /// Cancel the active script execution.
+    pub fn cancel_script(&mut self) -> Option<ScriptStep> {
+        if let Some(runner) = self.script_runner.take() {
+            self.cancel();
+            self.in_script = false;
+            let line = runner.index.min(runner.lines.len());
+            let total = runner.lines.len();
+            Some(ScriptStep::Cancelled { line, total })
+        } else {
+            self.in_script = false;
+            None
+        }
+    }
+
     /// Run a script, as AutoCAD reads one: a space or a line end ends an input, and an empty
     /// input (two spaces in a row, a space at the end of a line, an empty line) is Enter. At
     /// free-text prompts spaces are part of the text. Lines starting with `;` are comments.
@@ -1840,23 +2122,65 @@ impl Session {
     /// A script cannot run a script: the SCRIPT command (or another `cmd {json}` call) inside a
     /// running one is refused, so two files that run each other cannot recurse until the stack dies.
     pub fn script(&mut self, text: &str) -> Result<()> {
-        if self.in_script {
-            return Err(EngineError::BadParams { cmd: "script".into(), msg: "a script is already running; nested scripts are not supported".into() });
-        }
-        self.in_script = true;
-        let r = self.script_lines(text);
-        self.in_script = false;
-        r
+        self.script_named("<script>", text)
     }
 
-    fn script_lines(&mut self, text: &str) -> Result<()> {
-        for line in text.lines() {
-            // Trailing spaces are inputs (Enter); other trailing whitespace (`\r`) is not.
-            let line = line.trim_end_matches(|c: char| c.is_whitespace() && c != ' ');
-            if line.trim_start().starts_with(';') {
-                continue;
+    /// Run a named script synchronously to completion or error.
+    pub fn script_named(&mut self, name: &str, text: &str) -> Result<()> {
+        self.start_script(name, text)?;
+        while self.in_script {
+            match self.step_script() {
+                ScriptStep::Progress { .. } => {}
+                ScriptStep::Done { .. } => return Ok(()),
+                ScriptStep::EofPending { line, command, .. } => {
+                    return Err(EngineError::BadParams {
+                        cmd: "script".into(),
+                        msg: format!("Script '{name}' ended at EOF with command '{command}' awaiting input at line {line} (partial changes may have been applied)"),
+                    });
+                }
+                ScriptStep::Error { line, line_text, error, .. } => {
+                    return Err(EngineError::BadParams {
+                        cmd: "script".into(),
+                        msg: format!("Script '{name}' error at line {line}: '{line_text}' — {error} (partial changes may have been applied)"),
+                    });
+                }
+                ScriptStep::Cancelled { line, .. } => {
+                    return Err(EngineError::BadParams {
+                        cmd: "script".into(),
+                        msg: format!("Script '{name}' cancelled at line {line} (partial changes may have been applied)"),
+                    });
+                }
             }
-            self.input_line(line, true)?;
+        }
+        Ok(())
+    }
+
+    /// Run a script file synchronously to completion, checking that interactive commands do not remain pending at EOF.
+    pub fn script_file(&mut self, name: &str, text: &str) -> Result<()> {
+        self.start_script_file(name, text)?;
+        while self.in_script {
+            match self.step_script() {
+                ScriptStep::Progress { .. } => {}
+                ScriptStep::Done { .. } => return Ok(()),
+                ScriptStep::EofPending { line, command, .. } => {
+                    return Err(EngineError::BadParams {
+                        cmd: "script".into(),
+                        msg: format!("Script '{name}' ended at EOF with command '{command}' awaiting input at line {line} (partial changes may have been applied)"),
+                    });
+                }
+                ScriptStep::Error { line, line_text, error, .. } => {
+                    return Err(EngineError::BadParams {
+                        cmd: "script".into(),
+                        msg: format!("Script '{name}' error at line {line}: '{line_text}' — {error} (partial changes may have been applied)"),
+                    });
+                }
+                ScriptStep::Cancelled { line, .. } => {
+                    return Err(EngineError::BadParams {
+                        cmd: "script".into(),
+                        msg: format!("Script '{name}' cancelled at line {line} (partial changes may have been applied)"),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -2116,9 +2440,74 @@ fn next_token(rest: &str) -> (&str, Option<&str>) {
         // Unbalanced: all of it (the reader reports the error).
         return (rest, None);
     }
+    if rest.starts_with('"') {
+        let mut escaped = false;
+        for (i, c) in rest.char_indices().skip(1) {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match c {
+                '\\' => escaped = true,
+                '"' => {
+                    let end = i + 1;
+                    let more = rest.get(end..).filter(|m| !m.is_empty()).map(|m| m.strip_prefix([' ', '\t']).unwrap_or(m));
+                    return (&rest[..end], more);
+                }
+                _ => {}
+            }
+        }
+        return (rest, None);
+    }
     match rest.split_once([' ', '\t']) {
         Some((tok, more)) => (tok, Some(more)),
         None => (rest, None),
+    }
+}
+
+/// Incremental execution state of a running script.
+#[derive(Clone, Debug)]
+pub struct ScriptExecution {
+    pub name: String,
+    pub lines: Vec<String>,
+    pub index: usize,
+    pub check_eof_pending: bool,
+}
+
+/// The result of executing one step of a script.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScriptStep {
+    /// Progress: executed line `line` (1-based) of `total`.
+    Progress { line: usize, total: usize },
+    /// Successfully finished all lines at EOF with no pending command.
+    Done { total: usize },
+    /// Reached EOF while an interactive command was still awaiting input.
+    EofPending { line: usize, total: usize, command: String },
+    /// Execution error at `line` (1-based).
+    Error { line: usize, total: usize, line_text: String, error: String },
+    /// Script was cancelled by the user.
+    Cancelled { line: usize, total: usize },
+}
+
+/// Commands restricted in scripts (v1 security policy).
+pub fn is_script_forbidden(name: &str) -> Option<&'static str> {
+    let lower = name.trim_start_matches(['_', '.', '-']).to_ascii_lowercase();
+    let dashed = cmd::resolve_alias(&name.trim_start_matches(['_', '.']).to_ascii_lowercase());
+    let id = if cmd::find_command(&dashed).is_some() { dashed } else { cmd::resolve_alias(&lower) };
+    match id.as_str() {
+        "new" | "qnew" | "open" | "close" | "closeall" | "quit" | "exit" => {
+            Some("document lifecycle commands are not allowed in scripts")
+        }
+        "save" | "qsave" | "saveas" | "export" | "exportpdf" | "publish" | "wblock" => {
+            Some("file-saving and export commands are not allowed in scripts")
+        }
+        "script" => {
+            Some("a script is already running; nested scripts are not supported")
+        }
+        "appload" => {
+            Some("loading external applications is not allowed in scripts")
+        }
+        _ => None,
     }
 }
 

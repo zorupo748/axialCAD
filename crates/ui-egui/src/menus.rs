@@ -213,6 +213,30 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
             app.cmdline(&path);
             Ok(Value::Null)
         }
+        // SCRIPT / SCR typed or chosen from the menu: the `.scr` file picker, starting where the last
+        // one came from. JSON calls carry `path` or `data` and run through the engine without opening a dialog.
+        "script" | "scr" if params.is_null() => {
+            if app.session.in_script {
+                let msg = "A script is already running; nested scripts are not supported.";
+                app.session.echo(msg.to_string());
+                app.set_status(msg);
+                return Some(Ok(Value::Null));
+            }
+            if app.services.no_file_system {
+                let hint = "SCRIPT: there is no file system here; drop a .scr file on the window to run it";
+                app.session.echo(hint.to_string());
+                app.set_status(hint);
+                return Some(Ok(Value::Null));
+            }
+            let pick = app.services.pick_script.as_ref()?;
+            let dir = app.ui.last_script_dir.clone().unwrap_or_default();
+            let Some(path) = pick(&dir) else { return Some(Ok(Value::Null)) };
+            if let Some(dir) = std::path::Path::new(&path).parent().and_then(|p| p.to_str()).filter(|d| !d.is_empty()) {
+                app.ui.last_script_dir = Some(dir.to_string());
+            }
+            app.load_script(&path);
+            Ok(Value::Null)
+        }
         // Pick a template (.dwt or .dxf) and start a new drawing from it without modifying default template.
         "ui.newtemplate" => {
             let initial_dir = app.ui.default_templates_dir.as_deref();

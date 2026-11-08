@@ -598,16 +598,21 @@ fn page_rows(
         && !choices.devices.iter().any(|d| d.name.eq_ignore_ascii_case(&page.device));
     ui.label("Printer/plotter");
     let dev_label = if is_external_device {
-        format!("{} (Equivalente PDF)", page.device)
+        "Exportador PDF de CADcraft".to_string()
     } else {
         device_label(page).to_string()
     };
     egui::ComboBox::from_id_salt(salt.with("device")).selected_text(dev_label).width(190.0).show_ui(ui, |ui| {
         if is_external_device {
-            let label = format!("{} (Equivalente PDF CADcraft)", page.device);
+            let label = format!("Exportador PDF de CADcraft (origen: {})", page.device);
             if ui
                 .selectable_label(true, &label)
-                .on_hover_text("Controlador de plantilla: se utiliza el exportador PDF incorporado conservando las dimensiones, márgenes y orientación de la hoja.")
+                .on_hover_text(format!(
+                    "Dispositivo configurado en el dibujo: '{}'.\n\
+                     Dispositivo efectivo: Exportador PDF de CADcraft.\n\
+                     CADcraft no ejecuta controladores externos PC3; la salida se genera mediante su motor PDF nativo.",
+                    page.device
+                ))
                 .clicked()
             {
                 change = Some(("device", json!(page.device)));
@@ -632,13 +637,16 @@ fn page_rows(
         ui.label("");
         ui.horizontal_wrapped(|ui| {
             ui.label(
-                egui::RichText::new(format!(
-                    "ℹ Dispositivo del dibujo: '{}'. CADcraft no ejecuta controladores externos PC3; se utiliza el exportador PDF incorporado como equivalencia explícita, manteniendo las dimensiones, orientación y márgenes de la hoja.",
-                    page.device
-                ))
-                .small()
-                .color(ui.visuals().weak_text_color()),
-            );
+                egui::RichText::new(format!("ℹ Dispositivo original: {}", page.device))
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            )
+            .on_hover_text(format!(
+                "Dispositivo configurado en el dibujo: '{}'.\n\
+                 Dispositivo efectivo: Exportador PDF de CADcraft.\n\
+                 CADcraft no ejecuta controladores externos PC3; la salida se genera mediante su motor PDF nativo.",
+                page.device
+            ));
         });
         ui.end_row();
     }

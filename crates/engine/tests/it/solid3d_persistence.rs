@@ -214,3 +214,59 @@ fn test_box_cylinder_interoperable_dxf_export() {
     println!("File saved at: {}", dxf_path.display());
     println!("Total 3DFACE count in DXF: {}", dxf_content.matches("3DFACE").count());
 }
+
+#[test]
+fn test_ejercicio_01_phase_a_dxf_roundtrip() {
+    init_io_hooks();
+
+    let full_content = std::fs::read_to_string("tests/fixtures/ejercicio_01.scr").expect("read original script");
+    let geom_lines: Vec<&str> = full_content.lines().take(170).collect();
+    let geom_scr = geom_lines.join("\n") + "\n";
+
+    let temp_dir = std::env::temp_dir().join(format!("cadcraft-ej1-roundtrip-{}", std::process::id()));
+    let _ = fs::create_dir_all(&temp_dir);
+    let scr_path = temp_dir.join("ej1.scr");
+    let dxf_path = temp_dir.join("ej1.dxf");
+
+    let mut session = Session::new();
+    session.start_script_file(scr_path.to_str().unwrap(), &geom_scr).unwrap();
+    while session.is_script_running() {
+        if let cadcraft_engine::ScriptStep::Error { line, error, .. } = session.step_script() {
+            panic!("Script error at {line}: {error}");
+        }
+    }
+
+    // Export to DXF
+    let save_res = session.execute("saveas", &serde_json::json!({ "path": dxf_path.to_str().unwrap() }));
+    assert!(save_res.is_ok(), "saveas must succeed: {save_res:?}");
+    assert!(dxf_path.exists(), "dxf file must exist on disk");
+
+    // Open from DXF in a fresh session
+    let mut session2 = Session::new();
+    let open_res = session2.execute("open", &serde_json::json!({ "path": dxf_path.to_str().unwrap() }));
+    assert!(open_res.is_ok(), "open must succeed: {open_res:?}");
+    let reopened = session2.doc().unwrap();
+
+    // Check layer persistence
+    assert!(reopened.layer("SUELO").is_some(), "SUELO layer preserved in DXF");
+    assert!(reopened.layer("PILAR").is_some(), "PILAR layer preserved in DXF");
+    assert!(reopened.layer("DATOS").is_some(), "DATOS layer preserved in DXF");
+    assert!(reopened.layer("AUX").is_some(), "AUX layer preserved in DXF");
+    assert!(reopened.layer("SOL").is_some(), "SOL layer preserved in DXF");
+    assert!(reopened.layer("TEXTO").is_some(), "TEXTO layer preserved in DXF");
+
+    // Check entity persistence in DXF:
+    let faces_count = reopened.model.iter().filter(|e| matches!(e.kind, EntityKind::Face3d(_))).count();
+    let lines_count = reopened.model.iter().filter(|e| matches!(e.kind, EntityKind::Line(_))).count();
+    let mtext_count = reopened.model.iter().filter(|e| matches!(e.kind, EntityKind::MText(_))).count();
+    let solids_count = reopened.model.iter().filter(|e| matches!(e.kind, EntityKind::Solid3d(_))).count();
+
+    assert_eq!(lines_count, 1, "LINE 3D preserved in DXF");
+    assert_eq!(mtext_count, 6, "All 6 MTEXT entities preserved in DXF with contents and Z");
+    // Standard DXF receives 3DFACE representation:
+    // 2 original 3DFACEs + mesh faces or restored solids:
+    assert!(faces_count >= 2 || solids_count >= 5, "3DFACE / Solids preserved in DXF");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+

@@ -936,15 +936,16 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
             app.status_bar.max_tab_scroll = new_max;
             app.status_bar.last_revealed_active = Some((doc_uid, new_active_tab));
         }
-        // A transient message occupies the same bounded readout slot as coordinates.
+        // A transient message or active script status occupies the same bounded readout slot as coordinates.
         // Ellipsis and a tooltip keep either value readable without covering layout tabs.
-        let message = app.status.as_ref().filter(|(_, at)| crate::now_ms() - at < 5000.0).map(|(message, _)| message);
+        let script_msg = app.script_status();
+        let message = script_msg.as_ref().or_else(|| app.status.as_ref().filter(|(_, at)| crate::now_ms() - at < 5000.0).map(|(message, _)| message));
         let readout = message.cloned().or(coord);
         if let Some(text) = readout {
             let left = x + 8.0;
             let width = (coord_right - left).max(0.0);
             if width > 4.0 {
-                let color = if message.is_some() { t.warn } else { t.text };
+                let color = if script_msg.is_some() { t.accent } else if message.is_some() { t.warn } else { t.text };
                 let mut job = egui::text::LayoutJob::simple_singleline(text.clone(), crate::theme::body(), color);
                 job.wrap.max_width = width;
                 job.wrap.max_rows = 1;

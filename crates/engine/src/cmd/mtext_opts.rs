@@ -91,6 +91,13 @@ impl MTextOpts {
             columns: self.columns.clone().filter(|_| width > 0.0),
         }
     }
+
+    /// The text box from 3D points, preserving the first corner's Z elevation in the insertion point.
+    pub(super) fn mtext3(&self, first: Vec3, second: Option<Vec3>, contents: String) -> MText {
+        let mut m = self.mtext(first.xy(), second.map(|s| s.xy()), contents);
+        m.insert.z = first.z;
+        m
+    }
 }
 
 /// A question an option asks before MTEXT goes back to "Specify opposite corner".

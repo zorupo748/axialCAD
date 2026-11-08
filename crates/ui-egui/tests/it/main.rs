@@ -24,6 +24,7 @@ mod pickdrag;
 mod plot_device_equivalence;
 mod properties_units;
 mod rapid_clicks;
+mod script_execution;
 mod selection_cycling;
 mod shared_controls;
 mod shortcut_menus;

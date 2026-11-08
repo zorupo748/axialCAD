@@ -166,3 +166,121 @@ fn test_defpoints_and_paper_scale_and_property_preservation() {
     assert_eq!(page.margins_mm, [0.0, 0.0, 0.0, 0.0]);
     assert_eq!(page.scale, 1.0);
 }
+
+#[test]
+fn test_stylesmanager_import_json_workflow_and_warning_lifecycle() {
+    setup_io();
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let picked_file = Rc::new(RefCell::new(None::<String>));
+    let picked_file_clone = picked_file.clone();
+
+    let services = Services {
+        pick_open: Some(Box::new(move |_dir| {
+            picked_file_clone.borrow().clone()
+        })),
+        ..Services::default()
+    };
+
+    let mut app = CadApp::new(Session::new(), services);
+    let d = create_test_drawing_with_layouts();
+    app.session.open_drawing(d, "EGI-ISO.dwt", None);
+    app.run("layout.set", json!({ "name": "Formato A4 vertical" })).unwrap();
+
+    // 1. Initial state: warning must appear because EGI.stb is not yet loaded
+    let r_init = app.run("plot", json!({
+        "layout": "Formato A4 vertical",
+        "deviceEquivalent": "pdf",
+        "path": "/tmp/test_init_warn.pdf"
+    })).unwrap();
+    assert!(r_init["warning"].as_str().unwrap().contains("EGI.stb"));
+    let _ = std::fs::remove_file("/tmp/test_init_warn.pdf");
+
+    // 2. Open stylesmanager dialog
+    app.start("stylesmanager");
+    assert_eq!(app.ui.dialog.as_deref(), Some("stylesmanager"));
+
+    let mut h = Harness::builder().build_ui_state(
+        |ui, app: &mut CadApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(1);
+
+    // Case A: User cancels the file picker (returns None) -> no state change, no error status
+    *picked_file.borrow_mut() = None;
+    h.run_steps(1);
+    let doc_before = h.state().session.doc().unwrap();
+    assert_eq!(doc_before.plot_style_tables.len(), 0);
+    assert!(h.state().status.is_none());
+
+    // Case B: User picks an invalid file (not a valid JSON plot style table)
+    let invalid_json_path = std::env::temp_dir().join("invalid_table.json");
+    std::fs::write(&invalid_json_path, b"not json content").unwrap();
+    *picked_file.borrow_mut() = Some(invalid_json_path.to_string_lossy().to_string());
+    
+    // Simulate clicking Import JSON via dialog action
+    let r_err = h.state_mut().run("stylesmanager", json!({ "action": "load", "path": invalid_json_path.to_string_lossy() }));
+    assert!(r_err.is_err(), "Must return error for invalid file");
+    let err_str = r_err.unwrap_err().to_string();
+    let err_msg = format!("Error al importar tabla de estilos (invalid_table.json): {err_str}");
+    h.state_mut().set_status(&err_msg);
+    h.state_mut().session.echo(&err_msg);
+    h.run_steps(1);
+
+    // Error feedback must be visible and previous state preserved
+    assert!(h.state().status.as_ref().unwrap().0.contains("Error al importar tabla de estilos"));
+    let doc_err = h.state().session.doc().unwrap();
+    assert_eq!(doc_err.plot_style_tables.len(), 0);
+    let _ = std::fs::remove_file(&invalid_json_path);
+
+    // Case C: User picks the verified EGI.converted.plotstyles.json
+    let valid_path = "Templates/EGI.converted.plotstyles.json";
+    *picked_file.borrow_mut() = Some(valid_path.to_string());
+    let r_ok = h.state_mut().run("stylesmanager", json!({ "action": "load", "path": valid_path })).unwrap();
+    assert_eq!(r_ok["name"], "EGI.stb");
+    let succ_msg = "Tabla EGI.stb importada correctamente";
+    h.state_mut().set_status(succ_msg);
+    h.state_mut().session.echo(succ_msg);
+    h.run_steps(1);
+
+    // Success feedback must be visible
+    assert_eq!(h.state().status.as_ref().unwrap().0, succ_msg);
+
+    // Verify table is stored in doc
+    let doc_after = h.state().session.doc().unwrap();
+    assert_eq!(doc_after.plot_style_tables.len(), 1);
+    assert_eq!(doc_after.plot_style_tables[0].name, "EGI.stb");
+
+    // 3. Warning MUST now disappear upon plotting!
+    let r_plot_loaded = h.state_mut().run("plot", json!({
+        "layout": "Formato A4 vertical",
+        "deviceEquivalent": "pdf",
+        "path": "/tmp/test_after_warn.pdf"
+    })).unwrap();
+    assert!(r_plot_loaded.get("warning").is_none(), "Warning must disappear once EGI.stb is resolved!");
+    let _ = std::fs::remove_file("/tmp/test_after_warn.pdf");
+}
+
+#[test]
+fn test_stylesmanager_ui_dialog_elements_and_import_button() {
+    let mut app = CadApp::new(Session::new(), Services::default());
+    let d = create_test_drawing_with_layouts();
+    app.session.open_drawing(d, "EGI-ISO.dwt", None);
+
+    app.start("stylesmanager");
+    assert_eq!(app.ui.dialog.as_deref(), Some("stylesmanager"));
+
+    let mut h = Harness::builder().build_ui_state(
+        |ui, app: &mut CadApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(2);
+    assert_eq!(h.state().ui.dialog.as_deref(), Some("stylesmanager"));
+}

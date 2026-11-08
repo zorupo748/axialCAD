@@ -285,6 +285,22 @@ pub fn set(s: &mut Session, name: &str, v: &Value) -> Result<()> {
     let bad = || EngineError::BadParams { cmd: "setvar".into(), msg: format!("invalid value for {n}") };
     let st = &mut s.settings;
     match n.as_str() {
+        "CLAYER" => {
+            let text = match v {
+                Value::String(t) => t.trim().to_string(),
+                Value::Number(x) => x.to_string(),
+                _ => return Err(bad()),
+            };
+            let d = s.doc_mut()?;
+            let l = d.layer_mut(&text).ok_or_else(|| EngineError::BadParams {
+                cmd: "setvar".into(),
+                msg: format!("cannot find layer `{text}`"),
+            })?;
+            l.frozen = false;
+            let name = l.name.clone();
+            crate::cmd::layer::prev_push(d);
+            d.header.set_str("CLAYER", &name);
+        }
         "OSMODE" => st.osmode = v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())).ok_or_else(bad)? as u32 & 0x7fff,
         // The `color` command's input: ByLayer, ByBlock, a name, an index or a true colour.
         "CECOLOR" => crate::cmd::set_current_color_value(s, v).ok_or_else(bad)?,

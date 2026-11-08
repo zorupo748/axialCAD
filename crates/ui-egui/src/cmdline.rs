@@ -278,7 +278,7 @@ pub struct KeyPress {
 
 /// Handle keyboard input destined for the command line (when no text field has focus).
 pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
-    if ctx.egui_wants_keyboard_input() || app.ui.dialog.is_some() {
+    if ctx.egui_wants_keyboard_input() || app.ui.dialog.is_some() || app.session.in_script {
         return;
     }
     let events = ctx.input(|i| i.events.clone());
@@ -345,6 +345,9 @@ pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
             egui::Event::Key { key, pressed: true, repeat, modifiers, .. } => match key {
                 Key::Enter => submit(app),
                 Key::Escape => {
+                    if egui::Popup::is_any_open(ctx) || app.canvas.popup_open {
+                        continue;
+                    }
                     app.cmd.buffer.clear();
                     app.cmd.dyn_active_field = None;
                     app.session.cancel();
@@ -413,6 +416,9 @@ pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
 }
 
 pub fn submit(app: &mut CadApp) {
+    if app.session.in_script {
+        return;
+    }
     // Grip dimensional input: the typed lengths and angles place the grip.
     if crate::grip_dyn::submit(app) {
         return;

@@ -126,6 +126,8 @@ pub struct UiState {
     pub start_search: String,
     /// The folder the last APPLOAD file came from: the next pick starts there.
     pub last_lisp_dir: Option<String>,
+    /// The folder the last SCRIPT file came from: the next pick starts there.
+    pub last_script_dir: Option<String>,
     /// Default folder proposed when saving new drawings.
     #[serde(default)]
     pub default_drawings_dir: Option<String>,
@@ -231,6 +233,7 @@ impl Default for UiState {
             start_grid_view: true,
             start_search: String::new(),
             last_lisp_dir: None,
+            last_script_dir: None,
             default_drawings_dir: None,
             default_templates_dir: None,
             startup_create_drawing: false,
@@ -250,6 +253,8 @@ pub struct Services {
     /// `None` where there is no native file dialog: the desktop without one asks for the name,
     /// and the web (no file system) says to drop the file (`no_file_system`).
     pub pick_lisp: Option<Box<dyn Fn(&str) -> Option<String>>>,
+    /// Pick a `.scr` file for SCRIPT, starting in the given folder (empty for default).
+    pub pick_script: Option<Box<dyn Fn(&str) -> Option<String>>>,
     /// Moves a file to the system trash. Returns Ok(()) on success, or Err(message) on failure.
     /// `None` when the platform or host has no trash facility (e.g. web).
     pub trash_file: Option<Box<dyn Fn(&str) -> Result<(), String>>>,
@@ -430,6 +435,9 @@ impl CadApp {
     /// Submit a line of command-line text. A refused line is echoed to the history; the error is
     /// also returned.
     pub fn cmdline(&mut self, text: &str) -> Option<String> {
+        if self.session.in_script {
+            return None;
+        }
         if self.canvas.parallel_plane_warning
             && self.canvas.cursor.is_none()
             && self.session.current_prompt().is_some_and(|prompt| prompt.accept.point)
@@ -597,6 +605,11 @@ impl CadApp {
     /// "Opening ..." card shows ([`opening`]); [`Self::finish_opening`] adds it when ready. On the
     /// web it opens at once.
     pub fn open_path(&mut self, path: &str) {
+        // A script file (.scr): loaded as SCRIPT loads it.
+        if is_script_file(path) {
+            self.load_script(path);
+            return;
+        }
         // A LISP file (dropped on the window): loaded as APPLOAD loads it.
         if is_lisp_file(path) {
             match cadcraft_engine::lisp::builtins::read_text_file(path) {
@@ -620,12 +633,16 @@ impl CadApp {
     /// start opening first so LISP routines do not create a blank drawing and run safely once
     /// a drawing is open.
     pub fn open_paths(&mut self, paths: &[impl AsRef<str>]) {
-        let (lisp, drawings): (Vec<_>, Vec<_>) = paths.iter().partition(|p| is_lisp_file(p.as_ref()));
+        let (scripts, other): (Vec<_>, Vec<_>) = paths.iter().partition(|p| is_script_file(p.as_ref()));
+        let (lisp, drawings): (Vec<_>, Vec<_>) = other.into_iter().partition(|p| is_lisp_file(p.as_ref()));
         for d in drawings {
             self.open_path(d.as_ref());
         }
         for l in lisp {
             self.open_path(l.as_ref());
+        }
+        for s in scripts {
+            self.open_path(s.as_ref());
         }
     }
 
@@ -689,6 +706,67 @@ impl CadApp {
         }
         if let Err(e) = self.session.lisp_load(name, text, false) {
             self.session.echo(e.to_string());
+        }
+    }
+
+    /// Whether a script is currently running.
+    pub fn is_running_script(&self) -> bool {
+        self.session.in_script
+    }
+
+    /// Readout for the active script for the status bar.
+    pub fn script_status(&self) -> Option<String> {
+        self.session.script_runner.as_ref().map(|r| {
+            let cur = (r.index + 1).min(r.lines.len());
+            let total = r.lines.len();
+            format!("Running script: {} (line {cur}/{total})... Press Esc to cancel", r.name)
+        })
+    }
+
+    /// Load and start executing a script file (.scr).
+    pub fn load_script(&mut self, path: &str) {
+        if self.session.in_script {
+            let msg = "A script is already running; nested scripts are not supported.";
+            self.session.echo(msg.to_string());
+            self.set_status(msg);
+            return;
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = format!("SCRIPT: cannot read file '{path}': {e}");
+                self.session.echo(msg.clone());
+                self.set_status(msg);
+                return;
+            }
+        };
+        let text = match cadcraft_engine::cmd::file::decode_script_bytes(&bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = format!("SCRIPT: '{path}': {e}");
+                self.session.echo(msg.clone());
+                self.set_status(msg);
+                return;
+            }
+        };
+        if self.session.running.is_some() {
+            self.session.cancel();
+        }
+        self.cmd.buffer.clear();
+        self.cmd.dyn_active_field = None;
+        if let Err(e) = self.session.start_script_file(path, &text) {
+            let msg = format!("SCRIPT: {e}");
+            self.session.echo(msg.clone());
+            self.set_status(msg);
+        }
+    }
+
+    /// Cancel the active script execution.
+    pub fn cancel_active_script(&mut self) {
+        if let Some(cadcraft_engine::ScriptStep::Cancelled { line, total }) = self.session.cancel_script() {
+            let msg = format!("Script cancelled by user at line {line}/{total} (partial changes may have been applied)");
+            self.session.echo(msg.clone());
+            self.set_status(msg);
         }
     }
 
@@ -807,6 +885,54 @@ impl CadApp {
         self.session.lisp_tick();
         if self.session.lisp_busy() {
             ctx.request_repaint();
+        }
+        // An active script runs a bounded slice per frame, so the window stays live (and Esc stops it).
+        if self.session.in_script {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.cancel_active_script();
+                ctx.request_repaint();
+            } else {
+                let t0 = std::time::Instant::now();
+                let max_lines_per_frame = 25;
+                let mut lines_executed = 0;
+                while self.session.in_script
+                    && lines_executed < max_lines_per_frame
+                    && t0.elapsed() < std::time::Duration::from_millis(5)
+                {
+                    lines_executed += 1;
+                    let file_name = self.session.script_runner.as_ref().map(|r| r.name.clone()).unwrap_or_else(|| "<script>".into());
+                    match self.session.step_script() {
+                        cadcraft_engine::ScriptStep::Progress { .. } => {}
+                        cadcraft_engine::ScriptStep::Done { total } => {
+                            let msg = format!("Script '{file_name}' completed successfully ({total} lines).");
+                            self.session.echo(msg.clone());
+                            self.set_status(msg);
+                            break;
+                        }
+                        cadcraft_engine::ScriptStep::EofPending { line, total: _, command } => {
+                            let msg = format!("Script '{file_name}' ended at EOF with command '{command}' awaiting input at line {line} (partial changes may have been applied)");
+                            self.session.echo(msg.clone());
+                            self.set_status(msg);
+                            break;
+                        }
+                        cadcraft_engine::ScriptStep::Error { line, total: _, line_text, error } => {
+                            let msg = format!("Script '{file_name}' error at line {line}: '{line_text}' — {error} (partial changes may have been applied)");
+                            self.session.echo(msg.clone());
+                            self.set_status(msg);
+                            break;
+                        }
+                        cadcraft_engine::ScriptStep::Cancelled { line, total } => {
+                            let msg = format!("Script '{file_name}' cancelled at line {line}/{total} (partial changes may have been applied)");
+                            self.session.echo(msg.clone());
+                            self.set_status(msg);
+                            break;
+                        }
+                    }
+                }
+                if self.session.in_script {
+                    ctx.request_repaint();
+                }
+            }
         }
         // Closing the window (title bar, File ▸ Exit, Cmd+Q) with unsaved changes asks first.
         if ctx.input(|i| i.viewport().close_requested()) && self.request_quit() {
@@ -1036,6 +1162,11 @@ pub fn now_ms() -> f64 {
 /// A LISP source file, by its name.
 pub fn is_lisp_file(name: &str) -> bool {
     std::path::Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("lsp"))
+}
+
+/// A script (.scr) file, by its name.
+pub fn is_script_file(name: &str) -> bool {
+    std::path::Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("scr"))
 }
 
 #[cfg(test)]

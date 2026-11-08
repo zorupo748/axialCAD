@@ -231,6 +231,15 @@ impl OrbitCamera {
         }
     }
 
+    /// Unproject a 2D camera coordinate (u, v) centered at target onto an arbitrary User Coordinate System (UCS) XY plane.
+    pub fn unproject_to_ucs(&self, q: Vec2, ucs: &crate::UcsFrame) -> Option<Vec3> {
+        let r = self.right_dir();
+        let u = self.up_dir();
+        let v = self.view_dir();
+        let p0 = self.target + r * q.x + u * q.y;
+        ucs.unproject_ray(p0, v)
+    }
+
     /// Unproject a 2D camera coordinate (u, v) centered at target onto the specified drawing plane
     /// at the given coordinate offset along the plane normal.
     ///

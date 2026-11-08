@@ -13,7 +13,7 @@ use crate::{Accept, Input, Interactive, Prompt, Result, Session, Step};
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("plane", "Drawing Plane", run_plane)
-            .alias(&["cplane", "workplane", "ucs"])
+            .alias(&["cplane", "workplane"])
             .menu(&["Tools", "Work Plane", "Select Plane"])
             .params("{plane?: \"xy\"|\"xz\"|\"yz\"}; sets the active drawing plane for cursor clicks")
             .noundo()

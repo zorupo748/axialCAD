@@ -17,16 +17,29 @@ use std::path::Path;
 
 use cadcraft_brep::{BrepSolid, MIN_SAFE_MESH_TOLERANCE, TriangleMesh};
 use cadcraft_doc::{BooleanKind, Bounds3, EntityKind, FeatureOp, Handle, Recipe, Solid3d, Solid3dStatus};
-use cadcraft_geom::Vec3;
+use cadcraft_geom::{Vec2, Vec3};
 use serde_json::{Value, json};
 
 use super::bad;
 use super::{CommandSpec, Result, Session};
+use crate::{Accept, Input, Interactive, Prompt, Step};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("solid.box", "Box", run_box).params("{origin?: [x,y,z], size: [dx,dy,dz]}"),
-        CommandSpec::new("solid.cylinder", "Cylinder", run_cylinder).params("{center?: [x,y,z], radius: f64, height: f64, axis?: [x,y,z]}"),
+        CommandSpec::new("cylinder", "Cylinder", run_cylinder)
+            .menu(&["Draw", "Modeling", "Solids", "Cylinder"])
+            .alias(&["cyl"])
+            .params("{center?: [x,y,z], radius: f64, height?: f64, axis?: [x,y,z], axis_endpoint?: [x,y,z]}")
+            .interactive(|_| Ok(Box::new(CylinderM::default()))),
+        CommandSpec::new("solid.cylinder", "Cylinder", run_cylinder)
+            .params("{center?: [x,y,z], radius: f64, height?: f64, axis?: [x,y,z], axis_endpoint?: [x,y,z]}"),
+        CommandSpec::new("sphere", "Sphere", run_sphere)
+            .menu(&["Draw", "Modeling", "Solids", "Sphere"])
+            .alias(&["sph"])
+            .params("{center?: [x,y,z], radius: f64}")
+            .interactive(|_| Ok(Box::new(SphereM::default()))),
+        CommandSpec::new("solid.sphere", "Sphere", run_sphere).params("{center?: [x,y,z], radius: f64}"),
         CommandSpec::new("solid.extrude", "Extrude Profile", run_extrude).params("{profile: string|u64, height?: f64, direction?: [dx,dy,dz]}"),
         CommandSpec::new("solid.translate", "Translate Solid", run_translate).params("{handle: string|u64, delta: [dx,dy,dz]}"),
         CommandSpec::new("solid.union", "Union Solids", run_union)
@@ -113,34 +126,87 @@ fn run_cylinder(s: &mut Session, p: &Value) -> Result<Value> {
         .get("radius")
         .and_then(Value::as_f64)
         .filter(|r| r.is_finite() && *r > 0.0)
-        .ok_or_else(|| bad("solid.cylinder", "`radius` (positive number) is required"))?;
-    let height = p
-        .get("height")
-        .and_then(Value::as_f64)
-        .filter(|h| h.is_finite() && *h > 0.0)
-        .ok_or_else(|| bad("solid.cylinder", "`height` (positive number) is required"))?;
-    let axis = p.get("axis").and_then(parse_vec3).unwrap_or(Vec3::new(0.0, 0.0, 1.0));
+        .ok_or_else(|| bad("cylinder", "`radius` (positive number) is required"))?;
 
-    let len_sq = axis.x * axis.x + axis.y * axis.y + axis.z * axis.z;
-    if len_sq <= 1e-12 {
-        return Err(bad("solid.cylinder", "`axis` vector cannot be zero-length"));
-    }
+    let (height, axis) = if let Some(end) = p.get("axis_endpoint").and_then(parse_vec3) {
+        let delta = end - center;
+        let len = delta.len();
+        if len <= 1e-12 {
+            return Err(bad("cylinder", "`axis_endpoint` cannot coincide with base center"));
+        }
+        (len, delta.normalized())
+    } else {
+        let h = p
+            .get("height")
+            .and_then(Value::as_f64)
+            .filter(|h| h.is_finite() && *h > 0.0)
+            .ok_or_else(|| bad("cylinder", "`height` (positive number) is required"))?;
+        let a = p.get("axis").and_then(parse_vec3).unwrap_or(Vec3::new(0.0, 0.0, 1.0));
+        let len_sq = a.x * a.x + a.y * a.y + a.z * a.z;
+        if len_sq <= 1e-12 {
+            return Err(bad("cylinder", "`axis` vector cannot be zero-length"));
+        }
+        (h, a.normalized())
+    };
 
-    let mut recipe = Recipe::new();
-    recipe.add_feature(1, FeatureOp::Cylinder { center, radius, height, axis });
-
-    let evaluated = BrepSolid::evaluate_recipe(&recipe).map_err(|e| bad("solid.cylinder", format!("evaluation failed: {e}")))?;
-    let bbox = evaluated.bounding_box();
-    let faces = evaluated.to_face3d_mesh(0.05).unwrap_or_default();
-
-    let solid = Solid3d::with_faces(recipe, bbox, faces);
-    let handle = s.add_entity(EntityKind::Solid3d(solid))?;
+    let handle = create_and_add_cylinder(s, center, radius, height, axis)?;
+    let ent = s.state()?.doc.entity(handle).cloned().ok_or_else(|| bad("cylinder", "created entity not found"))?;
+    let bbox = match &ent.kind {
+        EntityKind::Solid3d(sol) => sol.bbox,
+        _ => Bounds3::EMPTY,
+    };
 
     Ok(json!({
         "status": "ok",
         "handle": handle.hex(),
         "bbox": bbox_to_json(&bbox)
     }))
+}
+
+fn run_sphere(s: &mut Session, p: &Value) -> Result<Value> {
+    let center = p.get("center").and_then(parse_vec3).unwrap_or(Vec3::ZERO);
+    let radius = p
+        .get("radius")
+        .and_then(Value::as_f64)
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .ok_or_else(|| bad("sphere", "`radius` (positive number) is required"))?;
+
+    let handle = create_and_add_sphere(s, center, radius)?;
+    let ent = s.state()?.doc.entity(handle).cloned().ok_or_else(|| bad("sphere", "created entity not found"))?;
+    let bbox = match &ent.kind {
+        EntityKind::Solid3d(sol) => sol.bbox,
+        _ => Bounds3::EMPTY,
+    };
+
+    Ok(json!({
+        "status": "ok",
+        "handle": handle.hex(),
+        "bbox": bbox_to_json(&bbox)
+    }))
+}
+
+fn create_and_add_cylinder(s: &mut Session, center: Vec3, radius: f64, height: f64, axis: Vec3) -> Result<Handle> {
+    let mut recipe = Recipe::new();
+    recipe.add_feature(1, FeatureOp::Cylinder { center, radius, height, axis });
+
+    let evaluated = BrepSolid::evaluate_recipe(&recipe).map_err(|e| bad("cylinder", format!("evaluation failed: {e}")))?;
+    let bbox = evaluated.bounding_box();
+    let faces = evaluated.to_face3d_mesh(0.05).unwrap_or_default();
+
+    let solid = Solid3d::with_faces(recipe, bbox, faces);
+    s.add_entity(EntityKind::Solid3d(solid))
+}
+
+fn create_and_add_sphere(s: &mut Session, center: Vec3, radius: f64) -> Result<Handle> {
+    let mut recipe = Recipe::new();
+    recipe.add_feature(1, FeatureOp::Sphere { center, radius });
+
+    let r_vec = Vec3::new(radius, radius, radius);
+    let bbox = Bounds3::new(center - r_vec, center + r_vec);
+    let faces = cadcraft_doc::solid3d::sphere_faces(center, radius, 16, 32);
+
+    let solid = Solid3d::with_faces(recipe, bbox, faces);
+    s.add_entity(EntityKind::Solid3d(solid))
 }
 
 fn run_extrude(s: &mut Session, p: &Value) -> Result<Value> {
@@ -528,6 +594,7 @@ fn merge_recipes_for_boolean(cmd: &str, target_recipe: &Recipe, tool_recipe: &Re
             FeatureOp::Cylinder { center, radius, height, axis } => {
                 FeatureOp::Cylinder { center: *center, radius: *radius, height: *height, axis: *axis }
             }
+            FeatureOp::Sphere { center, radius } => FeatureOp::Sphere { center: *center, radius: *radius },
             FeatureOp::Extrusion { profile, direction } => FeatureOp::Extrusion { profile: profile.clone(), direction: *direction },
             FeatureOp::Translation { target_id, delta } => {
                 let mapped_target = target_map
@@ -563,6 +630,7 @@ fn merge_recipes_for_boolean(cmd: &str, target_recipe: &Recipe, tool_recipe: &Re
             FeatureOp::Cylinder { center, radius, height, axis } => {
                 FeatureOp::Cylinder { center: *center, radius: *radius, height: *height, axis: *axis }
             }
+            FeatureOp::Sphere { center, radius } => FeatureOp::Sphere { center: *center, radius: *radius },
             FeatureOp::Extrusion { profile, direction } => FeatureOp::Extrusion { profile: profile.clone(), direction: *direction },
             FeatureOp::Translation { target_id, delta } => {
                 let mapped_target =
@@ -664,4 +732,269 @@ fn run_subtract(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn run_intersect(s: &mut Session, p: &Value) -> Result<Value> {
     run_boolean_op(s, p, "solid.intersect", BooleanKind::Intersection)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CylStage {
+    Center,
+    Radius,
+    HeightOrAxis,
+    AxisEndpoint,
+}
+
+impl Default for CylStage {
+    fn default() -> Self {
+        CylStage::Center
+    }
+}
+
+#[derive(Default)]
+pub struct CylinderM {
+    stage: CylStage,
+    center: Option<Vec3>,
+    radius: Option<f64>,
+}
+
+impl Interactive for CylinderM {
+    fn name(&self) -> &'static str {
+        "CYLINDER"
+    }
+
+    fn prompt(&self, _s: &Session) -> Prompt {
+        match self.stage {
+            CylStage::Center => Prompt::new("Specify center point of base or [3P/2P/Ttr/Elliptical]:", Accept::POINT)
+                .kw(&["3P", "2P", "Ttr", "Elliptical"]),
+            CylStage::Radius => Prompt::new("Specify base radius or [Diameter]:", Accept::POINT_OR_NUMBER)
+                .kw(&["Diameter"]),
+            CylStage::HeightOrAxis => Prompt::new("Specify height or [2Point/Axis endpoint]:", Accept::POINT_OR_NUMBER)
+                .kw(&["2Point", "Axis endpoint"]),
+            CylStage::AxisEndpoint => Prompt::new("Specify axis endpoint:", Accept::POINT),
+        }
+    }
+
+    fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
+        match self.stage {
+            CylStage::Center => {
+                let pt = match i {
+                    Input::Point3(p3) => p3,
+                    Input::Point(p) => s.drawing_plane().embed(p, s.effective_drawing_plane_offset()),
+                    Input::Cancel => return Ok(Step::Done),
+                    _ => return Ok(Step::Continue),
+                };
+                self.center = Some(pt);
+                self.stage = CylStage::Radius;
+                Ok(Step::Continue)
+            }
+            CylStage::Radius => {
+                match i {
+                    Input::Text(t) => {
+                        let r = crate::units::parse_distance(&t)
+                            .ok_or_else(|| crate::EngineError::Other("Requires a distance.".into()))?;
+                        if r <= 0.0 || !r.is_finite() {
+                            return Err(crate::EngineError::Other("Radius must be positive and nonzero.".into()));
+                        }
+                        self.radius = Some(r);
+                        self.stage = CylStage::HeightOrAxis;
+                        Ok(Step::Continue)
+                    }
+                    Input::Point3(p3) => {
+                        let center = self.center.unwrap_or(Vec3::ZERO);
+                        let r = (p3 - center).len();
+                        if r <= 1e-9 || !r.is_finite() {
+                            return Err(crate::EngineError::Other("Radius must be positive and nonzero.".into()));
+                        }
+                        self.radius = Some(r);
+                        self.stage = CylStage::HeightOrAxis;
+                        Ok(Step::Continue)
+                    }
+                    Input::Point(p) => {
+                        let center = self.center.unwrap_or(Vec3::ZERO);
+                        let p3 = s.drawing_plane().embed(p, s.effective_drawing_plane_offset());
+                        let r = (p3 - center).len();
+                        if r <= 1e-9 || !r.is_finite() {
+                            return Err(crate::EngineError::Other("Radius must be positive and nonzero.".into()));
+                        }
+                        self.radius = Some(r);
+                        self.stage = CylStage::HeightOrAxis;
+                        Ok(Step::Continue)
+                    }
+                    Input::Cancel => Ok(Step::Done),
+                    _ => Ok(Step::Continue),
+                }
+            }
+            CylStage::HeightOrAxis => {
+                match i {
+                    Input::Keyword(k) => {
+                        let upper = k.trim().to_ascii_uppercase();
+                        if upper == "A" || upper == "_A" || upper.starts_with("AXIS") {
+                            self.stage = CylStage::AxisEndpoint;
+                            Ok(Step::Continue)
+                        } else {
+                            Err(crate::EngineError::Other("Invalid option keyword.".into()))
+                        }
+                    }
+                    Input::Text(t) => {
+                        let upper = t.trim().to_ascii_uppercase();
+                        if upper == "A" || upper == "_A" || upper.starts_with("AXIS") {
+                            self.stage = CylStage::AxisEndpoint;
+                            return Ok(Step::Continue);
+                        }
+                        let h = crate::units::parse_distance(&t)
+                            .ok_or_else(|| crate::EngineError::Other("Requires a distance.".into()))?;
+                        if h.abs() <= 1e-9 || !h.is_finite() {
+                            return Err(crate::EngineError::Other("Height must be nonzero.".into()));
+                        }
+                        let center = self.center.unwrap_or(Vec3::ZERO);
+                        let radius = self.radius.unwrap_or(1.0);
+                        let height = h.abs();
+                        let axis = if h >= 0.0 { Vec3::new(0.0, 0.0, 1.0) } else { Vec3::new(0.0, 0.0, -1.0) };
+                        create_and_add_cylinder(s, center, radius, height, axis)?;
+                        Ok(Step::Done)
+                    }
+                    Input::Point3(p3) => {
+                        let center = self.center.unwrap_or(Vec3::ZERO);
+                        let h = (p3 - center).len();
+                        if h <= 1e-9 || !h.is_finite() {
+                            return Err(crate::EngineError::Other("Height must be nonzero.".into()));
+                        }
+                        let radius = self.radius.unwrap_or(1.0);
+                        let axis = (p3 - center).normalized();
+                        create_and_add_cylinder(s, center, radius, h, axis)?;
+                        Ok(Step::Done)
+                    }
+                    Input::Point(p) => {
+                        let center = self.center.unwrap_or(Vec3::ZERO);
+                        let p3 = s.drawing_plane().embed(p, s.effective_drawing_plane_offset());
+                        let h = (p3 - center).len();
+                        if h <= 1e-9 || !h.is_finite() {
+                            return Err(crate::EngineError::Other("Height must be nonzero.".into()));
+                        }
+                        let radius = self.radius.unwrap_or(1.0);
+                        let axis = (p3 - center).normalized();
+                        create_and_add_cylinder(s, center, radius, h, axis)?;
+                        Ok(Step::Done)
+                    }
+                    Input::Cancel => Ok(Step::Done),
+                    _ => Ok(Step::Continue),
+                }
+            }
+            CylStage::AxisEndpoint => {
+                match i {
+                    Input::Point3(p3) => {
+                        let center = self.center.unwrap_or(Vec3::ZERO);
+                        let delta = p3 - center;
+                        let len = delta.len();
+                        if len <= 1e-9 || !len.is_finite() {
+                            return Err(crate::EngineError::Other("Axis endpoint cannot coincide with the base center.".into()));
+                        }
+                        let radius = self.radius.unwrap_or(1.0);
+                        let axis = delta.normalized();
+                        create_and_add_cylinder(s, center, radius, len, axis)?;
+                        Ok(Step::Done)
+                    }
+                    Input::Point(p) => {
+                        let center = self.center.unwrap_or(Vec3::ZERO);
+                        let p3 = s.drawing_plane().embed(p, s.effective_drawing_plane_offset());
+                        let delta = p3 - center;
+                        let len = delta.len();
+                        if len <= 1e-9 || !len.is_finite() {
+                            return Err(crate::EngineError::Other("Axis endpoint cannot coincide with the base center.".into()));
+                        }
+                        let radius = self.radius.unwrap_or(1.0);
+                        let axis = delta.normalized();
+                        create_and_add_cylinder(s, center, radius, len, axis)?;
+                        Ok(Step::Done)
+                    }
+                    Input::Cancel => Ok(Step::Done),
+                    _ => Ok(Step::Continue),
+                }
+            }
+        }
+    }
+
+    fn preview(&self, _s: &Session, _c: Vec2) -> Vec<EntityKind> {
+        Vec::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SphStage {
+    Center,
+    Radius,
+}
+
+impl Default for SphStage {
+    fn default() -> Self {
+        SphStage::Center
+    }
+}
+
+#[derive(Default)]
+pub struct SphereM {
+    stage: SphStage,
+    center: Option<Vec3>,
+}
+
+impl Interactive for SphereM {
+    fn name(&self) -> &'static str {
+        "SPHERE"
+    }
+
+    fn prompt(&self, _s: &Session) -> Prompt {
+        match self.stage {
+            SphStage::Center => Prompt::new("Specify center point or [3P/2P/Ttr]:", Accept::POINT).kw(&["3P", "2P", "Ttr"]),
+            SphStage::Radius => Prompt::new("Specify radius or [Diameter]:", Accept::POINT_OR_NUMBER).kw(&["Diameter"]),
+        }
+    }
+
+    fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
+        match self.stage {
+            SphStage::Center => {
+                let pt = match i {
+                    Input::Point3(p3) => p3,
+                    Input::Point(p) => s.drawing_plane().embed(p, s.effective_drawing_plane_offset()),
+                    Input::Cancel => return Ok(Step::Done),
+                    _ => return Ok(Step::Continue),
+                };
+                self.center = Some(pt);
+                self.stage = SphStage::Radius;
+                Ok(Step::Continue)
+            }
+            SphStage::Radius => match i {
+                Input::Text(t) => {
+                    let r = crate::units::parse_distance(&t).ok_or_else(|| crate::EngineError::Other("Requires a distance.".into()))?;
+                    if r <= 0.0 || !r.is_finite() {
+                        return Err(crate::EngineError::Other("Radius must be positive and nonzero.".into()));
+                    }
+                    create_and_add_sphere(s, self.center.unwrap_or(Vec3::ZERO), r)?;
+                    Ok(Step::Done)
+                }
+                Input::Point3(p3) => {
+                    let center = self.center.unwrap_or(Vec3::ZERO);
+                    let r = (p3 - center).len();
+                    if r <= 1e-9 || !r.is_finite() {
+                        return Err(crate::EngineError::Other("Radius must be positive and nonzero.".into()));
+                    }
+                    create_and_add_sphere(s, center, r)?;
+                    Ok(Step::Done)
+                }
+                Input::Point(p) => {
+                    let center = self.center.unwrap_or(Vec3::ZERO);
+                    let p3 = s.drawing_plane().embed(p, s.effective_drawing_plane_offset());
+                    let r = (p3 - center).len();
+                    if r <= 1e-9 || !r.is_finite() {
+                        return Err(crate::EngineError::Other("Radius must be positive and nonzero.".into()));
+                    }
+                    create_and_add_sphere(s, center, r)?;
+                    Ok(Step::Done)
+                }
+                Input::Cancel => Ok(Step::Done),
+                _ => Ok(Step::Continue),
+            },
+        }
+    }
+
+    fn preview(&self, _s: &Session, _c: Vec2) -> Vec<EntityKind> {
+        Vec::new()
+    }
 }

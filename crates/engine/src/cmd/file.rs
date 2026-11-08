@@ -193,27 +193,37 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
-/// SCRIPT: run the lines of a `.scr` file through [`Session::script`] — the same execution the
+/// Decode raw bytes of a `.scr` script into a UTF-8 String.
+/// Strictly rejects invalid UTF-8 bytes and strips a leading UTF-8 BOM if present.
+pub fn decode_script_bytes(bytes: &[u8]) -> Result<String> {
+    let s = std::str::from_utf8(bytes).map_err(|e| bad("script", format!("file is not valid UTF-8: {e}")))?;
+    let s = s.strip_prefix('\u{feff}').unwrap_or(s);
+    Ok(s.to_string())
+}
+
+/// SCRIPT: run the lines of a `.scr` file through [`Session::script_named`] — the same execution the
 /// CLI, MCP and the control channel already use, now reachable from the command line and menus.
 fn run_script(s: &mut Session, p: &Value) -> Result<Value> {
-    let text = if let Some(_path) = str_param(p, "path") {
+    let (name, text) = if let Some(_path) = str_param(p, "path") {
         #[cfg(not(target_arch = "wasm32"))]
         let path = _path;
         #[cfg(not(target_arch = "wasm32"))]
         {
             let bytes =
                 crate::capped_read::read_capped(std::path::Path::new(path), MAX_SCRIPT_BYTES).map_err(|e| bad("script", format!("{path}: {e}")))?;
-            String::from_utf8_lossy(&bytes).into_owned()
+            let text = decode_script_bytes(&bytes).map_err(|e| bad("script", format!("{path}: {e}")))?;
+            (path.to_string(), text)
         }
         #[cfg(target_arch = "wasm32")]
         return Err(bad("script", "paths are not available on the web; pass `data`"));
     } else {
         let data = str_param(p, "data").ok_or_else(|| bad("script", "`path` or `data` (base64) is required"))?;
         let bytes = base64_decode(data).ok_or_else(|| bad("script", "invalid base64"))?;
-        String::from_utf8_lossy(&bytes).into_owned()
+        let text = decode_script_bytes(&bytes)?;
+        ("<data>".to_string(), text)
     };
     let lines = text.lines().count();
-    s.script(&text)?;
+    s.script_file(&name, &text)?;
     Ok(json!({ "lines": lines }))
 }
 
@@ -234,10 +244,11 @@ impl Interactive for ScriptM {
         }
         let Input::Text(t) = i else { return Ok(Step::Continue) };
         let t = t.trim();
-        if t.is_empty() {
+        let path = t.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(t);
+        if path.is_empty() {
             return Ok(Step::Cancel);
         }
-        match run_script(s, &json!({ "path": t })) {
+        match run_script(s, &json!({ "path": path })) {
             Ok(_) => Ok(Step::Done),
             Err(EngineError::BadParams { msg, .. }) => {
                 s.echo(msg);

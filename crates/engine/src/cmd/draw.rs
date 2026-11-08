@@ -85,13 +85,18 @@ pub fn specs() -> Vec<CommandSpec> {
             .interactive(|s| Ok(Box::new(TextM::new(s)))),
         CommandSpec::new("mtext", "Multiline Text", run_mtext)
             .menu(&["Draw", "Text", "Multiline Text..."])
-            .alias(&["t", "mt"])
+            .alias(&["t", "mt", "-mtext"])
             .params(
                 "{at, text, height?, width?, attach?: 1..9 | justify?: TL..BR, rotation?, style?, lineSpacing?, lineSpacingExact?, \
                  list?: bullet|number|lower|upper, indent?, firstIndent?, rightIndent?, tabs?: [..], align?: left|center|right|justify|distributed, \
                  columns?: {type: static|dynamic, count?, gutter?, height, heights?, reversed?}} (indents and tabs in text heights; width = one column)",
             )
             .interactive(|_| Ok(Box::new(MTextM::default()))),
+        CommandSpec::new("3dface", "3D Face", run_3dface)
+            .menu(&["Draw", "Modeling", "Meshes", "3D Face"])
+            .alias(&["3df", "face"])
+            .params("{points: [[x,y,z], ...] (3 or 4 points)}")
+            .interactive(|_| Ok(Box::new(Face3dM::default()))),
     ]
 }
 
@@ -154,25 +159,47 @@ fn run_pline(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn run_circle(s: &mut Session, p: &Value) -> Result<Value> {
-    let c = if let Some(center) = point_param(p, "center") {
-        // Checked before `Circle::new`, which would turn a negative radius positive.
+    let ucs = s.ucs();
+    let (center_wcs, r) = if let Some(center3) = point3_param(p, "center") {
         let r = match size_param("circle", p, "radius", false)? {
             Some(r) => r,
             None => size_param("circle", p, "diameter", false)?.ok_or_else(|| bad("circle", "`radius` or `diameter` is required"))? / 2.0,
         };
-        Circle::new(center, r)
+        (ucs.to_world(center3), r)
+    } else if let Some(center2) = point_param(p, "center") {
+        let r = match size_param("circle", p, "radius", false)? {
+            Some(r) => r,
+            None => size_param("circle", p, "diameter", false)?.ok_or_else(|| bad("circle", "`radius` or `diameter` is required"))? / 2.0,
+        };
+        (ucs.to_world2(center2), r)
     } else if let (Some(a), Some(b)) = (point_param(p, "p1"), point_param(p, "p2")) {
+        let a_w = ucs.to_world2(a);
+        let b_w = ucs.to_world2(b);
         match point_param(p, "p3") {
-            Some(c3) => Circle::from_3_points(a, b, c3).ok_or_else(|| bad("circle", "points are collinear"))?,
-            None => Circle::from_2_points(a, b),
+            Some(c3) => {
+                let c_w = ucs.to_world2(c3);
+                let ci = Circle::from_3_points(a_w.xy(), b_w.xy(), c_w.xy()).ok_or_else(|| bad("circle", "points are collinear"))?;
+                (ucs.to_world2(ci.center), ci.radius)
+            }
+            None => {
+                let ci = Circle::from_2_points(a_w.xy(), b_w.xy());
+                (ucs.to_world2(ci.center), ci.radius)
+            }
         }
     } else {
         return Err(bad("circle", "give {center, radius} or {p1, p2[, p3]}"));
     };
-    if !(c.radius > 1e-12 && c.radius.is_finite()) {
+    if !(r > 1e-12 && r.is_finite()) {
         return Err(bad("circle", "radius must be positive"));
     }
-    added(s.add_entity(circle(c.center, c.radius))?)
+    let mut ent = cadcraft_doc::Entity::new(
+        s.doc_mut()?.new_handle(),
+        cadcraft_doc::EntityKind::Circle(cadcraft_doc::Circle { center: center_wcs, radius: r }),
+    );
+    ent.common.extrusion = ucs.z_axis;
+    let hd = s.add_entity_direct(ent)?;
+    s.doc_mut()?.header.set_f64("CIRCLERAD", r);
+    added(hd)
 }
 
 fn run_arc(s: &mut Session, p: &Value) -> Result<Value> {
@@ -386,6 +413,22 @@ fn run_mtext(s: &mut Session, p: &Value) -> Result<Value> {
         columns: super::mtext_opts::json_columns(p, height, width)?,
     });
     added(s.add_entity(k)?)
+}
+
+fn run_3dface(s: &mut Session, p: &Value) -> Result<Value> {
+    let pts = points3_param(p, "points").ok_or_else(|| bad("3dface", "`points` [[x,y[,z]], ...] (3 or 4 points) is required"))?;
+    if pts.len() < 3 || pts.len() > 4 {
+        return Err(bad("3dface", "3dface requires 3 or 4 points"));
+    }
+    let p0 = pts.first().copied().unwrap_or(Vec3::ZERO);
+    let p1 = pts.get(1).copied().unwrap_or(Vec3::ZERO);
+    let p2 = pts.get(2).copied().unwrap_or(Vec3::ZERO);
+    let p3 = pts.get(3).copied().unwrap_or(p2);
+    let h = s.add_entity(EntityKind::Face3d(cadcraft_doc::Face3d {
+        corners: [p0, p1, p2, p3],
+        hidden_edges: 0,
+    }))?;
+    added(h)
 }
 
 // ---------------- interactive ----------------
@@ -881,10 +924,44 @@ impl Interactive for PlineM {
 #[derive(Default)]
 struct CircleM {
     mode: u8, // 0 center-radius, 1 = 3P, 2 = 2P, 3 = TTR
-    pts: Vec<Vec2>,
+    pts: Vec<Vec3>,
     diameter: bool,
     /// The `Ttr` option hands over to the tangent-circle machine.
     delegate: Option<Box<dyn Interactive>>,
+}
+
+impl CircleM {
+    fn process_point(&mut self, s: &mut Session, p3: Vec3) -> Result<Step> {
+        if self.pts.is_empty() {
+            self.pts.push(p3);
+            return Ok(Step::Continue);
+        }
+        if self.mode == 0 && self.pts.first().is_some_and(|c| c.dist(p3) < 1e-12) {
+            return Err(crate::EngineError::Other("Value must be positive and nonzero.".into()));
+        }
+        self.pts.push(p3);
+        let done = match self.mode {
+            0 if self.pts.len() == 2 => {
+                let (Some(c), Some(e)) = (self.pts.first(), self.pts.get(1)) else { return Ok(Step::Continue) };
+                let r = if self.diameter { c.dist(*e) / 2.0 } else { c.dist(*e) };
+                Some((*c, r))
+            }
+            1 if self.pts.len() == 3 => {
+                let ci = Circle::from_3_points(self.pts[0].xy(), self.pts[1].xy(), self.pts[2].xy());
+                ci.map(|c| (s.ucs().to_world2(c.center), c.radius))
+            }
+            2 if self.pts.len() == 2 => {
+                let ci = Circle::from_2_points(self.pts[0].xy(), self.pts[1].xy());
+                Some((s.ucs().to_world2(ci.center), ci.radius))
+            }
+            _ => None,
+        };
+        if let Some((center, r)) = done {
+            finish_circle(s, center, r)?;
+            return Ok(Step::Done);
+        }
+        Ok(Step::Continue)
+    }
 }
 
 impl Interactive for CircleM {
@@ -900,23 +977,23 @@ impl Interactive for CircleM {
         match (self.mode, n) {
             (0, 0) => Prompt::new("Specify center point for circle", Accept::POINT).kw(&["3P", "2P", "Ttr (tan tan radius)"]),
             (0, _) if self.diameter => {
-                Prompt::new("Specify diameter of circle", Accept::POINT_OR_NUMBER).base_opt(self.pts.first().copied()).distance()
+                Prompt::new("Specify diameter of circle", Accept::POINT_OR_NUMBER).base_opt(self.pts.first().map(|p| p.xy())).distance()
             }
             (0, _) => {
                 let p =
-                    Prompt::new("Specify radius of circle", Accept::POINT_OR_NUMBER).kw(&["Diameter"]).base_opt(self.pts.first().copied()).distance();
+                    Prompt::new("Specify radius of circle", Accept::POINT_OR_NUMBER).kw(&["Diameter"]).base_opt(self.pts.first().map(|p| p.xy())).distance();
                 if last_r > 0.0 { p.default(format!("{last_r:.4}")) } else { p }
             }
             (1, k) => Prompt::new(
                 ["Specify first point on circle", "Specify second point on circle", "Specify third point on circle"].get(k).copied().unwrap_or(""),
                 Accept::POINT,
             )
-            .base_opt(self.pts.last().copied()),
+            .base_opt(self.pts.last().map(|p| p.xy())),
             (2, k) => Prompt::new(
                 if k == 0 { "Specify first end point of circle's diameter" } else { "Specify second end point of circle's diameter" },
                 Accept::POINT,
             )
-            .base_opt(self.pts.last().copied()),
+            .base_opt(self.pts.last().map(|p| p.xy())),
             _ => Prompt::new("Specify center point for circle", Accept::POINT),
         }
     }
@@ -941,46 +1018,29 @@ impl Interactive for CircleM {
                 Ok(Step::Continue)
             }
             Input::Point(p) => {
-                if self.mode == 0 && self.pts.first().is_some_and(|c| c.near(p, 1e-12)) {
-                    return Err(crate::EngineError::Other("Value must be positive and nonzero.".into()));
-                }
-                self.pts.push(p);
-                let done = match self.mode {
-                    0 if self.pts.len() == 2 => {
-                        let (Some(c), Some(e)) = (self.pts.first(), self.pts.get(1)) else { return Ok(Step::Continue) };
-                        let r = if self.diameter { c.dist(*e) / 2.0 } else { c.dist(*e) };
-                        Some(Circle::new(*c, r))
-                    }
-                    1 if self.pts.len() == 3 => Circle::from_3_points(self.pts[0], self.pts[1], self.pts[2]),
-                    2 if self.pts.len() == 2 => Some(Circle::from_2_points(self.pts[0], self.pts[1])),
-                    _ => None,
-                };
-                if let Some(c) = done {
-                    finish_circle(s, c)?;
-                    return Ok(Step::Done);
-                }
-                Ok(Step::Continue)
+                let p3 = s.ucs().to_world2(p);
+                self.process_point(s, p3)
             }
+            Input::Point3(p3) => self.process_point(s, p3),
             Input::Text(t) if self.mode == 0 && self.pts.len() == 1 => {
                 let v = number(&t).ok_or_else(|| crate::EngineError::Other("Requires numeric distance or second point.".into()))?;
                 let r = if self.diameter { v / 2.0 } else { v };
                 if r <= 0.0 {
                     return Err(crate::EngineError::Other("Value must be positive and nonzero.".into()));
                 }
-                finish_circle(s, Circle::new(self.pts[0], r))?;
+                finish_circle(s, self.pts[0], r)?;
                 Ok(Step::Done)
             }
             Input::Enter if self.mode == 0 && self.pts.len() == 1 => {
                 let r = s.doc()?.header.f64("CIRCLERAD", 0.0);
                 if r > 0.0 {
-                    finish_circle(s, Circle::new(self.pts[0], r))?;
+                    finish_circle(s, self.pts[0], r)?;
                     Ok(Step::Done)
                 } else {
                     Ok(Step::Continue)
                 }
             }
             Input::Enter => Ok(Step::Cancel),
-            // Garbage at a point prompt: report it and ask again.
             Input::Text(_) if self.mode == 0 && self.pts.is_empty() => Err(crate::EngineError::Other("Point or option keyword required.".into())),
             Input::Text(_) => Err(crate::EngineError::Other("Invalid point.".into())),
             _ => Ok(Step::Continue),
@@ -990,24 +1050,51 @@ impl Interactive for CircleM {
         if let Some(d) = &self.delegate {
             return d.preview(s, c);
         }
+        let cur_3d = s.cursor3;
         match (self.mode, self.pts.as_slice()) {
             (0, [center]) => {
-                let r = if self.diameter { center.dist(c) / 2.0 } else { center.dist(c) };
-                vec![circle(*center, r), line(*center, c)]
+                vec![EntityKind::Line(cadcraft_doc::Line { a: *center, b: cur_3d })]
             }
-            (1, [a, b]) => Circle::from_3_points(*a, *b, c).map(|ci| vec![circle(ci.center, ci.radius)]).unwrap_or_default(),
+            (1, [a, b]) => Circle::from_3_points(a.xy(), b.xy(), c).map(|ci| vec![circle(ci.center, ci.radius)]).unwrap_or_default(),
             (1, [a]) | (2, [a]) => {
-                let ci = Circle::from_2_points(*a, c);
+                let ci = Circle::from_2_points(a.xy(), c);
                 vec![circle(ci.center, ci.radius)]
+            }
+            _ => Vec::new(),
+        }
+    }
+    fn preview_objects(&self, s: &Session, _c: Vec2) -> Vec<cadcraft_doc::Entity> {
+        let cur_3d = s.cursor3;
+        match (self.mode, self.pts.as_slice()) {
+            (0, [center]) => {
+                let r = if self.diameter { center.dist(cur_3d) / 2.0 } else { center.dist(cur_3d) };
+                let mut common = s.current_common();
+                if !s.ucs().is_world() {
+                    common.extrusion = s.ucs().z_axis;
+                }
+                vec![cadcraft_doc::Entity {
+                    handle: cadcraft_doc::Handle(0),
+                    common,
+                    kind: EntityKind::Circle(cadcraft_doc::Circle { center: *center, radius: r }),
+                }]
             }
             _ => Vec::new(),
         }
     }
 }
 
-fn finish_circle(s: &mut Session, c: Circle) -> Result<()> {
-    s.add_entity(circle(c.center, c.radius))?;
-    s.doc_mut()?.header.set_f64("CIRCLERAD", c.radius);
+fn finish_circle(s: &mut Session, center_wcs: Vec3, radius: f64) -> Result<()> {
+    let ucs = s.ucs();
+    let mut ent = cadcraft_doc::Entity::new(
+        s.doc_mut()?.new_handle(),
+        cadcraft_doc::EntityKind::Circle(cadcraft_doc::Circle {
+            center: center_wcs,
+            radius,
+        }),
+    );
+    ent.common.extrusion = ucs.z_axis;
+    s.add_entity_direct(ent)?;
+    s.doc_mut()?.header.set_f64("CIRCLERAD", radius);
     Ok(())
 }
 
@@ -1675,6 +1762,7 @@ impl Interactive for TextM {
 #[derive(Default)]
 struct MTextM {
     first: Option<Vec2>,
+    first_z: f64,
     second: Option<Vec2>,
     /// Paragraphs typed so far: one per input line, an empty line ends the text (as on
     /// AutoCAD's command line and in scripts).
@@ -1730,7 +1818,15 @@ impl Interactive for MTextM {
             return Ok(Step::Continue);
         }
         match (self.first, self.boxed(), i) {
-            (None, _, Input::Point(p)) => self.first = Some(p),
+            (None, _, Input::Point3(p3)) => {
+                self.first = Some(p3.xy());
+                self.first_z = p3.z;
+            }
+            (None, _, Input::Point(p)) => {
+                self.first = Some(p);
+                self.first_z = s.effective_drawing_plane_offset();
+            }
+            (Some(_), false, Input::Point3(p3)) => self.second = Some(p3.xy()),
             (Some(_), false, Input::Point(p)) => self.second = Some(p),
             (Some(_), false, Input::Keyword(k)) => {
                 self.ask =
@@ -1741,7 +1837,9 @@ impl Interactive for MTextM {
                 if self.lines.is_empty() {
                     return Ok(Step::Done);
                 }
-                s.add_entity(EntityKind::MText(self.opts.mtext(a, self.second, self.lines.join("\\P"))))?;
+                let first3 = Vec3::new(a.x, a.y, self.first_z);
+                let second3 = self.second.map(|s| Vec3::new(s.x, s.y, self.first_z));
+                s.add_entity(EntityKind::MText(self.opts.mtext3(first3, second3, self.lines.join("\\P"))))?;
                 return Ok(Step::Done);
             }
             (_, _, Input::Enter) => return Ok(Step::Done),
@@ -1764,6 +1862,118 @@ impl Interactive for MTextM {
             }
             _ => Vec::new(),
         }
+    }
+}
+
+#[derive(Default)]
+struct Face3dM {
+    pts: Vec<Vec3>,
+    prev_c: Option<Vec3>,
+    prev_d: Option<Vec3>,
+    hidden_edges: u8,
+}
+
+impl Interactive for Face3dM {
+    fn name(&self) -> &'static str {
+        "3DFACE"
+    }
+
+    fn prompt(&self, _s: &Session) -> Prompt {
+        if self.pts.is_empty() && self.prev_c.is_some() {
+            return Prompt::new("Specify third point or [Invisible] <exit>:", Accept::POINT).kw(&["Invisible"]);
+        }
+        match self.pts.len() {
+            0 => Prompt::new("Specify first point or [Invisible]:", Accept::POINT).kw(&["Invisible"]),
+            1 => Prompt::new("Specify second point or [Invisible]:", Accept::POINT).kw(&["Invisible"]),
+            2 => Prompt::new("Specify third point or [Invisible] <exit>:", Accept::POINT).kw(&["Invisible"]),
+            _ => Prompt::new("Specify fourth point or [Invisible] <Create three-sided face>:", Accept::POINT).kw(&["Invisible"]),
+        }
+    }
+
+    fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
+        let pt_opt = match &i {
+            Input::Point3(p3) => Some(*p3),
+            Input::Point(p) => Some(s.drawing_plane().embed(*p, s.effective_drawing_plane_offset())),
+            _ => None,
+        };
+
+        if self.pts.is_empty() && self.prev_c.is_some() {
+            match &i {
+                Input::Enter | Input::Cancel => return Ok(Step::Done),
+                Input::Text(t) if t.trim().is_empty() => return Ok(Step::Done),
+                _ => {}
+            }
+            if let Some(p3) = pt_opt {
+                let p1 = self.prev_d.unwrap_or(Vec3::ZERO);
+                let p2 = self.prev_c.unwrap_or(Vec3::ZERO);
+                self.pts = vec![p1, p2, p3];
+                return Ok(Step::Continue);
+            }
+        }
+
+        match &i {
+            Input::Enter => {
+                if self.pts.len() == 3 {
+                    let p0 = self.pts.first().copied().unwrap_or(Vec3::ZERO);
+                    let p1 = self.pts.get(1).copied().unwrap_or(Vec3::ZERO);
+                    let p2 = self.pts.get(2).copied().unwrap_or(Vec3::ZERO);
+                    s.add_entity(EntityKind::Face3d(cadcraft_doc::Face3d {
+                        corners: [p0, p1, p2, p2],
+                        hidden_edges: self.hidden_edges,
+                    }))?;
+                    self.prev_c = Some(p2);
+                    self.prev_d = Some(p2);
+                    self.pts.clear();
+                    self.hidden_edges = 0;
+                    return Ok(Step::Continue);
+                }
+                return Ok(Step::Done);
+            }
+            Input::Text(t) if t.trim().is_empty() => {
+                if self.pts.len() == 3 {
+                    let p0 = self.pts.first().copied().unwrap_or(Vec3::ZERO);
+                    let p1 = self.pts.get(1).copied().unwrap_or(Vec3::ZERO);
+                    let p2 = self.pts.get(2).copied().unwrap_or(Vec3::ZERO);
+                    s.add_entity(EntityKind::Face3d(cadcraft_doc::Face3d {
+                        corners: [p0, p1, p2, p2],
+                        hidden_edges: self.hidden_edges,
+                    }))?;
+                    self.prev_c = Some(p2);
+                    self.prev_d = Some(p2);
+                    self.pts.clear();
+                    self.hidden_edges = 0;
+                    return Ok(Step::Continue);
+                }
+                return Ok(Step::Done);
+            }
+            Input::Cancel => return Ok(Step::Done),
+            _ => {}
+        }
+
+        if let Some(p3) = pt_opt {
+            self.pts.push(p3);
+            if self.pts.len() == 4 {
+                let p0 = self.pts.first().copied().unwrap_or(Vec3::ZERO);
+                let p1 = self.pts.get(1).copied().unwrap_or(Vec3::ZERO);
+                let p2 = self.pts.get(2).copied().unwrap_or(Vec3::ZERO);
+                let p3 = self.pts.get(3).copied().unwrap_or(Vec3::ZERO);
+                s.add_entity(EntityKind::Face3d(cadcraft_doc::Face3d {
+                    corners: [p0, p1, p2, p3],
+                    hidden_edges: self.hidden_edges,
+                }))?;
+                self.prev_c = Some(p2);
+                self.prev_d = Some(p3);
+                self.pts.clear();
+                self.hidden_edges = 0;
+            }
+            return Ok(Step::Continue);
+        }
+
+        Ok(Step::Continue)
+    }
+
+    fn preview(&self, _s: &Session, _c: Vec2) -> Vec<EntityKind> {
+        Vec::new()
     }
 }
 

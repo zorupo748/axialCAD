@@ -1584,16 +1584,54 @@ impl Interactive for XlineM2 {
 // RECTANG with Area / Dimensions / Rotation / Width / Elevation / Thickness
 // =====================================================================================
 
-fn rect_kind(first: Vec2, w: f64, h: f64, rot: f64, fillet: f64, chamfer: (f64, f64), width: f64, elevation: f64) -> EntityKind {
+fn rect_kind_ucs(
+    ucs: &cadcraft_geom::UcsFrame,
+    first: Vec2,
+    w: f64,
+    h: f64,
+    rot: f64,
+    fillet: f64,
+    chamfer: (f64, f64),
+    width: f64,
+    elevation: f64,
+) -> (EntityKind, Vec3) {
     let local = rect_with_corners(Vec2::ZERO, Vec2::new(w, h), fillet, chamfer);
-    let vs = local.into_iter().map(|v| PolyVertex { p: first + v.p.rotate(rot), ..v }).collect();
-    let mut k = lwpoly(vs, true);
-    if let EntityKind::LwPolyline(pl) = &mut k {
-        pl.const_width = width.max(0.0);
-        pl.elevation = elevation;
+    if ucs.is_world() {
+        let vs = local.into_iter().map(|v| PolyVertex { p: first + v.p.rotate(rot), ..v }).collect();
+        let mut k = lwpoly(vs, true);
+        if let EntityKind::LwPolyline(pl) = &mut k {
+            pl.const_width = width.max(0.0);
+            pl.elevation = elevation;
+        }
+        (k, Vec3::Z)
+    } else {
+        let normal = ucs.z_axis;
+        let mut ocs_elevation = 0.0;
+        let vs = local
+            .into_iter()
+            .map(|v| {
+                let loc_2d = first + v.p.rotate(rot);
+                let loc_3d = Vec3::new(loc_2d.x, loc_2d.y, elevation);
+                let wcs_3d = ucs.to_world(loc_3d);
+                let ocs_3d = cadcraft_geom::Mat4::wcs_to_ocs(normal, wcs_3d);
+                ocs_elevation = ocs_3d.z;
+                PolyVertex {
+                    p: ocs_3d.xy(),
+                    bulge: v.bulge,
+                    start_width: v.start_width,
+                    end_width: v.end_width,
+                }
+            })
+            .collect();
+        let mut k = lwpoly(vs, true);
+        if let EntityKind::LwPolyline(pl) = &mut k {
+            pl.const_width = width.max(0.0);
+            pl.elevation = ocs_elevation;
+        }
+        (k, normal)
     }
-    k
 }
+
 
 /// Draws a rectangle from the JSON form: `p1` is a corner, or the centre when `center` is
 /// true, and the size comes from `p2`, `dimensions` or `area` plus `length`/`breadth`.
@@ -1643,8 +1681,8 @@ pub(crate) fn run_rectang2(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("rectang", "rectangle has no area"));
     }
     let first = if centered { a - Vec2::new(w / 2.0, h / 2.0).rotate(rot) } else { a };
-    let k = rect_kind(first, w, h, rot, fillet, ch, width, f64_or(p, "elevation", 0.0));
-    let hd = s.add_entity(k)?;
+    let (k, normal) = rect_kind_ucs(&s.ucs(), first, w, h, rot, fillet, ch, width, f64_or(p, "elevation", 0.0));
+    let hd = s.add_entity_with_extrusion(k, normal)?;
     let th = f64_or(p, "thickness", 0.0);
     if th != 0.0 {
         s.doc_mut()?.modify_entity(hd, |e| e.common.thickness = th)?;
@@ -1696,7 +1734,8 @@ impl RectM2 {
             return Err(other("The rectangle has no area."));
         }
         let first = self.origin(w, h).unwrap_or(a);
-        let hd = s.add_entity(rect_kind(first, w, h, self.rotation, self.fillet, self.chamfer, self.width, self.elevation))?;
+        let (k, normal) = rect_kind_ucs(&s.ucs(), first, w, h, self.rotation, self.fillet, self.chamfer, self.width, self.elevation);
+        let hd = s.add_entity_with_extrusion(k, normal)?;
         if self.thickness != 0.0 {
             let t = self.thickness;
             s.doc_mut()?.modify_entity(hd, |e| e.common.thickness = t)?;
@@ -1864,19 +1903,36 @@ impl Interactive for RectM2 {
                     self.make(s, w, h)
                 }
             },
+            Input::Point3(p3) => {
+                let p = s.ucs().to_local(p3).xy();
+                match self.first {
+                    None => {
+                        self.first = Some(p);
+                        Ok(Step::Continue)
+                    }
+                    Some(_) => {
+                        let (w, h) = self.other_corner(p).ok_or_else(|| other("No first corner."))?;
+                        self.make(s, w, h)
+                    }
+                }
+            }
             Input::Enter => Ok(Step::Cancel),
             _ => Ok(Step::Continue),
         }
     }
     /// The rubber-band rectangle for the cursor at `c`, mapped through the same size-and-origin
-    /// rules as the committed entity so centre mode previews where it will land.
-    fn preview(&self, _s: &Session, c: Vec2) -> Vec<EntityKind> {
+    /// rules as the committed entity, carrying its exact normal and elevation so the preview
+    /// matches where it will land spatially on the active UCS.
+    fn preview_objects(&self, s: &Session, c: Vec2) -> Vec<cadcraft_doc::Entity> {
         if self.asking.is_some() {
             return Vec::new();
         }
         match self.other_corner(c).and_then(|(w, h)| self.origin(w, h).map(|a| (a, w, h))) {
             Some((a, w, h)) if w.abs() > 1e-12 && h.abs() > 1e-12 => {
-                vec![rect_kind(a, w, h, self.rotation, self.fillet, self.chamfer, self.width, self.elevation)]
+                let (k, normal) = rect_kind_ucs(&s.ucs(), a, w, h, self.rotation, self.fillet, self.chamfer, self.width, self.elevation);
+                let mut common = s.current_common();
+                common.extrusion = normal;
+                vec![cadcraft_doc::Entity { handle: cadcraft_doc::Handle(0), common, kind: k }]
             }
             _ => Vec::new(),
         }

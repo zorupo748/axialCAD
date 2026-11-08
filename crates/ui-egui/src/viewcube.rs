@@ -615,39 +615,123 @@ fn paint_home(p: &egui::Painter, r: Rect, hot: bool) {
     p.line_segment([c + vec2(-1.2, 2.5), c + vec2(1.2, 2.5)], st);
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct UcsIconPos {
+    pub origin: Pos2,
+    pub is_at_origin: bool,
+    pub bounds: Rect,
+}
+
+pub fn ucs_icon_pos(app: &CadApp, canvas: Rect) -> UcsIconPos {
+    let ucs = app.session.ucs();
+    let margin = 50.0;
+    let safe_rect = canvas.shrink(margin);
+    let mut origin_pos = None;
+    if let Some(xf) = &app.canvas.xf {
+        let p_screen = xf.to_screen3(ucs.origin);
+        if p_screen.x.is_finite() && p_screen.y.is_finite() && safe_rect.contains(p_screen) {
+            origin_pos = Some(p_screen);
+        }
+    }
+    let (o, is_at_origin) = match origin_pos {
+        Some(p) => (p, true),
+        None => (pos2(canvas.left() + 36.0, canvas.bottom() - 34.0), false),
+    };
+    let bounds = Rect::from_center_size(o, vec2(80.0, 80.0));
+    UcsIconPos { origin: o, is_at_origin, bounds }
+}
+
+pub fn ucs_blocks_pointer(app: &CadApp, canvas: Rect, point: Pos2) -> bool {
+    if !app.ui.show_ucs_icon {
+        return false;
+    }
+    let pos_info = ucs_icon_pos(app, canvas);
+    pos_info.bounds.contains(point)
+}
+
+/// The bounding box of the UCS icon at the lower-left corner of the canvas.
+pub fn ucs_bounds(canvas: Rect) -> Rect {
+    let o = pos2(canvas.left() + 36.0, canvas.bottom() - 34.0);
+    Rect::from_min_max(o + vec2(-16.0, -90.0), o + vec2(90.0, 16.0))
+}
+
 /// The UCS icon's arms (as drawn by the canvas at the lower-left corner): the X arm and the Y arm.
 pub fn ucs_arms(canvas: Rect) -> [Rect; 2] {
     let o = pos2(canvas.left() + 36.0, canvas.bottom() - 34.0);
     [Rect::from_min_max(o + vec2(-8.0, -8.0), o + vec2(80.0, 8.0)), Rect::from_min_max(o + vec2(-8.0, -82.0), o + vec2(8.0, 8.0))]
 }
 
-/// Make the UCS icon clickable: hovering highlights it, a click (either button) opens the
-/// coordinate-system menu.
-pub fn ucs_icon(app: &mut CadApp, ui: &mut egui::Ui, canvas: Rect) {
-    let t = Tokens::get();
-    let [x, y] = ucs_arms(canvas);
-    let rx = ui.interact(x, ui.id().with("ucs_x"), Sense::click_and_drag());
-    let ry = ui.interact(y, ui.id().with("ucs_y"), Sense::click_and_drag());
-    let resp = (rx | ry).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("UCS icon: World Coordinate System");
-    if resp.hovered() {
-        let o = pos2(x.left() + 8.0, x.center().y);
-        let st = Stroke::new(2.0, t.hover);
-        let p = ui.painter_at(canvas);
-        p.line_segment([o, o + vec2(60.0, 0.0)], st);
-        p.line_segment([o, o + vec2(0.0, -60.0)], st);
+/// Make the UCS icon interactive: hovering highlights it, right-click opens the
+/// coordinate-system menu. Left-click is not consumed and passes through to the canvas.
+/// The coordinate-system menu popup for the UCS icon.
+pub fn ucs_icon(app: &mut CadApp, ui: &mut egui::Ui, canvas: Rect, secondary_clicked: bool) {
+    let pos_info = ucs_icon_pos(app, canvas);
+    let popup_id = egui::Id::new("ucs_icon_menu");
+    let pos_id = popup_id.with("pos");
+
+    if secondary_clicked {
+        let click_pos = ui.ctx().pointer_interact_pos()
+            .or_else(|| ui.ctx().pointer_hover_pos())
+            .or_else(|| ui.ctx().pointer_latest_pos())
+            .unwrap_or(pos_info.origin);
+        ui.ctx().data_mut(|d| d.insert_temp(pos_id, click_pos));
     }
-    // Opened with `Bool(true)`: a pointer-anchored popup records its position only then.
-    let open = (resp.clicked() || resp.secondary_clicked()).then_some(egui::SetOpenCommand::Bool(true));
-    ucs_menu(app, egui::Popup::menu(&resp).open_memory(open).at_pointer_fixed());
+
+    let is_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    if !is_open && !secondary_clicked {
+        ui.ctx().data_mut(|d| d.remove_temp::<Pos2>(pos_id));
+    }
+
+    let pos = ui.ctx().data(|d| d.get_temp::<Pos2>(pos_id)).unwrap_or(pos_info.origin);
+    let open = secondary_clicked.then_some(egui::SetOpenCommand::Bool(true));
+    let popup = egui::Popup::new(popup_id, ui.ctx().clone(), egui::PopupAnchor::Position(pos), ui.layer_id())
+        .kind(egui::PopupKind::Menu)
+        .layout(egui::Layout::top_down_justified(egui::Align::Min))
+        .style(egui::containers::menu::menu_style)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .open_memory(open);
+    ucs_menu(app, popup);
 }
 
-/// The coordinate-system menu: the WCS (the only coordinate system so far) and the icon switch.
+/// The coordinate-system menu: UCS 3-point, Move Origin, World, Previous, and icon switch.
 fn ucs_menu(app: &mut CadApp, popup: egui::Popup<'_>) {
     let mut hide = false;
+    let in_command = app.session.running.is_some();
+    let is_world = app.session.ucs().is_world();
+    let can_restore_prev = app.session.state().map_or(false, |st| !st.ucs_history.is_empty());
+
     popup.show(|ui| {
-        ui.radio(true, "World (WCS)").on_hover_text("CADCraft draws in the World Coordinate System; user coordinate systems aren't available yet.");
+        if in_command {
+            ui.label(
+                egui::RichText::new("Un comando está en curso. Cancele o finalice el comando para cambiar el SCP.")
+                    .color(Tokens::get().text_dim)
+                    .small(),
+            );
+            ui.separator();
+        }
+
+        ui.add_enabled_ui(!in_command, |ui| {
+            if ui.button("Definir por 3 puntos...").on_hover_text("Define un nuevo SCP mediante origen, eje X y plano XY.").clicked() {
+                app.start("ucs.3point");
+                ui.close();
+            }
+            if ui.button("Mover origen...").on_hover_text("Traslada el origen del SCP conservando su orientación.").clicked() {
+                app.start("ucs.origin");
+                ui.close();
+            }
+            ui.separator();
+            if ui.radio(is_world, "Mundo (WCS)").on_hover_text("Restaura el Sistema de Coordenadas Universal.").clicked() {
+                let _ = app.run("ucs.world", json!({}));
+                ui.close();
+            }
+            if ui.add_enabled(can_restore_prev, egui::Button::new("Previo")).on_hover_text("Restaura el SCP anterior.").clicked() {
+                let _ = app.run("ucs.previous", json!({}));
+                ui.close();
+            }
+        });
+
         ui.separator();
-        if ui.button("Hide UCS Icon").clicked() {
+        if ui.button("Ocultar icono del SCP").clicked() {
             hide = true;
             ui.close();
         }
@@ -1006,14 +1090,151 @@ mod tests {
     #[test]
     fn ucs_icon_and_wcs_pill_open_the_coordinate_system_menu() {
         let (mut app, ctx) = app_and_ctx();
-        let [x, _] = ucs_arms(canvas(&app));
-        click(&mut app, &ctx, x.center(), egui::PointerButton::Primary);
-        assert!(menu_shown(&ctx), "UCS icon menu");
-        assert!(app.session.pending_window.is_none(), "the click stayed on the icon");
+        let pos_info = ucs_icon_pos(&app, canvas(&app));
+        // Primary (left) click on UCS icon must NOT open menu; it is transparent to canvas
+        click(&mut app, &ctx, pos_info.origin, egui::PointerButton::Primary);
+        assert!(!menu_shown(&ctx), "UCS icon must not open menu on primary click");
+
+        // Secondary (right) click on UCS icon opens menu
+        click(&mut app, &ctx, pos_info.origin, egui::PointerButton::Secondary);
+        assert!(menu_shown(&ctx), "UCS icon menu on secondary click");
+
+        // Close menu before testing the WCS pill
+        frame(&mut app, &ctx, vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::default() }]);
+        frame(&mut app, &ctx, Vec::new());
+        assert!(!menu_shown(&ctx), "menu closed after Escape");
+
         let l = Layout::new(canvas(&app));
         click(&mut app, &ctx, l.pill.center(), egui::PointerButton::Primary);
         assert!(menu_shown(&ctx), "WCS menu");
         assert!(app.session.pending_window.is_none());
+    }
+
+    #[test]
+    fn ucs_icon_secondary_click_does_not_submit_enter_to_active_command() {
+        let (mut app, ctx) = app_and_ctx();
+        app.start("line");
+        assert!(app.session.running.is_some(), "line command is running");
+
+        let pos_info = ucs_icon_pos(&app, canvas(&app));
+        click(&mut app, &ctx, pos_info.origin, egui::PointerButton::Secondary);
+
+        assert!(app.session.running.is_some(), "line command is still active");
+        assert_eq!(app.session.running.as_ref().map(|r| r.id.as_str()), Some("line"));
+        assert!(menu_shown(&ctx), "UCS menu is shown");
+    }
+
+    #[test]
+    fn ucs_icon_primary_click_is_transparent_and_submits_point_to_active_command() {
+        let (mut app, ctx) = app_and_ctx();
+        app.start("line");
+        assert!(app.session.running.is_some(), "line command is running");
+        let initial_prompt = app.session.current_prompt().map(|p| p.message);
+
+        let pos_info = ucs_icon_pos(&app, canvas(&app));
+        click(&mut app, &ctx, pos_info.origin, egui::PointerButton::Primary);
+
+        assert!(!menu_shown(&ctx), "UCS menu is not shown on primary click");
+        assert!(app.session.running.is_some(), "line command is still active");
+        let next_prompt = app.session.current_prompt().map(|p| p.message);
+        assert_ne!(initial_prompt, next_prompt, "primary click over UCS icon submitted point to active command");
+    }
+
+    #[test]
+    fn ucs_icon_menu_position_remains_fixed_while_pointer_moves_and_options_receive_click() {
+        let (mut app, ctx) = app_and_ctx();
+        let pos_info = ucs_icon_pos(&app, canvas(&app));
+        let click_pt = pos_info.origin;
+
+        // 1. Right click on UCS icon opens the menu
+        click(&mut app, &ctx, click_pt, egui::PointerButton::Secondary);
+        assert!(menu_shown(&ctx), "UCS icon menu opened");
+        let popup_id = egui::Id::new("ucs_icon_menu");
+        let initial_rect = ctx.memory(|m| m.area_rect(popup_id)).expect("area_rect must exist");
+
+        // 2 & 3. Release button and move pointer across several frames
+        frame(&mut app, &ctx, vec![egui::Event::PointerMoved(pos2(click_pt.x + 20.0, click_pt.y + 10.0))]);
+        let rect2 = ctx.memory(|m| m.area_rect(popup_id)).expect("area_rect must exist frame 2");
+        assert_eq!(initial_rect, rect2, "Menu position must remain fixed after pointer move 1");
+
+        frame(&mut app, &ctx, vec![egui::Event::PointerMoved(pos2(click_pt.x + 50.0, click_pt.y + 30.0))]);
+        let rect3 = ctx.memory(|m| m.area_rect(popup_id)).expect("area_rect must exist frame 3");
+        assert_eq!(initial_rect, rect3, "Menu position must remain fixed after pointer move 2");
+
+        // Moving outside icon bounds into menu area does NOT close menu
+        assert!(menu_shown(&ctx), "Menu remains open while moving cursor inside/towards menu");
+
+        // 4. Click an enabled option (e.g. "Definir por 3 puntos...")
+        let item_click = initial_rect.min + vec2(40.0, 15.0);
+        click(&mut app, &ctx, item_click, egui::PointerButton::Primary);
+
+        // Verify the action executed: "ucs.3point" is running
+        assert!(app.session.running.as_ref().is_some_and(|r| r.id == "ucs.3point"), "Definir por 3 puntos was selected and started command");
+        // Verify menu closed after selection
+        assert!(!menu_shown(&ctx), "Menu closed after clicking an option");
+    }
+
+    #[test]
+    fn ucs_icon_menu_closes_on_escape_and_on_click_outside_without_submitting_points() {
+        let (mut app, ctx) = app_and_ctx();
+        app.start("line");
+        assert!(app.session.running.is_some(), "line is running");
+        let prompt_before = app.session.current_prompt().map(|p| p.message);
+
+        let pos_info = ucs_icon_pos(&app, canvas(&app));
+
+        // 1. Open menu during active LINE command
+        click(&mut app, &ctx, pos_info.origin, egui::PointerButton::Secondary);
+        assert!(menu_shown(&ctx), "Menu is open during line command");
+
+        // 2. Escape closes menu without cancelling active command
+        frame(&mut app, &ctx, vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::default() }]);
+        frame(&mut app, &ctx, vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::default() }]);
+        assert!(!menu_shown(&ctx), "Menu closed after Escape");
+        assert!(app.session.running.is_some(), "line command is still running after closing menu with Escape");
+        assert_eq!(app.session.current_prompt().map(|p| p.message), prompt_before, "prompt unchanged");
+
+        // 3. Open menu again
+        click(&mut app, &ctx, pos_info.origin, egui::PointerButton::Secondary);
+        assert!(menu_shown(&ctx), "Menu re-opened");
+
+        // 4. Click outside menu on canvas (far from menu and icon)
+        let canvas_center = canvas(&app).center();
+        click(&mut app, &ctx, canvas_center, egui::PointerButton::Primary);
+
+        // Verify menu closed AND click did not submit accidental point to LINE
+        assert!(!menu_shown(&ctx), "Menu closed on click outside");
+        assert!(app.session.running.is_some(), "line command is still active");
+        assert_eq!(app.session.current_prompt().map(|p| p.message), prompt_before, "click outside dismissed menu without submitting a point to LINE");
+
+        // 5. Subsequent right-click opens at new position
+        let new_click_pt = pos_info.origin + vec2(15.0, 10.0);
+        click(&mut app, &ctx, new_click_pt, egui::PointerButton::Secondary);
+        assert!(menu_shown(&ctx), "Menu opened at new click position");
+        let new_rect = ctx.memory(|m| m.area_rect(egui::Id::new("ucs_icon_menu"))).expect("new area_rect");
+        assert_ne!(new_rect.min, pos_info.origin, "New opening uses the new click position");
+    }
+
+    #[test]
+    fn ucs_icon_menu_works_identically_when_origin_is_off_screen() {
+        let (mut app, ctx) = app_and_ctx();
+        app.session.pan_step(10000.0, 10000.0, 1.0).unwrap();
+        frame(&mut app, &ctx, Vec::new());
+
+        let pos_info = ucs_icon_pos(&app, canvas(&app));
+        assert!(!pos_info.is_at_origin, "UCS icon must use off-screen indicator position at lower-left corner");
+
+        click(&mut app, &ctx, pos_info.origin, egui::PointerButton::Secondary);
+        assert!(menu_shown(&ctx), "Menu opens for off-screen origin icon");
+        let initial_rect = ctx.memory(|m| m.area_rect(egui::Id::new("ucs_icon_menu"))).expect("area_rect");
+
+        frame(&mut app, &ctx, vec![egui::Event::PointerMoved(pos_info.origin + vec2(30.0, -20.0))]);
+        let rect2 = ctx.memory(|m| m.area_rect(egui::Id::new("ucs_icon_menu"))).expect("area_rect after move");
+        assert_eq!(initial_rect, rect2, "Menu position remains fixed for off-screen icon");
+
+        frame(&mut app, &ctx, vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::default() }]);
+        frame(&mut app, &ctx, Vec::new());
+        assert!(!menu_shown(&ctx), "Menu closed on Escape");
     }
 
     #[test]

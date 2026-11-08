@@ -161,6 +161,23 @@ pub struct Circle {
     pub center: Vec3,
     pub radius: f64,
 }
+
+impl Circle {
+    /// Sample 3D points along the perimeter of this circle in WCS given its normal (extrusion).
+    pub fn sample_points_3d(&self, extrusion: Vec3, count: usize) -> Vec<Vec3> {
+        let n = count.max(12);
+        let mat = cadcraft_geom::Mat4::ocs(extrusion);
+        let ax = Vec3::new(mat.m[0][0], mat.m[1][0], mat.m[2][0]);
+        let ay = Vec3::new(mat.m[0][1], mat.m[1][1], mat.m[2][1]);
+        let step = cadcraft_geom::TAU / n as f64;
+        (0..n)
+            .map(|i| {
+                let a = step * i as f64;
+                self.center + ax * (self.radius * a.cos()) + ay * (self.radius * a.sin())
+            })
+            .collect()
+    }
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Arc {
     pub center: Vec3,
@@ -188,6 +205,18 @@ pub struct LwPolyline {
     /// Polyline linetype generation (PLINEGEN).
     #[serde(default)]
     pub plinegen: bool,
+}
+
+impl LwPolyline {
+    /// Return the 3D vertices of this polyline in WCS given its plane normal (extrusion).
+    pub fn vertices_3d(&self, extrusion: Vec3) -> Vec<Vec3> {
+        if extrusion.near(Vec3::Z, 1e-9) && self.elevation.abs() < 1e-9 {
+            self.vertices.iter().map(|v| Vec3::new(v.p.x, v.p.y, 0.0)).collect()
+        } else {
+            let mat = cadcraft_geom::Mat4::ocs(extrusion);
+            self.vertices.iter().map(|v| mat.apply(Vec3::new(v.p.x, v.p.y, self.elevation))).collect()
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Polyline3d {

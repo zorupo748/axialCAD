@@ -1181,6 +1181,8 @@ fn entity_parts(b: &mut Builder, ctx: &Ctx, e: &Entity) {
                 stroke(b, &pl.tessellate(tol));
             }
         }
+        EntityKind::LwPolyline(p)
+            if b.opts.skip_spatial && (p.elevation.abs() > 1e-6 || !e.common.extrusion.near(cadcraft_geom::Vec3::Z, 1e-6)) => {}
         EntityKind::LwPolyline(p) => {
             let pl = Polyline { vertices: p.vertices.clone(), closed: p.closed };
             if p.plinegen || lt.is_none() {
@@ -1289,6 +1291,10 @@ fn entity_parts(b: &mut Builder, ctx: &Ctx, e: &Entity) {
             }
         }
         EntityKind::Line(l) if b.opts.skip_spatial && (l.a.z != 0.0 || l.b.z != 0.0) => {}
+        EntityKind::Circle(c)
+            if b.opts.skip_spatial && (c.center.z.abs() > 1e-6 || !e.common.extrusion.near(cadcraft_geom::Vec3::Z, 1e-6)) => {}
+        EntityKind::Arc(a)
+            if b.opts.skip_spatial && (a.center.z.abs() > 1e-6 || !e.common.extrusion.near(cadcraft_geom::Vec3::Z, 1e-6)) => {}
         kind => {
             for prim in kind.prims() {
                 match prim {

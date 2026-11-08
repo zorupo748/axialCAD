@@ -1149,13 +1149,28 @@ pub fn snap_3d_endpoints(
                     }
                 }
             }
-            EntityKind::Circle(c) if osmode & mode::CEN != 0 => {
-                let p = c.center;
-                let p_screen = cam.project_point(p);
-                if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
-                    let dist = (p_screen - cursor_q).len();
-                    if dist <= aperture_cam {
-                        candidates.push((dist, ent.handle, 0, p, mode::CEN, "Center"));
+            EntityKind::Circle(c) => {
+                if osmode & mode::CEN != 0 {
+                    let p = c.center;
+                    let p_screen = cam.project_point(p);
+                    if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
+                        let dist = (p_screen - cursor_q).len();
+                        if dist <= aperture_cam {
+                            candidates.push((dist, ent.handle, 0, p, mode::CEN, "Center"));
+                        }
+                    }
+                }
+                if osmode & mode::QUA != 0 {
+                    let (ax, ay, _) = cadcraft_geom::Mat4::ocs_basis(ent.common.extrusion);
+                    for (q_idx, dir) in [ax, -ax, ay, -ay].into_iter().enumerate() {
+                        let p = c.center + dir * c.radius;
+                        let p_screen = cam.project_point(p);
+                        if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
+                            let dist = (p_screen - cursor_q).len();
+                            if dist <= aperture_cam {
+                                candidates.push((dist, ent.handle, (1 + q_idx) as u8, p, mode::QUA, "Quadrant"));
+                            }
+                        }
                     }
                 }
             }
@@ -1170,12 +1185,11 @@ pub fn snap_3d_endpoints(
                 }
             }
             EntityKind::LwPolyline(pl) => {
-                let elev = pl.elevation;
-                let n = pl.vertices.len();
+                let v3d = pl.vertices_3d(ent.common.extrusion);
+                let n = v3d.len();
                 if n > 0 {
                     if osmode & mode::END != 0 {
-                        for (idx, v) in pl.vertices.iter().enumerate() {
-                            let p = Vec3::new(v.p.x, v.p.y, elev);
+                        for (idx, &p) in v3d.iter().enumerate() {
                             let p_screen = cam.project_point(p);
                             if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
                                 let dist = (p_screen - cursor_q).len();
@@ -1188,9 +1202,9 @@ pub fn snap_3d_endpoints(
                     if osmode & mode::MID != 0 && n >= 2 {
                         let seg_count = if pl.closed { n } else { n - 1 };
                         for i in 0..seg_count {
-                            let v1 = pl.vertices[i].p;
-                            let v2 = pl.vertices[(i + 1) % n].p;
-                            let mid = Vec3::new((v1.x + v2.x) * 0.5, (v1.y + v2.y) * 0.5, elev);
+                            let p1 = v3d[i];
+                            let p2 = v3d[(i + 1) % n];
+                            let mid = (p1 + p2) * 0.5;
                             let p_screen = cam.project_point(mid);
                             if (p_screen.x - cursor_q.x).abs() <= aperture_cam && (p_screen.y - cursor_q.y).abs() <= aperture_cam {
                                 let dist = (p_screen - cursor_q).len();

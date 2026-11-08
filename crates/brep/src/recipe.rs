@@ -24,6 +24,11 @@ impl EvaluateRecipe for Recipe {
             let solid = match &feature.op {
                 FeatureOp::Box { origin, size } => BrepSolid::box_dimensions(*origin, *size)?,
                 FeatureOp::Cylinder { center, radius, height, axis } => BrepSolid::cylinder(*center, *radius, *height, *axis)?,
+                FeatureOp::Sphere { .. } => {
+                    return Err(BrepError::InvalidGeometry(
+                        "sphere feature does not use B-Rep kernel evaluation; represented as evaluated mesh".into(),
+                    ));
+                }
                 FeatureOp::Extrusion { profile, direction } => BrepSolid::extrude(profile, *direction)?,
                 FeatureOp::Boolean { kind, target_id, tool_id, .. } => {
                     let target = solids

@@ -171,6 +171,12 @@ fn services() -> Services {
             let dialog = if dir.is_empty() || !std::path::Path::new(dir).is_dir() { dialog } else { dialog.set_directory(dir) };
             dialog.pick_file().map(|p| p.to_string_lossy().to_string())
         })),
+        // SCRIPT: script files only, starting where the last one was loaded from.
+        pick_script: Some(Box::new(|dir: &str| {
+            let dialog = rfd::FileDialog::new().add_filter(i18n::t("Script Files (SCR)"), &["scr"]).add_filter(i18n::t("All files"), &["*"]);
+            let dialog = if dir.is_empty() || !std::path::Path::new(dir).is_dir() { dialog } else { dialog.set_directory(dir) };
+            dialog.pick_file().map(|p| p.to_string_lossy().to_string())
+        })),
         trash_file: Some(Box::new(desktop_trash_file)),
         no_file_system: false,
     }

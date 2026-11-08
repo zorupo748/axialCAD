@@ -36,8 +36,40 @@ type Action = Option<(&'static str, Value)>;
 pub fn dialog(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
     let action = window(app, ctx, open);
     if let Some((cmd, p)) = action {
-        // Errors are echoed on the command line by `run`.
-        let _ = app.run(cmd, p);
+        let is_load = cmd == "stylesmanager" && p.get("action").and_then(Value::as_str) == Some("load");
+        let load_path = if is_load { p.get("path").and_then(Value::as_str).map(str::to_string) } else { None };
+        match app.run(cmd, p) {
+            Ok(res) => {
+                if cmd == "stylesmanager" {
+                    if let Some(n) = res.get("name").and_then(Value::as_str) {
+                        set_temp(ctx, "pstyle_sel", n.to_string());
+                        if is_load {
+                            let msg = format!("Tabla {n} importada correctamente");
+                            set_temp(ctx, "pstyle_banner", Some((true, msg.clone())));
+                            app.set_status(&msg);
+                            app.session.echo(&msg);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if is_load {
+                    let file_str = load_path.as_deref().unwrap_or("");
+                    let file_name = std::path::Path::new(file_str).file_name().and_then(|f| f.to_str()).unwrap_or(file_str);
+                    let err_msg = if file_name.is_empty() {
+                        format!("Error al importar tabla de estilos: {e}")
+                    } else {
+                        format!("Error al importar tabla de estilos ({file_name}): {e}")
+                    };
+                    set_temp(ctx, "pstyle_banner", Some((false, err_msg.clone())));
+                    app.set_status(&err_msg);
+                    app.session.echo(&err_msg);
+                } else {
+                    app.set_status(e.to_string());
+                    app.session.echo(e.to_string());
+                }
+            }
+        }
     }
 }
 
@@ -86,10 +118,26 @@ fn window(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Action {
             if ui.button(crate::tl!("New STB")).clicked() {
                 action = Some(("stylesmanager", json!({ "action": "new", "name": "new.stb" })));
             }
+            if ui.button(crate::tl!("Import JSON...")).on_hover_text(crate::tl!("Import a CADcraft plot style table (.json) into the drawing")).clicked() {
+                if let Some(pick) = app.services.pick_open.as_ref() {
+                    if let Some(path) = pick(None) {
+                        action = Some(("stylesmanager", json!({ "action": "load", "path": path })));
+                    }
+                }
+            }
             if ui.add_enabled(in_drawing, egui::Button::new(crate::tl!("Delete"))).clicked() {
                 action = Some(("stylesmanager", json!({ "action": "delete", "name": sel })));
             }
         });
+        if let Some((ok, msg)) = temp::<Option<(bool, String)>>(ctx, "pstyle_banner").flatten() {
+            let color = if ok { egui::Color32::from_rgb(60, 180, 75) } else { egui::Color32::from_rgb(220, 50, 50) };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&msg).color(color));
+                if ui.small_button("×").clicked() {
+                    set_temp(ctx, "pstyle_banner", Option::<(bool, String)>::None);
+                }
+            });
+        }
         if let Some((name, current, show)) = &layout {
             ui.horizontal(|ui| {
                 ui.label(

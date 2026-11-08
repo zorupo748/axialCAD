@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::machines::SelectRun;
 use super::*;
-use crate::{Result, Session};
+use crate::{Accept, Input, Interactive, Prompt, Result, Session, Step};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -22,8 +22,8 @@ pub fn specs() -> Vec<CommandSpec> {
             .params("{name, on?, frozen?, locked?, plot?, color?, linetype?, lineweight?, transparency?, description?, newVpFreeze?, plotStyle? (named plot style), newName?}"),
         CommandSpec::new("layer.current", "Make Current", run_current)
             .menu(&["Format", "Layer Tools", "Make Current"])
-            .alias(&["clayer"])
-            .params("{name}"),
+            .params("{name}")
+            .interactive(|_| Ok(Box::new(LayerCurrentM::default()))),
         CommandSpec::new("layer.delete", "Delete Layer", run_delete).params("{name}"),
         CommandSpec::new("laymcur", "Make Object's Layer Current", run_laymcur).params("{handles?}"),
         CommandSpec::new("laymch", "Layer Match", run_laymch).menu(&["Format", "Layer Tools", "Layer Match"]).params("{handles?, layer}"),
@@ -274,7 +274,39 @@ fn run_current(s: &mut Session, p: &Value) -> Result<Value> {
     ok()
 }
 
-fn prev_push(d: &mut cadcraft_doc::Drawing) {
+#[derive(Default)]
+struct LayerCurrentM;
+
+impl Interactive for LayerCurrentM {
+    fn name(&self) -> &'static str {
+        "LAYER.CURRENT"
+    }
+    fn prompt(&self, s: &Session) -> Prompt {
+        let cur = s.doc().map(|d| d.header.str("CLAYER", "0")).unwrap_or_else(|_| "0".into());
+        Prompt::new("Enter layer name to make current", Accept { number: true, ..Accept::TEXT }).default(cur)
+    }
+    fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
+        match i {
+            Input::Enter | Input::Cancel => Ok(Step::Done),
+            Input::Text(t) => {
+                let name = t.trim();
+                if name.is_empty() {
+                    return Ok(Step::Done);
+                }
+                match s.execute("layer.current", &json!({ "name": name })) {
+                    Ok(_) => Ok(Step::Done),
+                    Err(e) => {
+                        s.echo(e.to_string());
+                        Ok(Step::Continue)
+                    }
+                }
+            }
+            _ => Ok(Step::Continue),
+        }
+    }
+}
+
+pub(crate) fn prev_push(d: &mut cadcraft_doc::Drawing) {
     let snap = serde_json::to_string(&d.layers).unwrap_or_default();
     d.header.set_str("CADCRAFT_LAYERP", &snap);
 }

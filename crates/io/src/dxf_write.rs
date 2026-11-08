@@ -292,6 +292,9 @@ const HEADER_VARS: &[(&str, i32)] = &[
     ("INSUNITS", 70),
     ("MEASUREMENT", 70),
     ("PSLTSCALE", 70),
+    ("UCSORG", -3),
+    ("UCSXDIR", -3),
+    ("UCSYDIR", -3),
 ];
 
 /// The current dimension style's variables as header variables (`$DIMTXT`, `$DIMDEC`…), after
@@ -644,7 +647,13 @@ fn entity(w: &mut W, d: &Drawing, e: &Entity, owner: &str, paper: bool, cx: &Ctx
             w.s(0, "CIRCLE");
             common(w, e, owner, paper, "AcDbCircle");
             thickness(w, e);
-            w.p(10, c.center);
+            if e.common.extrusion.near(Vec3::Z, 1e-9) {
+                w.p(10, c.center);
+            } else {
+                let ocs_center = cadcraft_geom::Mat4::wcs_to_ocs(e.common.extrusion, c.center);
+                w.p(10, ocs_center);
+                w.p(210, e.common.extrusion);
+            }
             w.f(40, c.radius);
         }
         EntityKind::Arc(a) => {
@@ -678,6 +687,9 @@ fn entity(w: &mut W, d: &Drawing, e: &Entity, owner: &str, paper: bool, cx: &Ctx
                 w.f(38, p.elevation);
             }
             thickness(w, e);
+            if !e.common.extrusion.near(Vec3::Z, 1e-9) {
+                w.p(210, e.common.extrusion);
+            }
             for v in &p.vertices {
                 w.p2(10, v.p);
                 if v.start_width != 0.0 || v.end_width != 0.0 {

@@ -254,6 +254,9 @@ impl Interactive for SetvarM {
                 }
                 Err(e) => {
                     s.echo(e.to_string());
+                    if s.in_script {
+                        return Err(e);
+                    }
                     Ok(Step::Continue)
                 }
             },

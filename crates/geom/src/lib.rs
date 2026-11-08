@@ -17,10 +17,12 @@ mod nurbs;
 pub mod region;
 mod spline;
 mod spline_fit;
+mod ucs;
 mod vec;
 
 pub use bounds::Bounds2;
 pub use camera::{Axis3D, DrawingPlane, MAX_ORBIT_ELEVATION, OrbitCamera};
+pub use ucs::UcsFrame;
 pub use curve::{
     Arc, Circle, Ellipse, Line, PolyVertex, Polyline, Segment, arc_to_bulge, bulge_to_arc, point_in_polygon, polygon_centroid, shoelace,
     validate_simple_polygon,

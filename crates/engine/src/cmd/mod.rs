@@ -19,7 +19,7 @@ mod griphot;
 pub(crate) mod groups;
 pub(crate) mod hatch;
 mod inquiry;
-mod layer;
+pub(crate) mod layer;
 mod layout;
 mod lisp;
 mod mleader_content;
@@ -44,6 +44,7 @@ mod tolerance;
 mod trimextend;
 mod txt2mtxt;
 pub use txt2mtxt::Txt2MtxtOptions;
+pub(crate) mod ucs;
 pub mod solids;
 mod utility;
 mod view;
@@ -211,6 +212,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(lisp::specs());
         v.extend(solids::specs());
         v.extend(plane::specs());
+        v.extend(ucs::specs());
         v
     })
 }
@@ -326,6 +328,9 @@ pub fn point3_value(v: &Value) -> Option<Vec3> {
 #[allow(dead_code)]
 pub(crate) fn point3_param(p: &Value, key: &str) -> Option<Vec3> {
     p.get(key).and_then(point3_value)
+}
+pub(crate) fn point3_req(cmd: &str, p: &Value, key: &str) -> Result<Vec3> {
+    point3_param(p, key).ok_or_else(|| bad(cmd, format!("`{key}` ([x, y, z]) is required")))
 }
 pub(crate) fn points3_param(p: &Value, key: &str) -> Option<Vec<Vec3>> {
     p.get(key)?.as_array()?.iter().map(point3_value).collect()
