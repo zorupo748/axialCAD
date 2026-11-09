@@ -33,7 +33,7 @@
 	A valid cursor position is required for direct distance input.	Se requiere una posición válida del cursor para introducir una distancia directa.
 	A variable name starts with a letter and has only letters, digits and _	El nombre de una variable empieza por una letra y solo lleva letras, dígitos y _
 	About	Acerca de
-	About CADCraft	Acerca de CADCraft
+	About axialCAD	Acerca de axialCAD
 	Absolute	Absolutas
 	Active drawing plane: {plane}.	Plano de dibujo activo: {plane}.
 	Add Current Scale	Añadir escala actual
@@ -116,9 +116,9 @@
 	ByBlock	PorBloque
 	ByColor	PorColor
 	ByLayer	Por capa
-	CADCraft	CADCraft
-	CADCraft Help	Ayuda de CADCraft
-	CADCraft keeps these preferences, object snap modes and drafting toggles for your user account and restores them when it starts.	CADCraft guarda estas preferencias, los modos de referencia a objetos y los ajustes de dibujo para tu cuenta de usuario y los restaura al iniciarse.
+	axialCAD	axialCAD
+	axialCAD Help	Ayuda de axialCAD
+	axialCAD keeps these preferences, object snap modes and drafting toggles for your user account and restores them when it starts.	axialCAD guarda estas preferencias, los modos de referencia a objetos y los ajustes de dibujo para tu cuenta de usuario y los restaura al iniciarse.
 	Cancel	Cancelar
 	Cartesian (x, y)	Cartesianas (x, y)
 	Center	Centro
@@ -501,8 +501,6 @@
 	Jogged	Con recodo
 	Jogged Linear	Lineal con recodo
 	Join	Unir
-	Join the ArtCraft Discord…	Únete al Discord de ArtCraft…
-	Join us on Discord	Únete a nosotros en Discord
 	Keep the system cursor visible over the drawing area	Mantener visible el cursor del sistema sobre el área de dibujo
 	Language	Idioma
 	Largest array	Matriz más grande
@@ -661,7 +659,6 @@
 	Offset	Desfase
 	On	Activado
 	On/Off	Activar/desactivar
-	One of the Crafting Apps by the ArtCraft team and community.	Una de las Crafting Apps del equipo y la comunidad de ArtCraft.
 	Only in this drawing: {n}	Solo en este dibujo: {n}
 	Only in {name}: {n}	Solo en {name}: {n}
 	Open	Abrir
@@ -787,7 +784,7 @@
 	Thaw Layer	Reutilizar capa
 	The aperture is how near the cursor must come to a point for an object snap to find it.	La apertura indica cuánto debe acercarse el cursor a un punto para que la referencia a objetos lo encuentre.
 	The camera ray is parallel to global Z=0; orbit the view or choose Free.	El rayo de la cámara es paralelo a Z=0 global; orbite la vista o elija Punto libre.
-	The file is currently open in CADcraft. Close it first before moving to trash.	El archivo está abierto en CADcraft. Ciérrelo antes de moverlo a la papelera.
+	The file is currently open in axialCAD. Close it first before moving to trash.	El archivo está abierto en axialCAD. Ciérrelo antes de moverlo a la papelera.
 	Time-sensitive right-click: a quick click is Enter, holding opens the menu	Clic derecho según duración: un clic rápido equivale a Intro; mantenerlo abre el menú
 	To	A
 	Tolerance...	Tolerancia...
@@ -859,7 +856,7 @@
 	Quick Select Properties	Propiedades de selección rápida
 	Quick Select...	Selección rápida...
 	QuickCalc	Calculadora rápida
-	Quit CADCraft	Salir de CADCraft
+	Quit axialCAD	Salir de axialCAD
 	Radius	Radio
 	Raster Image	Imagen ráster
 	Ray	Semirrecta
@@ -1297,7 +1294,7 @@
 @plural	{n} contributor	{n} colaborador|{n} colaboradores
 	Drawing as bytes	Dibujo como bytes
 	Services	Servicios
-	Hide CADCraft	Ocultar CADCraft
+	Hide axialCAD	Ocultar axialCAD
 	Hide Others	Ocultar otros
 	Accessibility	Accesibilidad
 	Show System Cursor	Mostrar cursor del sistema
@@ -1334,3 +1331,4 @@
 	Double	Cruzado
 	Diagonal 45° - separación 4	Diagonal 45° - separación 4
 	Diagonal 45° Hatch	Sombreado diagonal 45°
+	axialCAD is an independent modified version based on CADCraft, originally developed by the ArtCraft team and contributors. Not affiliated with or endorsed by ArtCraft.	axialCAD es una versión modificada e independiente basada en CADCraft, desarrollado originalmente por el equipo ArtCraft y sus colaboradores. No está afiliada ni respaldada por ArtCraft.

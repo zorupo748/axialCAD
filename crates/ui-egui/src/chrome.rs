@@ -128,13 +128,13 @@ pub fn title_and_toolbar(app: &mut CadApp, ui: &mut egui::Ui) {
             qat_w += 16.0;
         }
 
-        // 3. Centered Title: CADCraft - [DocumentName][*]
+        // 3. Centered Title: axialCAD - [DocumentName][*]
         let (title_text, dirty) = match app.session.state() {
             Ok(st) if !app.ui.start_tab => {
                 let name = if st.title.contains('.') { st.title.clone() } else { format!("{}.dwg", st.title) };
-                (format!("CADCraft - {name}"), st.is_dirty())
+                (format!("axialCAD - {name}"), st.is_dirty())
             }
-            _ => (format!("CADCraft - {}", crate::tl!("Start")), false),
+            _ => (format!("axialCAD - {}", crate::tl!("Start")), false),
         };
         let mark = if dirty { "*" } else { "" };
         let full_title = format!("{title_text}{mark}");
@@ -996,7 +996,7 @@ pub fn start_page(app: &mut CadApp, ui: &mut egui::Ui) {
     p.rect_filled(Rect::from_min_max(pos2(left.right(), r.top()), r.max), 0.0, t.chrome);
 
     // Left branding
-    p.text(pos2(left.left() + 34.0, left.top() + 70.0), egui::Align2::LEFT_CENTER, crate::tl!("CADCraft"), egui::FontId::proportional(28.0), t.text);
+    p.text(pos2(left.left() + 34.0, left.top() + 70.0), egui::Align2::LEFT_CENTER, crate::tl!("axialCAD"), egui::FontId::proportional(28.0), t.text);
     p.text(
         pos2(left.left() + 34.0, left.top() + 98.0),
         egui::Align2::LEFT_CENTER,
@@ -1415,7 +1415,7 @@ pub fn trash_confirmation_dialog(app: &mut CadApp, ctx: &egui::Context) {
             ui.set_min_width(380.0);
             if pending.is_open_in_cadcraft {
                 ui.label(
-                    egui::RichText::new(crate::tl!("The file is currently open in CADcraft. Close it first before moving to trash."))
+                    egui::RichText::new(crate::tl!("The file is currently open in axialCAD. Close it first before moving to trash."))
                         .color(t.text_dim),
                 );
                 ui.add_space(8.0);

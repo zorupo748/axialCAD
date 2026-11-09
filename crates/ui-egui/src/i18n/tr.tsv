@@ -49,7 +49,7 @@
 	A drawing opened from a file keeps that file's format.	Bir dosyadan açılan çizim o dosyanın biçimini korur.
 	A variable name starts with a letter and has only letters, digits and _	Değişken adı bir harfle başlar ve yalnızca harf, rakam ve _ içerir
 	About	Hakkında
-	About CADCraft	CADCraft Hakkında
+	About axialCAD	axialCAD Hakkında
 	Absolute	Mutlak
 	Accessibility	Erişilebilirlik
 	Add	Ekle
@@ -138,9 +138,9 @@
 	ByBlock	BloğaGöre
 	ByColor	RengeGöre
 	ByLayer	KatmanaGöre
-	CADCraft	CADCraft
-	CADCraft Help	CADCraft Yardımı
-	CADCraft keeps these preferences, object snap modes and drafting toggles for your user account and restores them when it starts.	CADCraft bu tercihleri, nesne kenetleme kiplerini ve çizim seçeneklerini kullanıcı hesabınız için saklar ve açılışta geri yükler.
+	axialCAD	axialCAD
+	axialCAD Help	axialCAD Yardımı
+	axialCAD keeps these preferences, object snap modes and drafting toggles for your user account and restores them when it starts.	axialCAD bu tercihleri, nesne kenetleme kiplerini ve çizim seçeneklerini kullanıcı hesabınız için saklar ve açılışta geri yükler.
 	Calibrate	Kalibre Et
 	Calibrate 3D Mouse	3B Fareyi Kalibre Et
 	Cancel	İptal
@@ -476,7 +476,7 @@
 	Hide All	Tümünü Gizle
 	Hide All Constraint Bars	Tüm Kısıtlama Çubuklarını Gizle
 	Hide All Dynamic Dimensions	Tüm Dinamik Ölçüleri Gizle
-	Hide CADCraft	CADCraft'ı Gizle
+	Hide axialCAD	axialCAD'ı Gizle
 	Hide Layer List	Katman Listesini Gizle
 	Hide Objects	Nesneleri Gizle
 	Hide Others	Diğerlerini Gizle
@@ -533,8 +533,6 @@
 	Jogged	Kırık
 	Jogged Linear	Kırık Doğrusal
 	Join	Birleştir
-	Join the ArtCraft Discord…	ArtCraft Discord'una katılın…
-	Join us on Discord	Discord'da bize katılın
 	Justify	Yasla
 	Keep an editable copy of this table in the drawing	Bu tablonun düzenlenebilir bir kopyasını çizimde tut
 	Keep the system cursor visible over the drawing area	Sistem imlecini çizim alanı üzerinde görünür tut
@@ -705,7 +703,6 @@
 	Offset	Öteleme
 	On	Açık
 	On/Off	Açık/Kapalı
-	One of the Crafting Apps by the ArtCraft team and community.	ArtCraft ekibi ve topluluğunun Crafting Apps uygulamalarından biri.
 	Only in this drawing: {n}	Yalnızca bu çizimde: {n}
 	Only in {name}: {n}	Yalnızca {name} içinde: {n}
 	Open	Aç
@@ -817,7 +814,7 @@
 	Quick Select...	Hızlı Seçim...
 	QuickCalc	Hızlı Hesap
 	QuickCalc Pick	Hızlı Hesap Seçimi
-	Quit CADCraft	CADCraft'tan Çık
+	Quit axialCAD	axialCAD'tan Çık
 	Radius	Yarıçap
 	Raster Image	Raster Görüntü
 	Ray	Işın

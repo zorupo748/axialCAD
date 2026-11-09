@@ -5,25 +5,25 @@
   <id>ai.storyteller.cadcraft</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT OR Apache-2.0</project_license>
-  <name>CADCraft</name>
-  <summary>Draft, dimension and plot 2D drawings</summary>
-  <developer id="ai.storyteller">
-    <name>Learning Machines LLC</name>
+  <name>axialCAD</name>
+  <summary>Draft, dimension and plot 2D and 3D drawings</summary>
+  <developer id="org.axialcad">
+    <name>axialCAD Contributors</name>
   </developer>
   <description>
     <p>
-      CADCraft is an open-source computer-aided design and drafting application with a familiar
-      command line, object snaps, layers, dimensions, hatches and blocks. It opens and saves DXF
-      and DWG drawings, exports SVG and PNG, and can be driven by AI agents over MCP.
+      axialCAD is an open-source computer-aided design and drafting application (an independent
+      modified version based on CADCraft) with a familiar command line, object snaps, layers,
+      dimensions, hatches and blocks. It opens and saves DXF and DWG drawings, exports SVG, PNG
+      and PDF, and can be driven by AI agents over MCP.
     </p>
   </description>
   <launchable type="desktop-id">ai.storyteller.cadcraft.desktop</launchable>
   <icon type="stock">ai.storyteller.cadcraft</icon>
   <!-- Only url types known to appstream 0.15 (Ubuntu 22.04, where CI validates): no vcs-browser. -->
-  <url type="homepage">https://getartcraft.com/apps/cadcraft</url>
-  <url type="bugtracker">https://github.com/storytold/cadcraft/issues</url>
-  <url type="help">https://github.com/storytold/cadcraft</url>
-  <url type="contact">https://discord.gg/artcraft</url>
+  <url type="homepage">https://github.com/zorupo748/CADcraft-para-pc-sobremesa</url>
+  <url type="bugtracker">https://github.com/zorupo748/CADcraft-para-pc-sobremesa/issues</url>
+  <url type="help">https://github.com/zorupo748/CADcraft-para-pc-sobremesa</url>
   <categories>
     <category>Graphics</category>
     <category>Engineering</category>

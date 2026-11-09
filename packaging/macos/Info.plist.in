@@ -7,9 +7,9 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>CADCraft</string>
+  <string>axialCAD</string>
   <key>CFBundleName</key>
-  <string>CADCraft</string>
+  <string>axialCAD</string>
   <key>CFBundleExecutable</key>
   <string>CADCraft</string>
   <key>CFBundleIdentifier</key>
@@ -43,7 +43,7 @@
   <key>NSRequiresAquaSystemAppearance</key>
   <false/>
   <key>NSHumanReadableCopyright</key>
-  <string>Copyright © the CADCraft authors. MIT OR Apache-2.0.</string>
+  <string>Copyright © the CADCraft and axialCAD authors. MIT OR Apache-2.0.</string>
 
   <!-- Drawing files CADCraft opens (declared here in case macOS has no type for them). -->
   <key>UTImportedTypeDeclarations</key>

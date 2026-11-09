@@ -1,14 +1,14 @@
 [Desktop Entry]
 Type=Application
-Name=CADCraft
+Name=axialCAD
 GenericName=Computer-Aided Design
-Comment=Draft, dimension and plot 2D drawings; open DXF and DWG files
+Comment=Draft, dimension and plot 2D and 3D drawings; open DXF and DWG files
 Exec=cadcraft %F
 TryExec=cadcraft
 Icon=ai.storyteller.cadcraft
 Terminal=false
 StartupNotify=true
 StartupWMClass=ai.storyteller.cadcraft
-Categories=Graphics;2DGraphics;Engineering;VectorGraphics;
+Categories=Graphics;2DGraphics;3DGraphics;Engineering;VectorGraphics;
 MimeType=image/vnd.dxf;image/vnd.dwg;application/x-dxf;application/acad;
-Keywords=cad;drafting;dxf;dwg;drawing;engineering;architecture;mechanical;
+Keywords=axialcad;cad;drafting;dxf;dwg;drawing;engineering;architecture;mechanical;
