@@ -10,8 +10,8 @@
 
 <p align="center">
   A fast, open-source CAD workflow: the command line, object snaps, layers,
-  dimensions, hatches, blocks and DXF/DWG drawings you already know. It runs natively on macOS,
-  Windows, Linux and FreeBSD, and in the browser via WebAssembly.
+  dimensions, hatches, blocks and DXF/DWG drawings you already know.
+  Designed in pure Rust with cross-platform architecture in mind. Primary development and testing are currently conducted on Linux (x86_64). Support for Windows and macOS is pending validation and distribution.
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 
 <p align="center">
   <img alt="Written in Rust" src="https://img.shields.io/badge/written%20in-Rust-0b6f88?style=flat-square&logo=rust&logoColor=white">
-  <img alt="Runs on macOS, Windows, Linux, FreeBSD and the web" src="https://img.shields.io/badge/runs%20on-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux%20%C2%B7%20BSD%20%C2%B7%20Web-14a3c7?style=flat-square">
+  <img alt="Platform: Linux (tested) · Windows & macOS (pending validation)" src="https://img.shields.io/badge/platform-Linux%20(tested)%20%C2%B7%20Windows%20%26%20macOS%20(pending%20validation)-14a3c7?style=flat-square">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-0b6f88?style=flat-square">
   <img alt="Agent-drivable over MCP" src="https://img.shields.io/badge/agents-MCP-14a3c7?style=flat-square">
 </p>
@@ -263,75 +263,39 @@ Drafting feedback is not an animation effect and stays as it is: rubber bands an
 
 See [ROADMAP.md](ROADMAP.md) for the stage, measured parity and the estimate of remaining work, and [docs/gaps.md](docs/gaps.md) for everything still missing.
 
-## Downloads
+## Downloads and Distribution
 
-**Download CADCraft** from GitHub: the [latest release](https://github.com/storytold/cadcraft/releases/latest) has every build listed below, and [all releases](https://github.com/storytold/cadcraft/releases) has earlier versions and their notes. `<ver>` in the file names is the version number, and `SHA256SUMS.txt` lists a checksum for every file.
+axialCAD is currently in active development. The first preliminary pre-release for Linux (x86_64) is available at [v0.12.0-preview.1](https://github.com/zorupo748/axialCAD/releases/tag/v0.12.0-preview.1) (`axialcad-0.12.0-preview.1-linux-x86_64.tar.gz`). `preview.1` is the public release identifier, while packaged executables retain their internal `0.12.0` version metadata.
 
-> [!WARNING]
-> Download official CADCraft builds from the [storytold/cadcraft releases](https://github.com/storytold/cadcraft/releases). Verify that the repository owner is `storytold`. Before you run a download, check that its checksum matches the line for that file in the release's `SHA256SUMS.txt`:
->
-> ```sh
-> shasum -a 256 cadcraft-<ver>-macos-universal.dmg     # macOS (on Linux: sha256sum FILE)
-> Get-FileHash .\cadcraft-<ver>-windows-x64.msi        # Windows PowerShell
-> ```
+### Running from source (Linux)
 
-### Windows
+You can build and run axialCAD from source using the Rust toolchain:
 
-| Build | Installer | Portable |
-|---|---|---|
-| x64 (64-bit Intel/AMD) | `cadcraft-<ver>-windows-x64.msi` | `cadcraft-<ver>-windows-x64-portable.zip` |
-| arm64 (Snapdragon and other ARM PCs) | `cadcraft-<ver>-windows-arm64.msi` | `cadcraft-<ver>-windows-arm64-portable.zip` |
-| x86 (32-bit) | `cadcraft-<ver>-windows-x86.msi` | `cadcraft-<ver>-windows-x86-portable.zip` |
+```sh
+# Clone the repository
+git clone https://github.com/zorupo748/axialCAD.git
+cd axialCAD
 
-Installers and executables are code-signed.
+# Run the desktop application (opens the sample drawing)
+cargo run --release -p cadcraft -- --sample
 
-The installer adds CADCraft to the Start menu and asks whether to add a desktop shortcut too (unticked by default). For a silent install with the desktop shortcut: `msiexec /i cadcraft-<ver>-windows-x64.msi /qn DESKTOPSHORTCUT=1`.
-
-**If the app doesn't open on Windows:** the desktop app initializes only DirectX 12 by default.
-Letting wgpu also create an OpenGL instance can crash some graphics drivers (AMD's
-`atio6axx.dll`) before the window appears, so the app would flash in Task Manager and quit.
-`WGPU_BACKEND` overrides the default for troubleshooting (for example `dx12` or `vulkan`). In
-PowerShell, from the folder containing the executable:
-
-```powershell
-$env:WGPU_BACKEND = "vulkan"
-& .\cadcraft.exe
-Remove-Item Env:WGPU_BACKEND                     # restore the default for later launches
+# Run the command-line interface
+cargo run --release -p cadcraft-cli -- --help
 ```
 
-An explicit `gl` override can bring the driver crash back on affected systems. The macOS, Linux
-and web backend defaults are unchanged.
+### Platform status and distribution roadmap
 
-### macOS
+- **Linux (x86_64):**
+  - **Build environment & runtime requirements:** Portable tarball candidate (`.tar.gz`) built in an isolated Ubuntu 22.04 container. Both distributed binaries (`cadcraft` and `cadcraft-cli`) link against a measured minimum of `GLIBC_2.35`. Binaries are dynamically linked and require host system runtime libraries (`glibc`, graphics/Vulkan/OpenGL drivers, and X11 or Wayland libraries); glibc 2.35 alone does not guarantee compatibility across all distributions or GPU drivers.
+  - **Verified packaging & execution:** The user-level installer lifecycle (`install.sh`, `uninstall.sh`) and CLI drawing workflows (sample creation, entity inspection, saving, reopening) have been verified in containerized Ubuntu 22.04. On host Fedora 44 (Intel GPU), graphical window launch, canvas rendering, automated workflows, and a basic interactive manual workflow (creating lines and circles with mouse/keyboard, saving DXF, exiting, and reopening with geometry correctly preserved) have been verified by the user. Comprehensive validation across all CAD tools, prolonged usage sessions, and other Linux distributions or GPU drivers remain pending.
+  - **Additional package formats:** AppImage packaging specification is in preparation in `packaging/linux/`.
+- **Windows (x64 / ARM64):** Multiplatform architecture and rendering abstractions are implemented in the codebase. Packaging (MSI via WiX), runtime validation on DirectX 12 / Vulkan, and code signing are pending dedicated environment validation and distribution.
+- **macOS (Apple Silicon / Intel):** Metal/wgpu rendering architecture is supported in the codebase layers. DMG packaging, universal binary compilation, and Apple notarization are pending dedicated environment validation and distribution.
+- **Web (WebAssembly):** Architectural target present (`cargo xtask wasm`), with browser canvas integration under development.
 
-| Build | File | Notes |
-|---|---|---|
-| App, universal (Apple silicon + Intel) | `cadcraft-<ver>-macos-universal.dmg` | Signed and notarized |
-| Command-line tool, universal | `cadcraft-cli-<ver>-macos-universal.zip` | Signed and notarized |
+#### Technical reference: Windows GPU troubleshooting
 
-### Linux
-
-| Format | x86_64 | aarch64 (ARM64) | Notes |
-|---|---|---|---|
-| AppImage | `cadcraft-<ver>-linux-x86_64.AppImage` | `cadcraft-<ver>-linux-aarch64.AppImage` | Runs anywhere; updates itself with [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) (`.zsync` files) |
-| Flatpak | `cadcraft-<ver>-linux-x86_64.flatpak` | `cadcraft-<ver>-linux-aarch64.flatpak` | Sandboxed; `flatpak install --user <file>` |
-| Debian/Ubuntu | `cadcraft-<ver>-linux-x86_64.deb` | `cadcraft-<ver>-linux-aarch64.deb` | |
-| Fedora/RHEL/openSUSE | `cadcraft-<ver>-linux-x86_64.rpm` | `cadcraft-<ver>-linux-aarch64.rpm` | |
-| Tarball | `cadcraft-<ver>-linux-x86_64.tar.gz` | `cadcraft-<ver>-linux-aarch64.tar.gz` | Unpack anywhere |
-
-RISC-V (riscv64): `cadcraft-<ver>-linux-riscv64.tar.gz`, cross-compiled; needs glibc 2.39 or newer (Ubuntu 24.04+, Debian 13+).
-
-### FreeBSD
-
-| Build | File |
-|---|---|
-| x86_64 | `cadcraft-<ver>-freebsd-x86_64.tar.gz` |
-
-### Web (WebAssembly)
-
-| Build | File | Notes |
-|---|---|---|
-| Static site | `cadcraft-web-<ver>.zip` | Runs in a modern browser; host it on any static server |
+The desktop app initializes DirectX 12 by default on Windows. If graphics driver issues occur with OpenGL initialization, `WGPU_BACKEND` can override the default for troubleshooting (e.g. `dx12` or `vulkan` in PowerShell: `$env:WGPU_BACKEND = "vulkan"; .\cadcraft.exe`). The Linux and macOS backend defaults are unaffected.
 
 ## License and credits
 
