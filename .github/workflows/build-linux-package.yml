@@ -82,7 +82,7 @@ jobs:
           PUBLISH_RELEASE: ${{ inputs.publish_release || false }}
           RELEASE_TAG: ${{ inputs.release_tag || '' }}
           COMMIT_SHA: ${{ steps.provenance.outputs.COMMIT_SHA }}
-          TARGET_REPO: "zorupo748/CADcraft-para-pc-sobremesa"
+          TARGET_REPO: "zorupo748/axialCAD"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -390,7 +390,7 @@ jobs:
           RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
           COMMIT_SHA: ${{ needs.build.outputs.commit_sha }}
           RAW_FORMATS: ${{ needs.build.outputs.formats }}
-          TARGET_REPO: "zorupo748/CADcraft-para-pc-sobremesa"
+          TARGET_REPO: "zorupo748/axialCAD"
         run: |
           set -euo pipefail
 
@@ -560,7 +560,7 @@ jobs:
       - name: Generate Draft Pre-release notes and create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TARGET_REPO: "zorupo748/CADcraft-para-pc-sobremesa"
+          TARGET_REPO: "zorupo748/axialCAD"
           COMMIT_SHA: ${{ needs.build.outputs.commit_sha }}
           SHORT_SHA: ${{ needs.build.outputs.short_sha }}
           RELEASE_TAG: ${{ needs.build.outputs.release_tag }}

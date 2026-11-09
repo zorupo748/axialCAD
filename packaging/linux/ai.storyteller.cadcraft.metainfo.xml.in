@@ -21,9 +21,9 @@
   <launchable type="desktop-id">ai.storyteller.cadcraft.desktop</launchable>
   <icon type="stock">ai.storyteller.cadcraft</icon>
   <!-- Only url types known to appstream 0.15 (Ubuntu 22.04, where CI validates): no vcs-browser. -->
-  <url type="homepage">https://github.com/zorupo748/CADcraft-para-pc-sobremesa</url>
-  <url type="bugtracker">https://github.com/zorupo748/CADcraft-para-pc-sobremesa/issues</url>
-  <url type="help">https://github.com/zorupo748/CADcraft-para-pc-sobremesa</url>
+  <url type="homepage">https://github.com/zorupo748/axialCAD</url>
+  <url type="bugtracker">https://github.com/zorupo748/axialCAD/issues</url>
+  <url type="help">https://github.com/zorupo748/axialCAD</url>
   <categories>
     <category>Graphics</category>
     <category>Engineering</category>

@@ -101,8 +101,8 @@ Desktop and web UI builds require Rust 1.95 or later. The core workspace's decla
 remains Rust 1.90.
 
 ```sh
-git clone https://github.com/storytold/cadcraft
-cd cadcraft
+git clone https://github.com/zorupo748/axialCAD
+cd axialCAD
 cargo run --release -p cadcraft -- --sample       # opens the sample drawing
 ```
 

@@ -31,9 +31,9 @@
 
     <Icon Id="CadcraftIcon.ico" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="CadcraftIcon.ico" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/zorupo748/CADcraft-para-pc-sobremesa" />
-    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/zorupo748/CADcraft-para-pc-sobremesa" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/zorupo748/CADcraft-para-pc-sobremesa/issues" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/zorupo748/axialCAD" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/zorupo748/axialCAD" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/zorupo748/axialCAD/issues" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="CADCraft" />
