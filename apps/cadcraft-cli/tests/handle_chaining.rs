@@ -182,10 +182,10 @@ fn a_handle_returned_after_a_switch_is_last() {
     assert_eq!(left, ["100"], "the line created after the switch was erased: {stdout}");
 }
 
-/// A script can change the current drawing too (`new {"metric":true}` at a script line), so the
-/// remembered handle is cleared after a script that changed it.
+/// Scripts cannot run lifecycle commands (such as `new`, `open`, `close`, `quit`); any attempt
+/// aborts execution immediately with a parameter restriction error, preventing subsequent commands.
 #[test]
-fn last_is_cleared_by_a_script_that_changes_drawings() {
+fn script_rejects_restricted_lifecycle_commands() {
     let out = run(&[
         "run",
         "--metric",
@@ -193,6 +193,38 @@ fn last_is_cleared_by_a_script_that_changes_drawings() {
         r#"line {"points":[[0,0],[10,0]]}"#,
         "--script",
         r#"new {"metric":true}"#,
+        "--cmd",
+        r#"erase {"handles":["{last}"]}"#,
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "script execution with `new` must exit with error 1");
+    assert!(
+        stderr.contains("command `new` is restricted in scripts") || stderr.contains("lifecycle commands are not allowed"),
+        "stderr must report lifecycle command restriction on `new`: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "must not panic: {stderr}");
+}
+
+/// When a legitimate command switches drawings via `--cmd`, an earlier handle is invalidated
+/// and cannot be referenced across document boundaries via `{last}`.
+#[test]
+fn last_is_cleared_when_legitimate_command_switches_drawings() {
+    // 1. In drawing 0: create a line, which sets {last} to handle "100"
+    // 2. Open a second drawing via legitimate `--cmd new` (which creates drawing 1)
+    // 3. In drawing 1: create another line, which sets {last} to handle "100" of drawing 1
+    // 4. Switch back to drawing 0 via legitimate `--cmd document.switch`: {last} must be invalidated!
+    // 5. Attempting to use `{last}` without a new command in drawing 0 must fail with the placeholder error
+    let out = run(&[
+        "run",
+        "--metric",
+        "--cmd",
+        r#"line {"points":[[0,0],[10,0]]}"#,
+        "--cmd",
+        r#"new {"metric":true}"#,
+        "--cmd",
+        r#"line {"points":[[0,10],[10,10]]}"#,
+        "--cmd",
+        r#"document.switch {"index":0}"#,
         "--cmd",
         r#"erase {"handles":["{last}"]}"#,
     ]);

@@ -215,21 +215,127 @@ fn test_box_cylinder_interoperable_dxf_export() {
     println!("Total 3DFACE count in DXF: {}", dxf_content.matches("3DFACE").count());
 }
 
+fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}-{n}", std::process::id()));
+    fs::create_dir_all(&dir).expect("create unique temp dir");
+    dir
+}
+
 #[test]
-fn test_ejercicio_01_phase_a_dxf_roundtrip() {
+fn test_synthetic_3d_and_layers_dxf_roundtrip() {
     init_io_hooks();
 
-    let full_content = std::fs::read_to_string("tests/fixtures/ejercicio_01.scr").expect("read original script");
-    let geom_lines: Vec<&str> = full_content.lines().take(170).collect();
-    let geom_scr = geom_lines.join("\n") + "\n";
+    let geom_scr = r#"_-LAYER
+_M
+SUELO
+_C
+8
+SUELO
+_M
+PILAR
+_C
+7
+PILAR
+_M
+DATOS
+_C
+3
+DATOS
+_M
+AUX
+_C
+4
+AUX
+_M
+SOL
+_C
+1
+SOL
+_M
+TEXTO
+_C
+7
+TEXTO
 
-    let temp_dir = std::env::temp_dir().join(format!("cadcraft-ej1-roundtrip-{}", std::process::id()));
-    let _ = fs::create_dir_all(&temp_dir);
-    let scr_path = temp_dir.join("ej1.scr");
-    let dxf_path = temp_dir.join("ej1.dxf");
+CLAYER
+AUX
+_LINE
+0,0,0
+10,10,10
+
+CLAYER
+SUELO
+_3DFACE
+0,0,0
+10,0,0
+10,10,0
+0,10,0
+
+CLAYER
+AUX
+_3DFACE
+0,0,10
+10,0,10
+10,10,10
+0,10,10
+
+CLAYER
+TEXTO
+_-MTEXT
+0,0,0
+_H
+1.0
+10,0,0
+T1
+
+_-MTEXT
+1,0,0
+_H
+1.0
+11,0,0
+T2
+
+_-MTEXT
+2,0,0
+_H
+1.0
+12,0,0
+T3
+
+_-MTEXT
+3,0,0
+_H
+1.0
+13,0,0
+T4
+
+_-MTEXT
+4,0,0
+_H
+1.0
+14,0,0
+T5
+
+_-MTEXT
+5,0,0
+_H
+1.0
+15,0,0
+T6
+
+"#;
+
+    let temp_dir = unique_temp_dir("cadcraft-3d-roundtrip");
+    let scr_path = temp_dir.join("synthetic_3d.scr");
+    let dxf_path = temp_dir.join("synthetic_3d.dxf");
 
     let mut session = Session::new();
-    session.start_script_file(scr_path.to_str().unwrap(), &geom_scr).unwrap();
+    session.start_script_file(scr_path.to_str().unwrap(), geom_scr).unwrap();
     while session.is_script_running() {
         if let cadcraft_engine::ScriptStep::Error { line, error, .. } = session.step_script() {
             panic!("Script error at {line}: {error}");

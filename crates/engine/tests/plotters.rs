@@ -209,7 +209,7 @@ fn explicit_device_equivalence_and_property_preservation() {
             "margins": [0.0, 0.0, 0.0, 0.0],
             "plotArea": "layout",
             "scale": 1.0,
-            "plotStyleTable": "EGI.stb",
+            "plotStyleTable": "custom_styles.stb",
         }),
     )
     .unwrap();
@@ -220,7 +220,7 @@ fn explicit_device_equivalence_and_property_preservation() {
     assert_eq!(page.margins_mm, [0.0, 0.0, 0.0, 0.0]);
     assert_eq!(page.width_mm, 210.0);
     assert_eq!(page.height_mm, 297.0);
-    assert_eq!(page.plot_style_table, "EGI.stb");
+    assert_eq!(page.plot_style_table, "custom_styles.stb");
 
     // Without explicit equivalence, an unknown device is rejected
     assert!(
@@ -229,7 +229,7 @@ fn explicit_device_equivalence_and_property_preservation() {
         "unknown device without equivalence must fail"
     );
 
-    // With explicit equivalence, plot succeeds and warns about unavailable EGI.stb
+    // With explicit equivalence, plot succeeds and warns about unavailable custom_styles.stb
     let r = s
         .execute(
             "plot",
@@ -241,7 +241,7 @@ fn explicit_device_equivalence_and_property_preservation() {
         )
         .unwrap();
     assert!(r["data"].is_string());
-    assert!(r["warning"].as_str().unwrap().contains("EGI.stb"));
+    assert!(r["warning"].as_str().unwrap().contains("custom_styles.stb"));
 
     // Changing device preserves existing orientation and custom 0 mm margins
     s.execute("pagesetup", &json!({"layout": "LayoutA4", "device": "CADCraft PDF"})).unwrap();

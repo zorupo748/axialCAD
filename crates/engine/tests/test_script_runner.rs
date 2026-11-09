@@ -2,7 +2,12 @@ use cadcraft_engine::Session;
 use serde_json::json;
 
 fn temp_script(name: &str, content: &[u8]) -> String {
-    let path = std::env::temp_dir().join(format!("cadcraft-test-{}-{name}", std::process::id()));
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("cadcraft-test-{}-{nanos}-{n}-{name}", std::process::id()));
     std::fs::write(&path, content).unwrap();
     path.to_string_lossy().into_owned()
 }
@@ -220,12 +225,14 @@ fn test_script_clayer_nonexistent_fails_and_halts() {
 }
 
 #[test]
-fn test_user_ejercicio_01_scr() {
-    let path = "tests/fixtures/ejercicio_01.scr";
-    if !std::path::Path::new(path).exists() {
-        return;
-    }
+fn test_synthetic_multicommand_workflow_script() {
+    let scr = b"; Synthetic workflow script\n_LAYER\n_M\nL_WORKFLOW\n_C\n1\n\n\ncircle 0,0 15\nline 0,0 30,30 \n";
+    let path = temp_script("workflow.scr", scr);
     let mut s = Session::new();
-    let r = s.execute("script", &json!({ "path": path }));
-    eprintln!("\n=== EJERCICIO 01 RUN RESULT ===\n{:?}\n", r);
+    let r = s.execute("script", &json!({ "path": path })).unwrap();
+    assert!(r.get("lines").is_some(), "Script must report line execution count");
+    let doc = s.doc().unwrap();
+    assert!(doc.layer("L_WORKFLOW").is_some(), "Layer L_WORKFLOW created by script");
+    assert!(doc.model.len() >= 2, "Entities created by workflow script");
+    let _ = std::fs::remove_file(&path);
 }

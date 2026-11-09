@@ -439,3 +439,87 @@ EOF
     let lines = cadcraft_render::pattern_lines(&doc, h, &loops, 0.0, None);
     assert!(!lines.is_empty(), "Must render lines from reconstructed definition");
 }
+
+#[test]
+fn test_reproducible_ansi31_measurement_and_dxf_roundtrip() {
+    let run = |metric: bool, scale: f64| -> (i64, f64, f64, usize, f64, f64, usize) {
+        let mut s = Session::empty();
+        s.execute("new", &json!({ "metric": metric })).unwrap();
+        s.execute("rectang", &json!({ "p1": [0, 0], "p2": [100, 100] })).unwrap();
+        s.execute("hatch", &json!({ "points": [[50, 50]], "pattern": "ANSI31", "scale": scale })).unwrap();
+
+        let d1 = s.doc().unwrap();
+        let m1 = d1.header.i64("MEASUREMENT", 0);
+        let pat1 = cadcraft_doc::library::pattern_for(d1, "ANSI31").unwrap();
+        let pat1_delta_y = pat1.lines[0].delta.1;
+
+        let h1 = first_hatch(&s);
+        assert_eq!(h1.pattern, "ANSI31");
+        assert_eq!(h1.scale, scale);
+        assert!(h1.pattern_lines.is_empty(), "ANSI31 nuevo no fija pattern_lines en el documento");
+
+        // Segmentos emitidos por cadcraft_render::pattern_lines
+        let loops1 = cadcraft_render::fill_loops(&h1, 1e-3);
+        let segs1 = cadcraft_render::pattern_lines(d1, &h1, &loops1, 0.0, None);
+        assert!(segs1.len() >= 2, "Debe emitir al menos dos segmentos de trama");
+        // Para líneas a 45 grados (y = x + c), la constante c = y - x.
+        // La distancia perpendicular entre dos líneas adyacentes y = x + c1 e y = x + c2 es |c2 - c1| / sqrt(2).
+        let c0 = segs1[0][0].y - segs1[0][0].x;
+        let c1 = segs1[1][0].y - segs1[1][0].x;
+        let measured_perp_sp1 = (c1 - c0).abs() / std::f64::consts::SQRT_2;
+
+        // Roundtrip DXF
+        let dxf = cadcraft_io::write(d1, "test_hatch.dxf").unwrap();
+        let d2 = cadcraft_io::read(&dxf, "test_hatch.dxf").unwrap();
+        let m2 = d2.header.i64("MEASUREMENT", 0);
+        assert_eq!(m1, m2);
+
+        let h2: Hatch = d2.model.iter().find_map(|e| if let EntityKind::Hatch(h) = &e.kind { Some(h.clone()) } else { None }).unwrap();
+        assert_eq!(h2.scale, scale);
+
+        let loops2 = cadcraft_render::fill_loops(&h2, 1e-3);
+        let segs2 = cadcraft_render::pattern_lines(&d2, &h2, &loops2, 0.0, None);
+        assert_eq!(segs1.len(), segs2.len(), "El número de segmentos emitidos tras roundtrip DXF debe ser idéntico");
+        let c2_0 = segs2[0][0].y - segs2[0][0].x;
+        let c2_1 = segs2[1][0].y - segs2[1][0].x;
+        let measured_perp_sp2 = (c2_1 - c2_0).abs() / std::f64::consts::SQRT_2;
+
+        (m1, pat1_delta_y, measured_perp_sp1, segs1.len(), h2.pattern_lines[0].delta.1, measured_perp_sp2, segs2.len())
+    };
+
+    // Caso 1: MEASUREMENT 0, escala 1.0
+    let (m0_1, pat_m0_1, sp0_1, n0_1, dxf_line0_1, dxf_sp0_1, dxf_n0_1) = run(false, 1.0);
+    assert_eq!(m0_1, 0);
+    assert_eq!(pat_m0_1, 0.125);
+    assert!((sp0_1 - 0.125).abs() < 1e-4, "sp0_1={sp0_1}");
+    assert_eq!(dxf_line0_1, 0.125);
+    assert!((dxf_sp0_1 - 0.125).abs() < 1e-4, "dxf_sp0_1={dxf_sp0_1}");
+    assert_eq!(n0_1, dxf_n0_1);
+
+    // Caso 2: MEASUREMENT 0, escala 0.5
+    let (m0_05, pat_m0_05, sp0_05, n0_05, dxf_line0_05, dxf_sp0_05, dxf_n0_05) = run(false, 0.5);
+    assert_eq!(m0_05, 0);
+    assert_eq!(pat_m0_05, 0.125);
+    assert!((sp0_05 - 0.0625).abs() < 1e-4, "sp0_05={sp0_05}");
+    assert_eq!(dxf_line0_05, 0.125);
+    assert!((dxf_sp0_05 - 0.0625).abs() < 1e-4, "dxf_sp0_05={dxf_sp0_05}");
+    assert_eq!(n0_05, dxf_n0_05);
+
+    // Caso 3: MEASUREMENT 1, escala 1.0
+    let (m1_1, pat_m1_1, sp1_1, n1_1, dxf_line1_1, dxf_sp1_1, dxf_n1_1) = run(true, 1.0);
+    assert_eq!(m1_1, 1);
+    assert!((pat_m1_1 - 3.175).abs() < 1e-4, "pat_m1_1={pat_m1_1}");
+    assert!((sp1_1 - 3.175).abs() < 1e-4, "sp1_1={sp1_1}");
+    assert!((dxf_line1_1 - 3.175).abs() < 1e-4, "dxf_line1_1={dxf_line1_1}");
+    assert!((dxf_sp1_1 - 3.175).abs() < 1e-4, "dxf_sp1_1={dxf_sp1_1}");
+    assert_eq!(n1_1, dxf_n1_1);
+
+    // Caso 4: MEASUREMENT 1, escala 0.5
+    let (m1_05, pat_m1_05, sp1_05, n1_05, dxf_line1_05, dxf_sp1_05, dxf_n1_05) = run(true, 0.5);
+    assert_eq!(m1_05, 1);
+    assert!((pat_m1_05 - 3.175).abs() < 1e-4, "pat_m1_05={pat_m1_05}");
+    assert!((sp1_05 - 1.5875).abs() < 1e-4, "sp1_05={sp1_05}");
+    assert!((dxf_line1_05 - 3.175).abs() < 1e-4, "dxf_line1_05={dxf_line1_05}");
+    assert!((dxf_sp1_05 - 1.5875).abs() < 1e-4, "dxf_sp1_05={dxf_sp1_05}");
+    assert_eq!(n1_05, dxf_n1_05);
+}

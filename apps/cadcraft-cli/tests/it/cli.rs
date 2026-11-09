@@ -89,16 +89,47 @@ fn cli_export_dwg_rejects_unexportable_entities_and_preserves_file() {
 
 
 
+
+fn unique_cli_temp_dir(prefix: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create unique temp dir");
+    dir
+}
+
+fn create_synthetic_cli_template(dir: &std::path::Path) -> (std::path::PathBuf, String, String) {
+    use cadcraft_engine::Session;
+    use serde_json::json;
+    let mut s = Session::new();
+    s.new_drawing(true);
+    s.execute("layout.new", &json!({ "name": "Formato A4 vertical" })).unwrap();
+    s.execute("layout.set", &json!({ "name": "Formato A4 vertical" })).unwrap();
+    let res1 = s.execute("text", &json!({ "at": [10, 10], "height": 3.5, "text": "1:1" })).unwrap();
+    let h1 = res1["handle"].as_str().unwrap().to_string();
+    let res2 = s.execute("text", &json!({ "at": [10, 20], "height": 5.0, "text": "TITULO PREVIO" })).unwrap();
+    let h2 = res2["handle"].as_str().unwrap().to_string();
+    s.execute("layout.set", &json!({ "name": "Model" })).unwrap();
+
+    let path = dir.join("synthetic_cli_template.dwt");
+    let d = s.doc().unwrap();
+    let bytes = cadcraft_io::write(d, "template.dxf").unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    (path, h1, h2)
+}
+
 #[test]
 fn cli_opens_dwt_template_and_draws_lines_at_z_zero() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Templates/EGI-ISO.dwt");
-    let dir = std::env::temp_dir().join(format!("cc-cli-dwt-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = unique_cli_temp_dir("cc-cli-dwt");
+    let (template_path, _, _) = create_synthetic_cli_template(&dir);
     let out_dxf = dir.join("dwt_out.dxf");
     let output = Command::new(env!("CARGO_BIN_EXE_cadcraft-cli"))
         .args([
             "run",
-            root.to_str().unwrap(),
+            template_path.to_str().unwrap(),
             "--cmd",
             "view.swiso {}",
             "--cmd",
@@ -111,25 +142,35 @@ fn cli_opens_dwt_template_and_draws_lines_at_z_zero() {
     assert!(output.status.success(), "{:?}: {}", output.status, String::from_utf8_lossy(&output.stderr));
     let content = std::fs::read_to_string(&out_dxf).unwrap();
     assert!(content.contains("LINE"), "Saved DXF must contain the drawn LINE entities");
+
+    // Explicitly verify Z coordinates of drawn lines:
+    let dxf_bytes = std::fs::read(&out_dxf).unwrap();
+    let doc = cadcraft_io::read(&dxf_bytes, "dwt_out.dxf").unwrap();
+    let lines: Vec<_> = doc.model.iter().filter_map(|e| if let cadcraft_engine::doc::EntityKind::Line(l) = &e.kind { Some(l.clone()) } else { None }).collect();
+    assert_eq!(lines.len(), 2, "Must contain exactly 2 line segments");
+    for line in &lines {
+        assert_eq!(line.a.z, 0.0, "Start point Z must be exactly 0.0");
+        assert_eq!(line.b.z, 0.0, "End point Z must be exactly 0.0");
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn cli_dwt_template_edits_cajetin_title_and_scale_and_preserves_on_reload() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Templates/EGI-ISO.dwt");
-    let dir = std::env::temp_dir().join(format!("cc-cli-dwt-edit-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = unique_cli_temp_dir("cc-cli-dwt-edit");
+    let (template_path, h_scale, h_title) = create_synthetic_cli_template(&dir);
     let out_dxf = dir.join("dwt_edited.dxf");
     let output = Command::new(env!("CARGO_BIN_EXE_cadcraft-cli"))
         .args([
             "run",
-            root.to_str().unwrap(),
+            template_path.to_str().unwrap(),
             "--cmd",
             "layout.set {\"name\":\"Formato A4 vertical\"}",
             "--cmd",
-            "textedit {\"handle\":\"153\",\"text\":\"1:5\"}",
+            &format!("textedit {{\"handle\":\"{}\",\"text\":\"1:5\"}}", h_scale),
             "--cmd",
-            "textedit {\"handle\":\"154\",\"text\":\"NUEVO TITULO AUDITORIA\"}",
+            &format!("textedit {{\"handle\":\"{}\",\"text\":\"NUEVO TITULO AUDITORIA\"}}", h_title),
             "--save",
             out_dxf.to_str().unwrap(),
         ])
@@ -152,6 +193,5 @@ fn cli_dwt_template_edits_cajetin_title_and_scale_and_preserves_on_reload() {
     let stdout = String::from_utf8_lossy(&inspect_output.stdout);
     assert!(stdout.contains("1:5"), "Saved DXF must contain edited scale 1:5");
     assert!(stdout.contains("NUEVO TITULO AUDITORIA"), "Saved DXF must contain edited title");
-
     let _ = std::fs::remove_dir_all(&dir);
 }

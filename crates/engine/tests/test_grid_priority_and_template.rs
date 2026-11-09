@@ -1,6 +1,8 @@
 //! Tests for grid priority in DXF and template loading.
 
 use std::fs;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cadcraft_doc::Drawing;
 use cadcraft_engine::Session;
@@ -15,10 +17,26 @@ fn setup_io() {
     });
 }
 
+fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}-{n}", std::process::id()));
+    fs::create_dir_all(&dir).expect("create unique temp dir");
+    dir
+}
+
 fn make_dxf_with_grid(header_grid: Option<i32>, vport_grid: Option<i32>) -> Vec<u8> {
+    make_dxf_with_grid_and_limits(header_grid, vport_grid, None)
+}
+
+fn make_dxf_with_grid_and_limits(header_grid: Option<i32>, vport_grid: Option<i32>, lim_max: Option<(f64, f64)>) -> Vec<u8> {
     let mut s = String::from("0\nSECTION\n2\nHEADER\n");
     if let Some(hg) = header_grid {
         s.push_str(&format!("9\n$GRIDMODE\n70\n{}\n", hg));
+    }
+    if let Some((x, y)) = lim_max {
+        s.push_str(&format!("9\n$LIMMAX\n10\n{}\n20\n{}\n", x, y));
     }
     s.push_str("0\nENDSEC\n0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nVPORT\n");
     if let Some(vg) = vport_grid {
@@ -59,11 +77,12 @@ fn test_dxf_grid_priority_cases() {
 }
 
 #[test]
-fn test_template_egi_iso_dwt_copy_loads_with_grid_off() {
+fn test_template_loads_with_grid_off_and_limits_ref_height() {
     setup_io();
-    let src_path = "Templates/EGI-ISO.dwt";
-    let tmp_path = std::env::temp_dir().join(format!("test_egi_iso_copy_{}.dwt", std::process::id()));
-    fs::copy(src_path, &tmp_path).unwrap();
+    let test_dir = unique_temp_dir("axialcad-grid-template");
+    let tmp_path = test_dir.join("synthetic_template_grid_off.dwt");
+    let dxf_bytes = make_dxf_with_grid_and_limits(Some(0), Some(0), Some((210.0, 297.0)));
+    fs::write(&tmp_path, dxf_bytes).unwrap();
 
     let mut s = Session::new();
     s.execute("new", &json!({ "template": tmp_path.to_str().unwrap() })).unwrap();
@@ -75,16 +94,17 @@ fn test_template_egi_iso_dwt_copy_loads_with_grid_off() {
     // 2. Estado efectivo en Session y drafting_settings
     let ds = s.drafting_settings();
     assert_eq!(ds.gridmode, false, "drafting_settings().gridmode debe ser false al crear desde la plantilla");
-    assert!((s.state().unwrap().ref_height - 297.0).abs() < 1.0, "ref_height inicial desde EGI-ISO.dwt debe inicializarse al encuadre de límites (297.0)");
+    assert!((s.state().unwrap().ref_height - 297.0).abs() < 1.0, "ref_height inicial debe inicializarse al encuadre de límites (297.0)");
 
-    let _ = fs::remove_file(tmp_path);
+    let _ = fs::remove_dir_all(&test_dir);
 }
 
 #[test]
 fn test_template_with_grid_on_loads_with_grid_on() {
     setup_io();
+    let test_dir = unique_temp_dir("axialcad-grid-on");
+    let tmp_path = test_dir.join("synthetic_template_grid_on.dxf");
     let dxf_on = make_dxf_with_grid(Some(1), Some(1));
-    let tmp_path = std::env::temp_dir().join(format!("test_template_on_{}.dxf", std::process::id()));
     fs::write(&tmp_path, &dxf_on).unwrap();
 
     let mut s = Session::new();
@@ -94,12 +114,13 @@ fn test_template_with_grid_on_loads_with_grid_on() {
     assert_eq!(d.header.grid_mode(), Some(true));
     assert_eq!(s.drafting_settings().gridmode, true);
 
-    let _ = fs::remove_file(tmp_path);
+    let _ = fs::remove_dir_all(&test_dir);
 }
 
 #[test]
 fn test_manual_toggle_and_save_reopen_persists_grid_without_altering_snap() {
     setup_io();
+    let test_dir = unique_temp_dir("axialcad-grid-toggle");
     let mut s = Session::new();
     s.open_drawing(Drawing::new_metric(), "toggle_test", None);
 
@@ -112,7 +133,7 @@ fn test_manual_toggle_and_save_reopen_persists_grid_without_altering_snap() {
     assert_eq!(s.doc().unwrap().header.grid_mode(), Some(false));
 
     // Guardar en DXF
-    let tmp_dxf = std::env::temp_dir().join(format!("test_grid_persist_{}.dxf", std::process::id()));
+    let tmp_dxf = test_dir.join("test_grid_persist.dxf");
     s.execute("saveas", &json!({ "path": tmp_dxf.to_str().unwrap() })).unwrap();
 
     // Reabrir en nueva sesión
@@ -122,7 +143,7 @@ fn test_manual_toggle_and_save_reopen_persists_grid_without_altering_snap() {
     assert_eq!(s2.doc().unwrap().header.grid_mode(), Some(false));
     assert_eq!(s2.drafting_settings().gridmode, false);
 
-    let _ = fs::remove_file(tmp_dxf);
+    let _ = fs::remove_dir_all(&test_dir);
 }
 
 #[test]
@@ -167,4 +188,3 @@ fn test_grid_sync_across_new_open_switch_close_without_inheriting_or_changing_sn
     assert_eq!(s.drafting_settings().gridmode, true);
     assert_eq!(s.settings.snapmode, true);
 }
-

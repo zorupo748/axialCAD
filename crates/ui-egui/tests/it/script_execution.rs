@@ -12,8 +12,15 @@ use cadcraft_ui_egui::{CadApp, Services};
 use egui::{Event, Key, Modifiers, RawInput};
 
 fn temp_script(name: &str, content: &[u8]) -> String {
-    let path = std::env::temp_dir().join(format!("cadcraft-ui-test-{}-{name}", std::process::id()));
-    std::fs::write(&path, content).unwrap();
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("cadcraft-ui-test-{}-{nanos}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create unique temp dir");
+    let path = dir.join(name);
+    std::fs::write(&path, content).expect("write temp script");
     path.to_string_lossy().into_owned()
 }
 
@@ -166,8 +173,60 @@ fn test_escape_cancels_active_script() {
 
 #[test]
 fn test_layer_sequence_with_datos_and_enter_event_across_frames() {
-    let path = "tests/fixtures/ejercicio_01.scr";
-    let path_clone = path.to_string();
+    let script_content = "\
+; 1
+; 2
+; 3
+; 4
+; 5
+; 6
+; 7
+; 8
+; 9
+; 10
+; 11
+; 12
+; 13
+_-LAYER
+_M
+SUELO
+_C
+8
+SUELO
+_M
+PILAR
+_C
+7
+PILAR
+_M
+DATOS
+_C
+3
+DATOS
+_M
+AUX
+_C
+4
+AUX
+_M
+SOL
+_C
+1
+SOL
+_M
+TEXTO
+_C
+2
+TEXTO
+
+; 46
+; 47
+; 48
+; 49
+; 50
+";
+    let path = temp_script("layer_seq.scr", script_content.as_bytes());
+    let path_clone = path.clone();
     let services = Services {
         pick_script: Some(Box::new(move |_| Some(path_clone.clone()))),
         ..Services::default()
@@ -203,7 +262,7 @@ fn test_layer_sequence_with_datos_and_enter_event_across_frames() {
     });
     out2.textures_delta.clear();
 
-    // Must reach beyond line 49 and create all layers
+    // Must reach beyond line 45 and create all layers
     let doc = app.session.doc().unwrap();
     assert!(doc.layer("SUELO").is_some());
     assert!(doc.layer("PILAR").is_some());
@@ -211,18 +270,167 @@ fn test_layer_sequence_with_datos_and_enter_event_across_frames() {
     assert!(doc.layer("AUX").is_some());
     assert!(doc.layer("SOL").is_some());
     assert!(doc.layer("TEXTO").is_some());
+
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]
-fn test_ejercicio_01_phase_a_exact_quantities_and_geometries() {
-    let full_content = std::fs::read_to_string("tests/fixtures/ejercicio_01.scr").expect("read original script");
-    // Extract geometry portion lines 1..170 (before line 171 _VSCURRENT)
-    let geom_lines: Vec<&str> = full_content.lines().take(170).collect();
-    let geom_scr = geom_lines.join("\n") + "\n";
+fn test_synthetic_multientity_script_quantities_and_geometries() {
+    let geom_scr = "\
+_-LAYER
+_M
+SUELO
+_C
+8
+SUELO
+_M
+PILAR
+_C
+7
+PILAR
+_M
+DATOS
+_C
+3
+DATOS
+_M
+AUX
+_C
+4
+AUX
+_M
+SOL
+_C
+1
+SOL
+_M
+TEXTO
+_C
+2
+TEXTO
+
+CLAYER
+SUELO
+_3DFACE
+-1.0000,-1.0000,0.0000
+5.0000,-1.0000,0.0000
+5.0000,6.0000,0.0000
+-1.0000,6.0000,0.0000
+
+CLAYER
+PILAR
+_CYLINDER
+2.0000,3.0000,0.0000
+0.06
+_A
+2.0000,3.0000,3.0000
+_-MTEXT
+2.2000,3.2000,3.0000
+_H
+0.25
+4.2250,2.8000,3.0000
+Pilar H=3
+
+CLAYER
+DATOS
+_SPHERE
+1.0000,0.0000,1.0000
+0.1
+_SPHERE
+0.0000,4.5000,0.0000
+0.1
+_LINE
+1.0000,0.0000,0.0000
+1.0000,0.0000,1.0000
+
+CLAYER
+TEXTO
+_-MTEXT
+1.1500,0.0000,1.1500
+_H
+0.25
+3.1750,-0.4000,1.1500
+A (1,0,1)
+
+_-MTEXT
+0.1500,4.5000,0.1500
+_H
+0.25
+2.6250,4.1000,0.1500
+B (0,4.5,0)
+
+CLAYER
+AUX
+_CYLINDER
+1.0000,0.0000,1.0000
+0.02
+_A
+0.0000,4.5000,0.0000
+_SPHERE
+0.5000,2.2500,0.5000
+0.07
+CLAYER
+TEXTO
+_-MTEXT
+0.6500,2.2500,0.6500
+_H
+0.25
+4.0250,1.8500,0.6500
+M (punto medio)
+
+CLAYER
+AUX
+_3DFACE
+-1.0000,1.8056,0.0000
+-1.0000,2.5167,3.2000
+4.0000,3.6278,3.2000
+4.0000,2.9167,0.0000
+
+CLAYER
+SOL
+_SPHERE
+2.0000,3.0000,2.3750
+0.1
+_CYLINDER
+2.0000,3.0000,0.0000
+0.09
+_A
+2.0000,3.0000,2.3750
+CLAYER
+TEXTO
+_-MTEXT
+2.2000,3.2000,2.4750
+_H
+0.25
+4.9000,2.8000,2.4750
+C  h=2.375 m
+
+CLAYER
+SOL
+_CYLINDER
+1.0000,0.0000,1.0000
+0.035
+_A
+2.0000,3.0000,2.3750
+_CYLINDER
+2.0000,3.0000,2.3750
+0.035
+_A
+0.0000,4.5000,0.0000
+CLAYER
+TEXTO
+_-MTEXT
+1.2000,1.4000,2.0000
+_H
+0.25
+5.0250,1.0000,2.0000
+AC = CB = 3.448 m
+
+";
     let path = temp_script("geom_test.scr", geom_scr.as_bytes());
 
     let mut session = Session::new();
-    let res = session.start_script_file(&path, &geom_scr);
+    let res = session.start_script_file(&path, geom_scr);
     assert!(res.is_ok(), "start script must succeed: {res:?}");
 
     while session.is_script_running() {
@@ -411,12 +619,30 @@ fn test_ejercicio_01_phase_a_exact_quantities_and_geometries() {
 }
 
 #[test]
-fn test_full_original_ejercicio_halts_at_vscurrent_line_171() {
-    let full_content = std::fs::read_to_string("tests/fixtures/ejercicio_01.scr").expect("read original script");
+fn test_synthetic_script_halts_at_unsupported_command_with_line_number() {
+    let full_content = "\
+; Synthetic script testing error halt and line reporting
+_-LAYER
+_M
+TEST_LAYER
+_C
+1
+TEST_LAYER
+
+_LINE
+0,0,0
+10,10,0
+
+_VSCURRENT
+2
+_LINE
+10,10,0
+20,20,0
+";
     let path = temp_script("full_test.scr", full_content.as_bytes());
 
     let mut session = Session::new();
-    let res = session.start_script_file(&path, &full_content);
+    let res = session.start_script_file(&path, full_content);
     assert!(res.is_ok(), "start script must succeed: {res:?}");
 
     let mut halted = false;
@@ -425,7 +651,7 @@ fn test_full_original_ejercicio_halts_at_vscurrent_line_171() {
             cadcraft_engine::ScriptStep::Progress { .. } => {}
             cadcraft_engine::ScriptStep::Done { .. } => break,
             cadcraft_engine::ScriptStep::Error { line, error, .. } => {
-                assert_eq!(line, 171, "Must halt at line 171 on _VSCURRENT, halted at {line}: {error}");
+                assert_eq!(line, 13, "Must halt at line 13 on _VSCURRENT, halted at {line}: {error}");
                 assert!(error.contains("_VSCURRENT"), "Error must mention _VSCURRENT: {error}");
                 halted = true;
                 break;
@@ -433,7 +659,7 @@ fn test_full_original_ejercicio_halts_at_vscurrent_line_171() {
             cadcraft_engine::ScriptStep::EofPending { .. } | cadcraft_engine::ScriptStep::Cancelled { .. } => break,
         }
     }
-    assert!(halted, "Full script must halt on line 171 _VSCURRENT");
+    assert!(halted, "Synthetic script must halt on line 13 _VSCURRENT");
     let _ = std::fs::remove_file(path);
 }
 
