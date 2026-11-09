@@ -305,6 +305,7 @@ pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
                     continue;
                 }
                 egui::Event::Key { key: Key::Escape, pressed: true, .. } => {
+                    crate::debug_cursor::trace_escape(ctx, "cmdline::options", "closing options popup");
                     app.cmd.options = None;
                     continue;
                 }
@@ -345,6 +346,7 @@ pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
             egui::Event::Key { key, pressed: true, repeat, modifiers, .. } => match key {
                 Key::Enter => submit(app),
                 Key::Escape => {
+                    crate::debug_cursor::trace_escape(ctx, "cmdline::keyboard", "Escape pressed in cmdline buffer/prompt");
                     if egui::Popup::is_any_open(ctx) || app.canvas.popup_open {
                         continue;
                     }
@@ -674,10 +676,14 @@ fn history(app: &mut CadApp, ui: &mut egui::Ui, canvas: Rect, bar: Rect) {
     let resp = ui.interact(z.all, ui.id().with("cmdline"), Sense::click_and_drag());
     let at = resp.hover_pos().or(resp.interact_pointer_pos());
     let on_grip = |p: Pos2| z.grip.contains(p) && z.window.is_none();
+    let at_grip = at.is_some_and(on_grip);
     let on_toggle = |p: Pos2| z.chevron.contains(p) || z.lines.is_some_and(|r| r.contains(p));
-    if app.cmd.resize_from.is_some() || at.is_some_and(on_grip) {
+    crate::debug_cursor::trace_cmdline_grip(ui.ctx(), bar, z.lines, z.grip, at, at_grip);
+    if app.cmd.resize_from.is_some() || at_grip {
+        crate::debug_cursor::trace_local_cursor_req(ui.ctx(), "cmdline::history_grip", egui::CursorIcon::ResizeVertical);
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     } else if at.is_some_and(on_toggle) {
+        crate::debug_cursor::trace_local_cursor_req(ui.ctx(), "cmdline::history_chevron", egui::CursorIcon::PointingHand);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     if resp.drag_started()
@@ -696,6 +702,7 @@ fn history(app: &mut CadApp, ui: &mut egui::Ui, canvas: Rect, bar: Rect) {
             app.cmd.resize_from = None;
         }
     }
+    crate::debug_cursor::trace_resize_from(ui.ctx(), app.cmd.resize_from);
     if resp.clicked() && resp.interact_pointer_pos().is_some_and(on_toggle) {
         let _ = app.run("ui.toggle.history", serde_json::json!({}));
     }

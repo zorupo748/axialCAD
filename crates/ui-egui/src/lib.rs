@@ -20,6 +20,7 @@ pub mod cmdline;
 pub mod context_menu;
 pub mod control;
 pub mod credits;
+pub mod debug_cursor;
 pub mod dialogs;
 pub mod docking;
 pub mod hatchdlg;
@@ -935,9 +936,13 @@ impl CadApp {
                 }
             }
         }
-        // Closing the window (title bar, File ▸ Exit, Cmd+Q) with unsaved changes asks first.
-        if ctx.input(|i| i.viewport().close_requested()) && self.request_quit() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        // Closing the window (title bar, File ▸ Exit, Cmd+Q) releases any active cursor capture
+        // and with unsaved changes asks first.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            canvas::release_virtual_nav_mode(ctx, &mut self.canvas, true);
+            if self.request_quit() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
         }
         let language = self.language();
         if self.fonts_language != Some(language) {
@@ -1056,7 +1061,7 @@ impl CadApp {
             if has_doc {
                 docking::show(self, ui);
             } else {
-                canvas::release_virtual_nav(ui.ctx(), &mut self.canvas);
+                canvas::release_virtual_nav_mode(ui.ctx(), &mut self.canvas, true);
                 chrome::start_page(self, ui);
             }
         });

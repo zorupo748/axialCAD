@@ -107,15 +107,37 @@ pub struct SelectionWindow {
 pub struct VirtualNavState {
     pub is_orbit: bool,
     pub virtual_pos: Pos2,
+    pub anchor_pos: Pos2,
     pub viewport_rect: Rect,
     pub doc_uid: u64,
     pub using_relative: bool,
 }
 
+/// True when the native Linux desktop runner uses the X11 backend (`with_x11()`), where
+/// `winit 0.30` returns `ExternalError::NotSupported` for `CursorGrabMode::Locked` and
+/// `CursorGrabMode::Confined` breaks passive XI2 button-release grabs. Under XWayland (and X11),
+/// hiding the cursor (`CursorVisible(false)` + `CursorIcon::None`) and warping it to `anchor_pos`
+/// via `ViewportCommand::CursorPosition(anchor_pos)` activates XWayland's
+/// `xwl_pointer_warp_emulator` (`zwp_pointer_constraints_v1::lock_pointer`) and keeps the OS
+/// pointer pinned inside the canvas without suppressing `XI_RawMotion` deltas or button release.
+pub fn uses_x11_backend() -> bool {
+    cfg!(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))
+        && std::env::var_os("DISPLAY").is_some()
+        && std::env::var_os("CADCRAFT_WAYLAND").is_none()
+}
+
 pub fn release_virtual_nav(ctx: &egui::Context, canvas: &mut CanvasState) {
+    release_virtual_nav_mode(ctx, canvas, false);
+}
+
+pub fn release_virtual_nav_mode(ctx: &egui::Context, canvas: &mut CanvasState, force_visible: bool) {
     if canvas.virtual_nav.take().is_some() {
+        crate::debug_cursor::trace_vnav_release(ctx, if force_visible { "release_force_visible" } else { "release_contextual" });
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None));
-        ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+        if force_visible {
+            crate::debug_cursor::trace_cursor_visible_req(ctx, "release_virtual_nav", true);
+            ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+        }
     }
     canvas.pan_last = None;
 }
@@ -2464,6 +2486,8 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         return;
     };
     let doc_uid = st.uid;
+    let curr_prompt = app.session.current_prompt();
+    crate::debug_cursor::trace_prompt(ui.ctx(), curr_prompt.as_ref().map(|p| p.message.as_str()));
     let view = st.view();
     let scale = f64::from(rect.height()) / view.height.max(1e-12);
     let camera = if matches!(st.space, cadcraft_doc::Space::Paper(_)) && st.mspace.is_none() { None } else { Some(app.session.camera()) };
@@ -2489,14 +2513,14 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // over the menu bar (#1701).
     let any_popup_open = egui::Popup::is_any_open(ui.ctx());
     app.canvas.popup_open = any_popup_open;
-    let inside = !any_popup_open
-        && hover_pos.is_some_and(|p| {
-            rect.contains(p)
-                && ui.ctx().layer_id_at(p) == Some(ui.layer_id())
-                && resp.hovered()
-                && !crate::viewcube::Layout::blocks_canvas_pointer(rect, p)
-        });
+    let contains = hover_pos.is_some_and(|p| rect.contains(p));
+    let layer_ok = hover_pos.is_some_and(|p| ui.ctx().layer_id_at(p) == Some(ui.layer_id()));
+    let hovered = resp.hovered();
+    let viewcube_blocked = hover_pos.is_some_and(|p| crate::viewcube::Layout::blocks_canvas_pointer(rect, p));
+    let inside = !any_popup_open && contains && layer_ok && hovered && !viewcube_blocked;
+    crate::debug_cursor::trace_inside(ui.ctx(), inside, hover_pos, rect, any_popup_open, contains, layer_ok, hovered, viewcube_blocked);
     if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        crate::debug_cursor::trace_escape(ui.ctx(), "canvas::selection_window", "Escape clears selection/drag window");
         app.canvas.selection_window = None;
         app.canvas.drag_window = false;
     }
@@ -2583,16 +2607,22 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         let _ = app.session.zoom_about_camera(f64::from(zoom_pinch), q);
     }
     let escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    if escape_pressed {
+        crate::debug_cursor::trace_escape(ui.ctx(), "canvas::nav_check", "Escape detected during nav check");
+    }
     let middle_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Middle));
     let primary_down = ui.input(|i| i.pointer.primary_down());
     let primary_drag_started = resp.drag_started_by(egui::PointerButton::Primary) && app.session.orbit_active();
     let focused = ui.input(|i| i.focused);
+    crate::debug_cursor::trace_focus(ui.ctx(), ui.ctx().egui_wants_keyboard_input(), focused);
 
     if let Some(vnav) = app.canvas.virtual_nav {
         let button_held = middle_down || (app.session.orbit_active() && primary_down);
         let viewport_ok = vnav.doc_uid == doc_uid && vnav.viewport_rect == rect && rect.width() >= 10.0 && rect.height() >= 10.0;
         if !focused || escape_pressed || !button_held || !viewport_ok {
-            release_virtual_nav(ui.ctx(), &mut app.canvas);
+            let reason = if !focused { "lost_focus" } else if escape_pressed { "escape_pressed" } else if !button_held { "button_released" } else if !viewport_ok { "viewport_invalid" } else { "other" };
+            crate::debug_cursor::trace_vnav_release(ui.ctx(), reason);
+            release_virtual_nav_mode(ui.ctx(), &mut app.canvas, !focused);
         }
     }
 
@@ -2609,16 +2639,26 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             app.session.begin_orbit();
         }
         let hp = hover_pos.unwrap_or_else(|| rect.center());
+        let margin = egui::vec2((rect.width() * 0.25).min(16.0), (rect.height() * 0.25).min(16.0));
+        let anchor_pos = rect.shrink2(margin).clamp(hp);
         app.canvas.virtual_nav = Some(VirtualNavState {
             is_orbit,
             virtual_pos: hp,
+            anchor_pos,
             viewport_rect: rect,
             doc_uid,
             using_relative: false,
         });
         app.canvas.pan_last = Some(hp);
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::Locked));
+        crate::debug_cursor::trace_vnav_start(ui.ctx(), is_orbit, anchor_pos, hp);
+        crate::debug_cursor::trace_local_cursor_req(ui.ctx(), "canvas::nav_start", egui::CursorIcon::None);
+        crate::debug_cursor::trace_cursor_visible_req(ui.ctx(), "canvas::nav_start", false);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
+        if !uses_x11_backend() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::Locked));
+        }
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorPosition(anchor_pos));
     }
 
     if let Some(vnav) = &mut app.canvas.virtual_nav {
@@ -2639,6 +2679,10 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         if had_mouse_moved && !vnav.using_relative {
             vnav.using_relative = true;
             app.canvas.pan_last = None;
+        }
+
+        if had_mouse_moved {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorPosition(vnav.anchor_pos));
         }
 
         let delta_points = if vnav.using_relative {
@@ -3453,13 +3497,16 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // Crosshair cursor.
     // Crosshair or virtual navigation cursor.
     if let Some(vnav) = app.canvas.virtual_nav {
+        crate::debug_cursor::trace_local_cursor_req(ui.ctx(), "canvas::vnav_active", egui::CursorIcon::None);
         ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         let p = vnav.virtual_pos;
         let p_clip = painter.with_clip_rect(vnav.viewport_rect);
         draw_virtual_nav_cursor(&p_clip, p, vnav.is_orbit);
     } else if inside && !on_menu {
         // Hide the OS cursor under the drawn crosshair, unless assistive tech needs it (#39).
-        ui.ctx().set_cursor_icon(if app.ui.system_cursor { egui::CursorIcon::Crosshair } else { egui::CursorIcon::None });
+        let icon = if app.ui.system_cursor { egui::CursorIcon::Crosshair } else { egui::CursorIcon::None };
+        crate::debug_cursor::trace_local_cursor_req(ui.ctx(), "canvas::inside_reticle", icon);
+        ui.ctx().set_cursor_icon(icon);
         if let Some(hp) = hover_pos {
             // Use the painted sheet even in MSPACE, where the editing transform follows a
             // model viewport. The whole cursor takes one colour from its centre.

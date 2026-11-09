@@ -91,6 +91,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.cad.ui(ui);
         self.persist_workspace(false);
+        cadcraft_ui_egui::debug_cursor::trace_frame_end(ui.ctx());
     }
     /// A normal exit: the workspace is saved, and this run's autosave files are not needed (a
     /// crash leaves them for recovery).

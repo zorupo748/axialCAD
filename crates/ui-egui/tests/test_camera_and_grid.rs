@@ -503,7 +503,7 @@ fn test_sensitivity_template_init_incremental_zoom_and_tiled_viewports() {
 #[test]
 fn test_virtual_cursor_relative_lock_no_alternation_and_doc_switch_release() {
     use cadcraft_ui_egui::{CadApp, Services};
-    use egui::{Event, Modifiers, PointerButton, Pos2};
+    use egui::{Event, Key, Modifiers, PointerButton, Pos2};
 
     let mut session = Session::empty();
     let idx1 = session.open_drawing(Drawing::new_metric(), "Doc1", None);
@@ -515,14 +515,25 @@ fn test_virtual_cursor_relative_lock_no_alternation_and_doc_switch_release() {
     app.canvas.zoom_pending = false;
     let ctx = egui::Context::default();
 
-    let run_frame = |app: &mut CadApp, events: Vec<Event>, focused: bool| -> Vec<egui::ViewportCommand> {
+    let run_frame = |app: &mut CadApp, events: Vec<Event>, focused: bool, close_requested: bool| -> Vec<egui::ViewportCommand> {
+        let mut viewports = egui::ViewportIdMap::default();
+        viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                focused: Some(focused),
+                events: if close_requested { vec![egui::ViewportEvent::Close] } else { Vec::new() },
+                ..Default::default()
+            },
+        );
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
             focused,
+            viewports,
             events,
             ..Default::default()
         };
         let mut out = ctx.run_ui(raw, |ui| {
+            app.logic(ui.ctx());
             app.ui(ui);
         });
         out.textures_delta.clear();
@@ -533,11 +544,12 @@ fn test_virtual_cursor_relative_lock_no_alternation_and_doc_switch_release() {
     };
 
     // Frame inicial de layout
-    let _ = run_frame(&mut app, vec![Event::PointerMoved(pos2(600.0, 400.0))], true);
+    let _ = run_frame(&mut app, vec![Event::PointerMoved(pos2(600.0, 400.0))], true, false);
     let rect = app.canvas.rect.expect("canvas rect");
     let start_pt = rect.center();
 
-    // Frame 1: presionar botón central en el centro del lienzo -> inicia navegación virtual y envía CursorGrab(Locked) una vez
+    // Frame 1: presionar botón central en el centro del lienzo -> inicia navegación virtual,
+    // oculta cursor y fija ancla interior mediante CursorPosition(anchor_pos)
     let cmds1 = run_frame(
         &mut app,
         vec![
@@ -545,12 +557,24 @@ fn test_virtual_cursor_relative_lock_no_alternation_and_doc_switch_release() {
             Event::PointerButton { pos: start_pt, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::NONE },
         ],
         true,
+        false,
     );
-    assert!(app.canvas.virtual_nav.is_some(), "Debe activarse virtual_nav al pulsar botón central");
+    let vnav1 = app.canvas.virtual_nav.expect("Debe activarse virtual_nav al pulsar botón central");
+    assert_eq!(vnav1.anchor_pos, start_pt);
     assert!(
-        cmds1.iter().any(|c| matches!(c, egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::Locked))),
-        "El frame de inicio debe enviar CursorGrab::Locked"
+        cmds1.iter().any(|c| matches!(c, egui::ViewportCommand::CursorVisible(false))),
+        "El frame de inicio debe enviar CursorVisible(false)"
     );
+    assert!(
+        cmds1.iter().any(|c| matches!(c, egui::ViewportCommand::CursorPosition(p) if *p == start_pt)),
+        "El frame de inicio debe enviar CursorPosition(anchor_pos) para activar el bloqueo en XWayland/X11"
+    );
+    if !cadcraft_ui_egui::canvas::uses_x11_backend() {
+        assert!(
+            cmds1.iter().any(|c| matches!(c, egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::Locked))),
+            "En backends no-X11 debe enviar CursorGrab::Locked"
+        );
+    }
 
     // Frame 2: llega evento relativo MouseMoved(30, 20) Y también PointerMoved absoluto distinto
     let cmds2 = run_frame(
@@ -560,13 +584,14 @@ fn test_virtual_cursor_relative_lock_no_alternation_and_doc_switch_release() {
             Event::MouseMoved(egui::vec2(30.0, 20.0)),
         ],
         true,
+        false,
     );
     let vnav2 = app.canvas.virtual_nav.expect("virtual_nav activo");
     assert!(vnav2.using_relative, "Tras recibir MouseMoved debe fijar using_relative = true");
     assert_eq!(vnav2.virtual_pos, start_pt + egui::vec2(30.0, 20.0), "Solo debe contar el delta relativo (30, 20), sin doble conteo con PointerMoved");
     assert!(
-        !cmds2.iter().any(|c| matches!(c, egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::Locked))),
-        "No debe reenviar CursorGrab::Locked en cada frame"
+        cmds2.iter().any(|c| matches!(c, egui::ViewportCommand::CursorPosition(p) if *p == start_pt)),
+        "Cada frame con MouseMoved debe reanclar el puntero del SO en anchor_pos"
     );
 
     // Frame 3: frame sin MouseMoved pero con PointerMoved -> debe aportar delta cero (no alternar a absoluto)
@@ -574,17 +599,395 @@ fn test_virtual_cursor_relative_lock_no_alternation_and_doc_switch_release() {
         &mut app,
         vec![Event::PointerMoved(start_pt + egui::vec2(250.0, 250.0))],
         true,
+        false,
     );
     let vnav3 = app.canvas.virtual_nav.expect("virtual_nav sigue activo");
     assert_eq!(vnav3.virtual_pos, start_pt + egui::vec2(30.0, 20.0), "Un frame sin MouseMoved con using_relative activo debe aportar delta 0");
 
     // Frame 4: cambio de documento activo durante el gesto -> debe liberar virtual_nav y restaurar cursor
     app.session.active = idx2;
-    let cmds4 = run_frame(&mut app, vec![Event::MouseMoved(egui::vec2(10.0, 10.0))], true);
+    let cmds4 = run_frame(&mut app, vec![Event::MouseMoved(egui::vec2(10.0, 10.0))], true, false);
     assert!(app.canvas.virtual_nav.is_none(), "El cambio de documento debe liberar virtual_nav aunque el botón siga pulsado");
     assert!(
         cmds4.iter().any(|c| matches!(c, egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None))),
         "Liberar por cambio de documento debe enviar CursorGrab::None"
     );
+    assert!(
+        !cmds4.iter().any(|c| matches!(c, egui::ViewportCommand::CursorVisible(true))),
+        "Liberar sobre el lienzo no debe forzar CursorVisible(true)"
+    );
+
+    // Frame 5: liberación al soltar botón, cancelar (Escape), perder foco y solicitar cierre de ventana
+    // 5a) Soltar botón
+    let _ = run_frame(
+        &mut app,
+        vec![
+            Event::PointerMoved(start_pt),
+            Event::PointerButton { pos: start_pt, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::NONE },
+        ],
+        true,
+        false,
+    );
+    assert!(app.canvas.virtual_nav.is_some());
+    let cmds_release = run_frame(
+        &mut app,
+        vec![Event::PointerButton { pos: start_pt, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::NONE }],
+        true,
+        false,
+    );
+    assert!(app.canvas.virtual_nav.is_none(), "Soltar el botón debe liberar virtual_nav");
+    assert!(cmds_release.iter().any(|c| matches!(c, egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None))));
+    assert!(
+        !cmds_release.iter().any(|c| matches!(c, egui::ViewportCommand::CursorVisible(true))),
+        "Soltar botón sobre el lienzo no debe forzar CursorVisible(true)"
+    );
+
+    // 5b) Cancelar con Escape
+    let _ = run_frame(
+        &mut app,
+        vec![
+            Event::PointerMoved(start_pt),
+            Event::PointerButton { pos: start_pt, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::NONE },
+        ],
+        true,
+        false,
+    );
+    assert!(app.canvas.virtual_nav.is_some());
+    let cmds_esc = run_frame(
+        &mut app,
+        vec![Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }],
+        true,
+        false,
+    );
+    assert!(app.canvas.virtual_nav.is_none(), "Escape debe liberar virtual_nav");
+    assert!(cmds_esc.iter().any(|c| matches!(c, egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None))));
+    assert!(
+        !cmds_esc.iter().any(|c| matches!(c, egui::ViewportCommand::CursorVisible(true))),
+        "Escape sobre el lienzo no debe forzar CursorVisible(true)"
+    );
+    // Limpiar botón central
+    let _ = run_frame(
+        &mut app,
+        vec![Event::PointerButton { pos: start_pt, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::NONE }],
+        true,
+        false,
+    );
+
+    // 5c) Perder foco
+    let _ = run_frame(
+        &mut app,
+        vec![
+            Event::PointerMoved(start_pt),
+            Event::PointerButton { pos: start_pt, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::NONE },
+        ],
+        true,
+        false,
+    );
+    assert!(app.canvas.virtual_nav.is_some());
+    let cmds_unfocus = run_frame(&mut app, Vec::new(), false, false);
+    assert!(app.canvas.virtual_nav.is_none(), "Perder foco debe liberar virtual_nav");
+    assert!(cmds_unfocus.iter().any(|c| matches!(c, egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None))));
+    assert!(cmds_unfocus.iter().any(|c| matches!(c, egui::ViewportCommand::CursorVisible(true))), "Perder foco debe restaurar visibilidad");
+    let _ = run_frame(
+        &mut app,
+        vec![Event::PointerButton { pos: start_pt, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::NONE }],
+        true,
+        false,
+    );
+
+    // 5d) Solicitud de cierre de ventana
+    let _ = run_frame(
+        &mut app,
+        vec![
+            Event::PointerMoved(start_pt),
+            Event::PointerButton { pos: start_pt, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::NONE },
+        ],
+        true,
+        false,
+    );
+    assert!(app.canvas.virtual_nav.is_some());
+    let cmds_close = run_frame(&mut app, Vec::new(), true, true);
+    assert!(app.canvas.virtual_nav.is_none(), "Cerrar ventana debe liberar virtual_nav");
+    assert!(cmds_close.iter().any(|c| matches!(c, egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None))));
+    assert!(cmds_close.iter().any(|c| matches!(c, egui::ViewportCommand::CursorVisible(true))), "Cerrar ventana debe restaurar visibilidad");
+}
+
+#[test]
+fn test_regressions_cursor_policy_and_navigation_restoration() {
+    use cadcraft_ui_egui::{CadApp, Services};
+    use egui::{Event, Key, Modifiers, PointerButton, Pos2};
+
+    let run_frame_full = |app: &mut CadApp, ctx: &egui::Context, events: Vec<Event>, focused: bool| -> (Vec<egui::ViewportCommand>, egui::CursorIcon) {
+        let mut viewports = egui::ViewportIdMap::default();
+        viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                focused: Some(focused),
+                ..Default::default()
+            },
+        );
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+            focused,
+            viewports,
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        });
+        out.textures_delta.clear();
+        let cmds = out
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|v| v.commands.clone())
+            .unwrap_or_default();
+        (cmds, out.platform_output.cursor_icon)
+    };
+
+    // 1. Paso por ResizeVertical -> canvas con cursor None -> órbita -> liberación
+    {
+        let mut session = Session::empty();
+        session.open_drawing(Drawing::new_metric(), "Doc", None);
+        let mut app = CadApp::new(session, Services::default());
+        app.canvas.zoom_pending = false;
+        let ctx = egui::Context::default();
+        let center = Pos2::new(600.0, 400.0);
+
+        // Warmup: asentar layout
+        let _ = run_frame_full(&mut app, &ctx, vec![Event::PointerMoved(center)], true);
+        let (_, icon1) = run_frame_full(&mut app, &ctx, Vec::new(), true);
+        assert_eq!(icon1, egui::CursorIcon::None, "Sobre el canvas el cursor es None");
+
+        // Simular que el ratón pasó por un elemento de redimensionamiento vertical (ej. grip)
+        let bar_top_pos = Pos2::new(600.0, 770.0);
+        let _ = run_frame_full(&mut app, &ctx, vec![Event::PointerMoved(bar_top_pos)], true);
+        let (_, icon_grip) = run_frame_full(&mut app, &ctx, Vec::new(), true);
+        if icon_grip == egui::CursorIcon::ResizeVertical {
+            assert_eq!(icon_grip, egui::CursorIcon::ResizeVertical);
+        }
+
+        // Volver al centro del canvas: cursor debe ser None
+        let _ = run_frame_full(&mut app, &ctx, vec![Event::PointerMoved(center)], true);
+        let (_, icon_canvas) = run_frame_full(&mut app, &ctx, Vec::new(), true);
+        assert_eq!(icon_canvas, egui::CursorIcon::None, "Al volver al canvas el cursor vuelve a None");
+
+        // Iniciar órbita con Shift + Middle
+        let (cmds_start, _) = run_frame_full(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerButton { pos: center, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::SHIFT },
+            ],
+            true,
+        );
+        assert!(app.canvas.virtual_nav.is_some(), "virtual_nav activado");
+        assert!(cmds_start.iter().any(|c| matches!(c, egui::ViewportCommand::CursorVisible(false))));
+
+        // Liberar órbita soltando botón central
+        let (cmds_rel, icon_rel) = run_frame_full(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerButton { pos: center, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::SHIFT },
+            ],
+            true,
+        );
+        assert!(app.canvas.virtual_nav.is_none(), "virtual_nav liberado");
+        assert!(cmds_rel.iter().any(|c| matches!(c, egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None))));
+        assert!(
+            !cmds_rel.iter().any(|c| matches!(c, egui::ViewportCommand::CursorVisible(true))),
+            "Al liberar órbita sobre canvas, no debe enviar CursorVisible(true)"
+        );
+        assert_eq!(icon_rel, egui::CursorIcon::None, "La salida final de UI debe seguir siendo CursorIcon::None");
+    }
+
+    // 2. Misma secuencia con LINE y cancelación previa
+    {
+        let mut session = Session::empty();
+        session.open_drawing(Drawing::new_metric(), "Doc", None);
+        let mut app = CadApp::new(session, Services::default());
+        app.canvas.zoom_pending = false;
+        let ctx = egui::Context::default();
+        let center = Pos2::new(600.0, 400.0);
+
+        // Warmup
+        let _ = run_frame_full(&mut app, &ctx, vec![Event::PointerMoved(center)], true);
+        let _ = run_frame_full(&mut app, &ctx, Vec::new(), true);
+
+        // Iniciar LINE
+        app.cmdline("LINE");
+        let _ = run_frame_full(&mut app, &ctx, vec![Event::PointerMoved(center)], true);
+        assert!(app.session.prompting(), "LINE debe estar esperando puntos");
+
+        // Cancelar LINE con Escape
+        let _ = run_frame_full(
+            &mut app,
+            &ctx,
+            vec![Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }],
+            true,
+        );
+        assert!(!app.session.prompting(), "Escape debe cancelar LINE");
+
+        // Iniciar órbita
+        let _ = run_frame_full(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerButton { pos: center, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::SHIFT },
+            ],
+            true,
+        );
+        assert!(app.canvas.virtual_nav.is_some());
+
+        // Liberar órbita
+        let (cmds_rel, icon_rel) = run_frame_full(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerButton { pos: center, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::SHIFT },
+            ],
+            true,
+        );
+        assert!(app.canvas.virtual_nav.is_none());
+        assert!(!cmds_rel.iter().any(|c| matches!(c, egui::ViewportCommand::CursorVisible(true))));
+        assert_eq!(icon_rel, egui::CursorIcon::None, "Con LINE cancelado, el retorno a canvas conserva None");
+    }
+
+    // 3. Retorno a canvas con system_cursor activado
+    {
+        let mut session = Session::empty();
+        session.open_drawing(Drawing::new_metric(), "Doc", None);
+        let mut app = CadApp::new(session, Services::default());
+        app.canvas.zoom_pending = false;
+        app.ui.system_cursor = true;
+        let ctx = egui::Context::default();
+        let center = Pos2::new(600.0, 400.0);
+
+        // Warmup
+        let _ = run_frame_full(&mut app, &ctx, vec![Event::PointerMoved(center)], true);
+        let (_, icon_init) = run_frame_full(&mut app, &ctx, Vec::new(), true);
+        assert_eq!(icon_init, egui::CursorIcon::Crosshair, "Con system_cursor activado, el cursor es Crosshair");
+
+        // Iniciar órbita
+        let (cmds_start, _) = run_frame_full(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerButton { pos: center, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::SHIFT },
+            ],
+            true,
+        );
+        assert!(app.canvas.virtual_nav.is_some());
+        assert!(cmds_start.iter().any(|c| matches!(c, egui::ViewportCommand::CursorVisible(false))));
+
+        // Liberar órbita
+        let (cmds_rel, icon_rel) = run_frame_full(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerButton { pos: center, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::SHIFT },
+            ],
+            true,
+        );
+        assert!(app.canvas.virtual_nav.is_none());
+        assert_eq!(icon_rel, egui::CursorIcon::Crosshair, "Con system_cursor activado, la UI solicita Crosshair al liberar");
+        assert!(cmds_rel.iter().any(|c| matches!(c, egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None))));
+    }
+
+    // 4. Retorno a una zona de UI que requiere cursor visible (menú / título)
+    {
+        let mut session = Session::empty();
+        session.open_drawing(Drawing::new_metric(), "Doc", None);
+        let mut app = CadApp::new(session, Services::default());
+        app.canvas.zoom_pending = false;
+        let ctx = egui::Context::default();
+        let center = Pos2::new(600.0, 400.0);
+        let top_menu_pos = Pos2::new(100.0, 10.0);
+
+        // Warmup
+        let _ = run_frame_full(&mut app, &ctx, vec![Event::PointerMoved(center)], true);
+        let _ = run_frame_full(&mut app, &ctx, Vec::new(), true);
+
+        // Iniciar órbita
+        let _ = run_frame_full(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerMoved(center),
+                Event::PointerButton { pos: center, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::SHIFT },
+            ],
+            true,
+        );
+        assert!(app.canvas.virtual_nav.is_some());
+
+        // Mover y liberar sobre la barra superior / menú
+        let (cmds_rel, icon_rel) = run_frame_full(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerMoved(top_menu_pos),
+                Event::PointerButton { pos: top_menu_pos, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::SHIFT },
+            ],
+            true,
+        );
+        assert!(app.canvas.virtual_nav.is_none());
+        assert_eq!(icon_rel, egui::CursorIcon::Default, "Al soltar sobre la barra de menú/título el cursor debe ser Default");
+        assert!(cmds_rel.iter().any(|c| matches!(c, egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None))));
+    }
+
+    // 5. Liberación por Escape y pérdida de foco
+    {
+        let mut session = Session::empty();
+        session.open_drawing(Drawing::new_metric(), "Doc", None);
+        let mut app = CadApp::new(session, Services::default());
+        app.canvas.zoom_pending = false;
+        let ctx = egui::Context::default();
+        let center = Pos2::new(600.0, 400.0);
+
+        // Warmup
+        let _ = run_frame_full(&mut app, &ctx, vec![Event::PointerMoved(center)], true);
+        let _ = run_frame_full(&mut app, &ctx, Vec::new(), true);
+
+        // 5a. Escape durante órbita
+        let _ = run_frame_full(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerMoved(center),
+                Event::PointerButton { pos: center, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::SHIFT },
+            ],
+            true,
+        );
+        assert!(app.canvas.virtual_nav.is_some());
+        let (cmds_esc, icon_esc) = run_frame_full(
+            &mut app,
+            &ctx,
+            vec![Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }],
+            true,
+        );
+        assert!(app.canvas.virtual_nav.is_none(), "Escape debe liberar navegación");
+        assert_eq!(icon_esc, egui::CursorIcon::None, "Sobre el canvas el cursor es None tras Escape");
+        assert!(!cmds_esc.iter().any(|c| matches!(c, egui::ViewportCommand::CursorVisible(true))));
+        // Limpiar botón
+        let _ = run_frame_full(&mut app, &ctx, vec![Event::PointerButton { pos: center, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::NONE }], true);
+
+        // 5b. Pérdida de foco durante órbita
+        let _ = run_frame_full(
+            &mut app,
+            &ctx,
+            vec![
+                Event::PointerMoved(center),
+                Event::PointerButton { pos: center, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::SHIFT },
+            ],
+            true,
+        );
+        assert!(app.canvas.virtual_nav.is_some());
+        let (cmds_unfocus, _) = run_frame_full(&mut app, &ctx, Vec::new(), false);
+        assert!(app.canvas.virtual_nav.is_none(), "Perder foco debe liberar navegación");
+        assert!(cmds_unfocus.iter().any(|c| matches!(c, egui::ViewportCommand::CursorVisible(true))), "Perder foco debe forzar visibilidad");
+        assert!(cmds_unfocus.iter().any(|c| matches!(c, egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None))));
+    }
 }
 
