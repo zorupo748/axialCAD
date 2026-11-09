@@ -330,7 +330,8 @@ pub struct CadApp {
 }
 
 impl CadApp {
-    pub fn new(session: Session, services: Services) -> Self {
+    pub fn new(mut session: Session, services: Services) -> Self {
+        session.is_interactive_ui = true;
         CadApp {
             system_languages: Vec::new(),
             system_animations: None,
@@ -1055,6 +1056,7 @@ impl CadApp {
             if has_doc {
                 docking::show(self, ui);
             } else {
+                canvas::release_virtual_nav(ui.ctx(), &mut self.canvas);
                 chrome::start_page(self, ui);
             }
         });
@@ -1063,6 +1065,10 @@ impl CadApp {
         closing::prompt(self, ui.ctx());
         autosave::show(self, ui.ctx());
         autosave::gpu_notice(self, ui.ctx());
+        if self.canvas.virtual_nav.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
+        }
         self.frame_ms = now_ms() - t0;
     }
 

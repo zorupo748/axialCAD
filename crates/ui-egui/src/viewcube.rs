@@ -530,7 +530,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui, l: &Layout) {
     let pressed_on = resp.interact_pointer_pos().and_then(|point| l.part_at(point, &geometry));
     if resp.dragged() && drag_origin.is_some_and(|origin| origin != Part::Home) {
         let d = resp.drag_delta();
-        let _ = app.session.orbit_step(f64::from(d.x), f64::from(d.y));
+        let _ = app.session.viewcube_orbit_step(f64::from(d.x), f64::from(d.y));
     }
     if resp.clicked()
         && let Some(part) = pressed_on

@@ -82,6 +82,28 @@ fn rotation_turns_the_box() {
     // A picked rotation is the angle from the first corner.
     s.script("MTEXT 1,1 r 2,2 10,0\nDiag\n\n").unwrap();
     assert!((last_mtext(&s).rotation - std::f64::consts::FRAC_PI_4).abs() < 1e-9);
+    // Translated elevated UCS: picked height, rotation and width preserve relative UCS distances/angles and Z elevation.
+    s.cmdline("ucs 3 100,200,50 101,200,50 100,201,50").unwrap();
+    s.script("MTEXT 1,1 h 1,4 r 2,2 w 5,5\nElevated\n\n").unwrap();
+    let t = last_mtext(&s);
+    assert!((t.height - 3.0).abs() < 1e-9);
+    assert!((t.rotation - std::f64::consts::FRAC_PI_4).abs() < 1e-9);
+    // From (1,1) to (5,5) along 45° is 4 * sqrt(2).
+    assert!((t.width - 4.0 * 2f64.sqrt()).abs() < 1e-9, "width: {}", t.width);
+    assert!((t.insert.x - 101.0).abs() < 1e-9 && (t.insert.y - 201.0).abs() < 1e-9 && (t.insert.z - 50.0).abs() < 1e-9);
+
+    // Pre-existing MTEXT limitation on an inclined UCS (tilted 60° around X: cos 60° = 0.5, sin 60° = sqrt(3)/2):
+    // MTextM projects points to WCS XY (`p3.xy()`) and stores extrusion = +Z, so a point (0, 4) in UCS
+    // projects to (0, 2) in WCS XY (foreshortened by cos 60° = 0.5), giving height = 2.0 in WCS XY.
+    s.cmdline("ucs w").unwrap();
+    s.cmdline("ucs 3 0,0,0 1,0,0 0,0.5,0.8660254037844386").unwrap();
+    s.script("MTEXT 0,0 h 0,4 r 2,4 w 6,0\nTilted\n\n").unwrap();
+    let e_inc = s.doc().unwrap().model.iter().last().unwrap();
+    assert_eq!(e_inc.common.extrusion, cadcraft_geom::Vec3::Z);
+    let t_inc = last_mtext(&s);
+    assert!((t_inc.height - 2.0).abs() < 1e-6, "WCS XY projection of (0,4) at 60° tilt has length 2.0: {}", t_inc.height);
+    assert!((t_inc.rotation - std::f64::consts::FRAC_PI_4).abs() < 1e-6, "WCS XY projection of (2,4) is (2,2) -> 45°: {}", t_inc.rotation);
+    assert!((t_inc.width - 6.0 / 2f64.sqrt()).abs() < 1e-6, "projection of (6,0) along 45°: {}", t_inc.width);
 }
 
 #[test]

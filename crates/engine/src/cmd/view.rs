@@ -190,6 +190,7 @@ fn fit(s: &mut Session, b: Bounds2) -> Result<()> {
     let aspect = st.zoom_aspect(w / h.max(1.0));
     let height = b.height().max(b.width() / aspect.max(1e-6)).max(1e-9);
     st.set_zoom_frame(View { center: b.center(), height });
+    st.set_ref_height(height);
     Ok(())
 }
 
@@ -514,6 +515,7 @@ impl Interactive for ZoomM {
                     st.view_history.pop();
                 }
                 st.set_zoom_frame(View { center: b.center, height: b.height });
+                st.set_ref_height(b.height);
                 return Ok(Step::Done);
             }
             (ZoomStage::Dynamic(mut b), Input::Point(p)) => {
@@ -645,6 +647,31 @@ impl Session {
     pub fn orbit_active(&self) -> bool {
         self.running.as_ref().is_some_and(|r| r.id == "3dorbit")
     }
+    /// Begin a 3D orbit gesture (Shift+Middle drag or 3DORBIT):
+    /// Evaluates the orbit pivot once at the center of the active viewport,
+    /// shifting target strictly along the camera view ray v to intersect the active
+    /// working plane (UCS origin + plane offset).
+    /// If the ray is grazing (|v · n| <= 1e-4) or intersection is non-finite,
+    /// the current target is kept without modification.
+    /// This shift along v produces zero visual change on screen before rotation.
+    pub fn begin_orbit(&mut self) {
+        self.orbit_sensitivity = self.orbit_sensitivity_factor();
+        if self.layout_space() != cadcraft_doc::Space::Model {
+            return;
+        }
+        let mut cam = self.camera();
+        let ucs = self.ucs();
+        let offset = self.settings.drawing_plane_offset;
+        let plane_origin = ucs.origin + ucs.z_axis * offset;
+        let plane_frame = cadcraft_geom::UcsFrame::new(plane_origin, ucs.x_axis, ucs.y_axis, ucs.z_axis);
+        let v = cam.view_dir();
+        if let Some(p) = plane_frame.unproject_ray(cam.target, v) {
+            if p.x.is_finite() && p.y.is_finite() && p.z.is_finite() {
+                cam.target = p;
+                self.set_camera(cam);
+            }
+        }
+    }
     /// One step of 3D orbit drag of (dx, dy) pixels.
     pub fn orbit_step(&mut self, dx: f64, dy: f64) -> Result<()> {
         if self.layout_space() != cadcraft_doc::Space::Model {
@@ -652,17 +679,20 @@ impl Session {
         }
         let (w, h) = self.viewport_px;
         let mut cam = self.camera();
-        if cam.target == cadcraft_geom::Vec3::ZERO
-            && let Ok(st) = self.state()
-        {
-            let ext = st.doc.extents(&st.space);
-            if !ext.is_empty() {
-                cam.target = cadcraft_geom::Vec3::new(ext.center().x, ext.center().y, 0.0);
-            } else {
-                let v = st.view();
-                cam.target = cadcraft_geom::Vec3::new(v.center.x, v.center.y, 0.0);
-            }
+        let m = self.orbit_sensitivity;
+        // Inverted axes with adaptive zoom sensitivity: dragging right turns view left, dragging down tilts view up
+        cam.orbit(-dx * m, -dy * m, (w, h));
+        self.set_camera(cam);
+        self.touch();
+        Ok(())
+    }
+    /// One step of ViewCube drag of (dx, dy) pixels (uninverted, nominal 1:1 sensitivity).
+    pub fn viewcube_orbit_step(&mut self, dx: f64, dy: f64) -> Result<()> {
+        if self.layout_space() != cadcraft_doc::Space::Model {
+            return Ok(());
         }
+        let (w, h) = self.viewport_px;
+        let mut cam = self.camera();
         cam.orbit(dx, dy, (w, h));
         self.set_camera(cam);
         self.touch();
@@ -901,6 +931,7 @@ impl Interactive for VpointM {
 }
 
 pub(crate) fn run_3dorbit(s: &mut Session, p: &Value) -> Result<Value> {
+    s.begin_orbit();
     let mut cam = s.camera();
     if let Some(arr) = p.get("direction").and_then(Value::as_array) {
         if arr.len() == 3 {

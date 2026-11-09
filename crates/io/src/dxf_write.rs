@@ -256,6 +256,8 @@ const HEADER_VARS: &[(&str, i32)] = &[
     ("LIMMAX", -2),
     ("SNAPUNIT", -2),
     ("GRIDUNIT", -2),
+    ("SNAPMODE", 70),
+    ("GRIDMODE", 70),
     ("ORTHOMODE", 70),
     ("FILLMODE", 70),
     ("MIRRTEXT", 70),
@@ -1814,6 +1816,12 @@ fn vport_table(w: &mut W, d: &Drawing, ext: Bounds2) {
         w.f(41, if t.aspect.is_finite() && t.aspect > 0.0 { t.aspect } else { 1.0 });
         w.f(42, 50.0);
         w.f(50, d.header.f64("SNAPANG", 0.0));
+        if let Some(v) = d.header.get("SNAPMODE").and_then(cadcraft_doc::HVal::as_i64) {
+            w.i(75, v);
+        }
+        if let Some(v) = d.header.get("GRIDMODE").and_then(cadcraft_doc::HVal::as_i64) {
+            w.i(76, v);
+        }
     }
     w.s(0, "ENDTAB");
 }

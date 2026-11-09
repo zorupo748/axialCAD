@@ -99,6 +99,8 @@ pub struct ModelTiles {
     pub rects: Vec<(Vec2, Vec2)>,
     /// Each tile's view; the current tile shows the model space view itself.
     pub views: Vec<View>,
+    /// Each tile's reference framing height for adaptive orbit sensitivity.
+    pub ref_heights: Vec<f64>,
     /// The current tile.
     pub active: usize,
 }
@@ -151,6 +153,8 @@ pub struct DocState {
     pub drawing_plane: cadcraft_geom::DrawingPlane,
     pub ucs: cadcraft_geom::UcsFrame,
     pub ucs_history: Vec<cadcraft_geom::UcsFrame>,
+    /// Framing height of the working set for adaptive orbit sensitivity.
+    pub ref_height: f64,
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -186,6 +190,7 @@ impl DocState {
             drawing_plane: cadcraft_geom::DrawingPlane::XY,
             ucs,
             ucs_history: Vec::new(),
+            ref_height: 10.0,
         }
     }
     /// The drawing has changes not saved to its file, or the Block Editor has changes not yet
@@ -333,6 +338,14 @@ impl DocState {
     /// Width / height of the area ZOOM fits into: the active unlocked viewport, else `screen`.
     pub fn zoom_aspect(&self, screen: f64) -> f64 {
         self.zoom_viewport().map_or(screen, |v| v.width / v.height)
+    }
+    /// Update the reference framing height for adaptive 3D orbit sensitivity (both active doc and active tile).
+    pub fn set_ref_height(&mut self, h: f64) {
+        let h = h.max(1e-6);
+        self.ref_height = h;
+        if self.tiles.active < self.tiles.ref_heights.len() {
+            self.tiles.ref_heights[self.tiles.active] = h;
+        }
     }
     /// Set the view ZOOM works on (see [`Self::zoom_frame`]), recording view history.
     pub fn set_zoom_frame(&mut self, f: View) {
@@ -711,6 +724,17 @@ pub struct Session {
     /// Cursor position in world coordinates (from the UI; used for direct distance entry).
     pub cursor: Vec2,
     pub cursor3: Vec3,
+    /// Explicit validity flag for cursor3: true only when actively resolved by the view/camera
+    /// for the current command and segment base point.
+    pub cursor3_valid: bool,
+    /// Base point associated with the current cursor3 resolution.
+    pub cursor3_base: Option<Vec3>,
+    /// Flag indicating whether the point currently being dispatched came from an object snap.
+    pub input_is_snapped: bool,
+    /// Flag indicating whether the point currently being dispatched came from explicit typed coordinates.
+    pub input_is_explicit: bool,
+    /// Whether the session is actively attached to an interactive UI canvas.
+    pub is_interactive_ui: bool,
     /// The deferred tangent/perpendicular snap under the cursor, if any (from the UI; lets the
     /// rubber band show the line it resolves to).
     pub cursor_deferred: Option<snap::Deferred>,
@@ -751,6 +775,8 @@ pub struct Session {
     pub hatch_picks: Option<cmd::hatch::HatchPicks>,
     /// Hatch preview parameters set during point/boundary picking or dialog preview.
     pub hatch_preview_params: Option<serde_json::Value>,
+    /// Multiplier for 3D orbit angular sensitivity, frozen at the start of each orbit gesture.
+    pub orbit_sensitivity: f64,
 }
 
 impl Default for Session {
@@ -764,6 +790,13 @@ impl Session {
         let mut s = Session::empty();
         s.new_drawing(false);
         s
+    }
+    /// Invalidate spatial 3D cursor tracking and transient dispatch flags.
+    pub fn invalidate_cursor3(&mut self) {
+        self.cursor3_valid = false;
+        self.cursor3_base = None;
+        self.input_is_snapped = false;
+        self.input_is_explicit = false;
     }
     /// A session with no open drawing (the Start tab).
     pub fn empty() -> Self {
@@ -784,6 +817,11 @@ impl Session {
             point_mods: Vec::new(),
             cursor: Vec2::ZERO,
             cursor3: Vec3::ZERO,
+            cursor3_valid: false,
+            cursor3_base: None,
+            input_is_snapped: false,
+            input_is_explicit: false,
+            is_interactive_ui: false,
             cursor_deferred: None,
             ctrl_down: false,
             picked_viewport: None,
@@ -804,16 +842,23 @@ impl Session {
             lisp_last: None,
             hatch_picks: None,
             hatch_preview_params: None,
+            orbit_sensitivity: 1.0,
         }
+    }
+    /// Synchronize session-level drafting settings (`gridmode`) from the currently active drawing's header.
+    pub fn sync_active_doc_settings(&mut self) {
+        self.settings.gridmode = self.doc().ok().and_then(|d| d.header.grid_mode()).unwrap_or(true);
     }
     pub fn new_drawing(&mut self, metric: bool) -> usize {
         self.untitled_counter += 1;
         let d = if metric { Drawing::new_metric() } else { Drawing::new_imperial() };
         let mut st = DocState::new(d, &format!("Drawing{}", self.untitled_counter), None);
         st.set_view_quiet(if metric { View { center: Vec2::new(210.0, 148.5), height: 297.0 } } else { View::default() });
+        st.set_ref_height(st.view().height);
         self.end_running();
         self.docs.push(st);
         self.active = self.docs.len() - 1;
+        self.sync_active_doc_settings();
         self.active
     }
     pub fn open_drawing(&mut self, d: Drawing, title: &str, path: Option<String>) -> usize {
@@ -825,9 +870,11 @@ impl Session {
                 height: (ext.height().max(ext.width() * self.viewport_px.1 / self.viewport_px.0.max(1.0)) * 1.1).max(1e-6),
             });
         }
+        st.set_ref_height(st.view().height);
         self.end_running();
         self.docs.push(st);
         self.active = self.docs.len() - 1;
+        self.sync_active_doc_settings();
         self.active
     }
     /// A command still waiting for input belongs to the drawing it started in: end it there
@@ -845,8 +892,10 @@ impl Session {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cmd::file::finish_open(self, f))) {
             Ok(r) => r,
             Err(_) => {
+                self.invalidate_cursor3();
                 self.docs.truncate(n);
                 self.active = self.active.min(self.docs.len().saturating_sub(1));
+                self.sync_active_doc_settings();
                 Err(EngineError::Internal("open".into(), "panic".into()))
             }
         }
@@ -878,6 +927,7 @@ impl Session {
             .unwrap_or_default()
     }
     pub fn set_camera(&mut self, camera: cadcraft_geom::OrbitCamera) {
+        self.invalidate_cursor3();
         if let Ok(st) = self.state_mut() {
             if !matches!(st.space, Space::Paper(_)) || st.mspace.is_some() {
                 st.camera = camera;
@@ -886,10 +936,20 @@ impl Session {
             st.set_view_quiet(View { center, height: camera.height });
         }
     }
+    /// Calculate the current 3D orbit sensitivity factor M based on zoom relative to reference framing.
+    /// rho = current_height / ref_height
+    /// M = clamp(sqrt(rho), 0.15, 1.0)
+    pub fn orbit_sensitivity_factor(&self) -> f64 {
+        let h_cur = self.camera().height;
+        let h_ref = self.state().map(|st| st.ref_height).unwrap_or(h_cur).max(1e-6);
+        let rho = (h_cur / h_ref).max(1e-12);
+        rho.sqrt().clamp(0.15, 1.0)
+    }
     pub fn ucs(&self) -> cadcraft_geom::UcsFrame {
         self.state().map(|st| st.ucs).unwrap_or(cadcraft_geom::UcsFrame::WORLD)
     }
     pub fn set_ucs(&mut self, ucs: cadcraft_geom::UcsFrame) -> Result<()> {
+        self.invalidate_cursor3();
         if let Ok(st) = self.state_mut() {
             if st.ucs != ucs {
                 st.ucs_history.push(st.ucs);
@@ -907,6 +967,7 @@ impl Session {
         Ok(())
     }
     pub fn restore_previous_ucs(&mut self) -> Result<bool> {
+        self.invalidate_cursor3();
         let prev = if let Ok(st) = self.state_mut() {
             st.ucs_history.pop()
         } else {
@@ -934,6 +995,7 @@ impl Session {
         }
     }
     pub fn set_drawing_plane(&mut self, plane: cadcraft_geom::DrawingPlane) {
+        self.invalidate_cursor3();
         if let Ok(st) = self.state_mut() {
             st.drawing_plane = plane;
         }
@@ -944,12 +1006,14 @@ impl Session {
         self.settings.drawing_plane_manual
     }
     pub fn set_drawing_plane_automatic(&mut self) {
+        self.invalidate_cursor3();
         self.settings.drawing_plane_manual = false;
     }
     pub fn drawing_plane_offset(&self) -> f64 {
         self.settings.drawing_plane_offset
     }
     pub fn set_drawing_plane_offset(&mut self, offset: f64) {
+        self.invalidate_cursor3();
         if offset.is_finite() {
             if !self.settings.drawing_plane_manual {
                 let plane = self.drawing_plane();
@@ -976,12 +1040,14 @@ impl Session {
         self.settings.drawing_plane_offset_manual
     }
     pub fn set_drawing_plane_offset_automatic(&mut self) {
+        self.invalidate_cursor3();
         self.settings.drawing_plane_offset_manual = false;
     }
     pub fn zlock(&self) -> bool {
         self.settings.zlock
     }
     pub fn set_zlock(&mut self, on: bool) {
+        self.invalidate_cursor3();
         self.settings.zlock = on;
     }
     pub fn doc(&self) -> Result<&Drawing> {
@@ -997,6 +1063,9 @@ impl Session {
         if let Ok(d) = self.doc() {
             settings.snapunit = d.header.snap_unit();
             settings.gridunit = d.header.grid_unit();
+            if let Some(gm) = d.header.grid_mode() {
+                settings.gridmode = gm;
+            }
         }
         settings
     }
@@ -1124,6 +1193,7 @@ impl Session {
         let result = match result {
             Ok(r) => r,
             Err(p) => {
+                self.invalidate_cursor3();
                 let msg =
                     p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".into());
                 // Restore the drawing as it was.
@@ -1175,6 +1245,7 @@ impl Session {
 
     /// Start a command by name or alias as if typed at the command line.
     pub fn start(&mut self, name: &str) -> Result<()> {
+        self.invalidate_cursor3();
         self.last_polar = None;
         let name = name.trim();
         let (transparent, name) = match name.strip_prefix('\'') {
@@ -1281,7 +1352,9 @@ impl Session {
     pub fn input_snapped(&mut self, hit: snap::SnapHit) -> Result<()> {
         let source = hit.viewport.filter(|_| self.point_mods.iter().all(|f| matches!(f, pointmod::Frame::Snap { mode } if *mode != 0)));
         let previous = std::mem::replace(&mut self.picked_viewport, source);
+        self.input_is_snapped = true;
         let result = self.input(hit.input());
+        self.input_is_snapped = false;
         self.picked_viewport = previous;
         result
     }
@@ -1519,7 +1592,10 @@ impl Session {
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run.machine.input(self, i)));
                 match r {
                     Ok(r) => r,
-                    Err(_) => Err(EngineError::Internal(run.id.clone(), "panic".into())),
+                    Err(_) => {
+                        self.invalidate_cursor3();
+                        Err(EngineError::Internal(run.id.clone(), "panic".into()))
+                    }
                 }
             }
             // A command starts with no modifiers pending.
@@ -1551,6 +1627,7 @@ impl Session {
                 Ok(())
             }
             Err(EngineError::Internal(id, m)) => {
+                self.invalidate_cursor3();
                 // Restore and end the command.
                 if let Ok(st) = self.state_mut() {
                     st.doc = run.before.clone();
@@ -1640,6 +1717,7 @@ impl Session {
     /// Cancel the running command (Esc). With no command, clears the selection. Inside a
     /// transparent command, cancels it and the command it interrupted.
     pub fn cancel(&mut self) {
+        self.invalidate_cursor3();
         self.point_mods.clear();
         self.tracking.clear();
         // Esc stops a LISP routine waiting for input, and the command it paused in.
@@ -1940,15 +2018,19 @@ impl Session {
                 } else {
                     self.ucs().to_world(p3)
                 };
-                if line_prompt
+                self.input_is_explicit = true;
+                let res = if line_prompt
                     && !has_z
                     && self.ucs().is_world()
                     && !explicit_world
                     && let Some(point) = prompt::parse_point_with(tt, self.last_point, &angles)
                 {
-                    return self.input(Input::Point(point));
-                }
-                return self.input(Input::Point3(transformed_p3));
+                    self.input(Input::Point(point))
+                } else {
+                    self.input(Input::Point3(transformed_p3))
+                };
+                self.input_is_explicit = false;
+                return res;
             }
             // Direct distance entry along the tracking path the cursor is on, from the point it
             // comes from (an acquired or temporary tracking point needs no base point).
@@ -1958,30 +2040,85 @@ impl Session {
                 return self.input(Input::Point(from + dir * dist));
             }
             // Direct distance entry along the rubber band.
-            if let (Some(base), Some(dist)) = (prompt.base, units::parse_distance(tt))
-                && !prompt.accept.number
-            {
-                if self.settings.zlock {
-                    let sign = if self.cursor3.z >= self.last_point3.z { 1.0 } else { -1.0 };
-                    let p3 = cadcraft_geom::Vec3::new(self.last_point3.x, self.last_point3.y, self.last_point3.z + sign * dist);
-                    return self.input(Input::Point3(p3));
-                }
-                if self.settings.orthomode && !self.camera().is_plan() {
-                    let (pt, delta) = self.camera().closest_axis_3d(self.camera().project_point(self.cursor3), self.last_point3);
-                    let diff = pt - self.last_point3;
-                    if diff.len() > 1e-6 {
-                        let sign = if delta >= 0.0 { 1.0 } else { -1.0 };
-                        let p3 = self.last_point3 + diff.normalized() * (dist * sign);
-                        return self.input(Input::Point3(p3));
+            if let Some(dist) = units::parse_distance(tt).filter(|_| !prompt.accept.number) {
+                if line_prompt {
+                    if let Some(base3) = prompt.base3 {
+                        if self.settings.zlock {
+                            let sign = if self.cursor3_valid && self.cursor3_base == Some(base3) && self.cursor3.z < base3.z {
+                                -1.0
+                            } else {
+                                1.0
+                            };
+                            let p3 = cadcraft_geom::Vec3::new(base3.x, base3.y, base3.z + sign * dist);
+                            return self.input(Input::Point3(p3));
+                        }
+                        if self.settings.orthomode && !self.camera().is_plan() {
+                            if self.cursor3_valid && self.cursor3_base == Some(base3) {
+                                let (pt, _) = self.camera().closest_axis_3d(self.camera().project_point(self.cursor3), base3);
+                                let diff = pt - base3;
+                                if diff.len() > 1e-6 {
+                                    let p3 = base3 + diff.normalized() * dist;
+                                    return self.input(Input::Point3(p3));
+                                }
+                            }
+                            self.echo("Valid direction required to enter distance.");
+                            return Ok(());
+                        }
+                        if self.cursor3_valid && self.cursor3_base == Some(base3) {
+                            let diff = self.cursor3 - base3;
+                            if diff.len() > 1e-9 {
+                                let u = diff.normalized();
+                                let p3 = base3 + u * dist;
+                                return self.input(Input::Point3(p3));
+                            }
+                        }
+                        // Non-interactive / headless fallback: strictly for headless non-UI, non-script tests
+                        // in 2D plan view on World UCS ground Z=0 where s.cursor was directly assigned without an egui canvas.
+                        if !self.is_interactive_ui
+                            && !self.in_script
+                            && self.camera().is_plan()
+                            && self.ucs().is_world()
+                            && base3.z.abs() < 1e-9
+                            && self.cursor.is_finite()
+                            && let Some(base2) = prompt.base
+                        {
+                            let mut c = self.cursor;
+                            if self.settings.orthomode && !prompt.corner {
+                                c = snap::iso::constrain(&self.drafting_settings(), base2, c);
+                            }
+                            let diff = c - base2;
+                            if diff.len() > 1e-9 {
+                                let dir = diff.normalized();
+                                return self.input(Input::Point(base2 + dir * dist));
+                            }
+                        }
+                        self.echo("Valid direction required to enter distance.");
+                        return Ok(());
                     }
                 }
-                let mut c = self.cursor;
-                if self.settings.orthomode && !prompt.corner {
-                    c = snap::iso::constrain(&self.drafting_settings(), base, c);
+                if let Some(base) = prompt.base {
+                    if self.settings.zlock {
+                        let sign = if self.cursor3.z >= self.last_point3.z { 1.0 } else { -1.0 };
+                        let p3 = cadcraft_geom::Vec3::new(self.last_point3.x, self.last_point3.y, self.last_point3.z + sign * dist);
+                        return self.input(Input::Point3(p3));
+                    }
+                    if self.settings.orthomode && !self.camera().is_plan() {
+                        let (pt, delta) = self.camera().closest_axis_3d(self.camera().project_point(self.cursor3), self.last_point3);
+                        let diff = pt - self.last_point3;
+                        if diff.len() > 1e-6 {
+                            let sign = if delta >= 0.0 { 1.0 } else { -1.0 };
+                            let p3 = self.last_point3 + diff.normalized() * (dist * sign);
+                            return self.input(Input::Point3(p3));
+                        }
+                    }
+                    let mut c = self.cursor;
+                    if self.settings.orthomode && !prompt.corner {
+                        c = snap::iso::constrain(&self.drafting_settings(), base, c);
+                    }
+                    let dir = (c - base).normalized();
+                    let dir = if dir == Vec2::ZERO { Vec2::X } else { dir };
+                    return self.input(Input::Point(base + dir * dist));
                 }
-                let dir = (c - base).normalized();
-                let dir = if dir == Vec2::ZERO { Vec2::X } else { dir };
-                return self.input(Input::Point(base + dir * dist));
             }
         }
         self.input(Input::Text(tt.to_string()))
@@ -2359,6 +2496,7 @@ impl Session {
         let aspect = st.zoom_aspect(w / h.max(1.0));
         let height = ext.height().max(ext.width() / aspect.max(1e-6)).max(1e-6) * 1.05;
         st.set_zoom_frame(View { center: ext.center(), height });
+        st.set_ref_height(height);
         Ok(())
     }
 
@@ -2373,6 +2511,36 @@ impl Session {
         let k = h / v.height;
         let c = about + (v.center - about) * k;
         st.set_view_quiet(View { center: c, height: h });
+        Ok(())
+    }
+
+    /// Zoom by `factor` (> 1 zooms in) keeping camera-plane offset `q` (in drawing units from target)
+    /// fixed on screen.
+    pub fn zoom_about_camera(&mut self, factor: f64, q: Vec2) -> Result<()> {
+        if !(factor.is_finite() && factor > 0.0 && q.x.is_finite() && q.y.is_finite()) {
+            return Ok(());
+        }
+        let st = self.state_mut()?;
+        let v = st.view();
+        let h = (v.height / factor).clamp(1e-9, 1e12);
+        let effective_k = h / v.height;
+        if matches!(st.space, Space::Paper(_)) && st.mspace.is_none() {
+            let c = v.center + q * (1.0 - effective_k);
+            st.set_view_quiet(View { center: c, height: h });
+            return Ok(());
+        }
+        if st.camera.is_plan() {
+            let c = v.center + q * (1.0 - effective_k);
+            st.set_view_quiet(View { center: c, height: h });
+            return Ok(());
+        }
+        let r = st.camera.right_dir();
+        let u = st.camera.up_dir();
+        let shift = r * (q.x * (1.0 - effective_k)) + u * (q.y * (1.0 - effective_k));
+        st.camera.target = st.camera.target + shift;
+        st.camera.height = h;
+        let center = cadcraft_geom::Vec2::new(st.camera.target.x, st.camera.target.y);
+        st.set_view_quiet(View { center, height: h });
         Ok(())
     }
 

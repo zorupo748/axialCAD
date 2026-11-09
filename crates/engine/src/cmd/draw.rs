@@ -192,12 +192,10 @@ fn run_circle(s: &mut Session, p: &Value) -> Result<Value> {
     if !(r > 1e-12 && r.is_finite()) {
         return Err(bad("circle", "radius must be positive"));
     }
-    let mut ent = cadcraft_doc::Entity::new(
-        s.doc_mut()?.new_handle(),
+    let hd = s.add_entity_with_extrusion(
         cadcraft_doc::EntityKind::Circle(cadcraft_doc::Circle { center: center_wcs, radius: r }),
-    );
-    ent.common.extrusion = ucs.z_axis;
-    let hd = s.add_entity_direct(ent)?;
+        ucs.z_axis,
+    )?;
     s.doc_mut()?.header.set_f64("CIRCLERAD", r);
     added(hd)
 }
@@ -505,6 +503,7 @@ impl LineM {
         self.pts.push(p);
         s.last_point = s.drawing_plane().coordinates(p);
         s.last_point3 = p;
+        s.invalidate_cursor3();
         Ok(Step::Continue)
     }
 }
@@ -571,6 +570,8 @@ impl Interactive for LineM {
                 }
                 if s.settings.zlock
                     && let Some(last) = self.pts.last()
+                    && !s.input_is_snapped
+                    && !s.input_is_explicit
                 {
                     let z = s.cursor3.z;
                     self.push_point(s, Vec3::new(last.x, last.y, z))
@@ -593,6 +594,8 @@ impl Interactive for LineM {
                 if s.settings.zlock
                     && let Some(last) = self.pts.last()
                     && !point_on_z0
+                    && !s.input_is_snapped
+                    && !s.input_is_explicit
                 {
                     self.push_point(s, Vec3::new(last.x, last.y, p3.z))
                 } else {
@@ -657,10 +660,12 @@ impl Interactive for LineM {
                     s.last_point = s.drawing_plane().coordinates(*last);
                     s.last_point3 = *last;
                 }
+                s.invalidate_cursor3();
                 Ok(Step::Continue)
             }
             Input::Keyword(k) if k == "Close" => {
                 s.settings.zlock = false;
+                s.invalidate_cursor3();
                 if let (Some(a), Some(b)) = (self.pts.last().copied(), self.pts.first().copied()) {
                     s.add_entity(line3(a, b))?;
                 }
@@ -668,10 +673,12 @@ impl Interactive for LineM {
             }
             Input::Cancel => {
                 s.settings.zlock = false;
+                s.invalidate_cursor3();
                 Ok(Step::Cancel)
             }
             Input::Enter => {
                 s.settings.zlock = false;
+                s.invalidate_cursor3();
                 Ok(Step::Done)
             }
             _ => Err(crate::EngineError::Other("Point or option keyword required.".into())),
@@ -1085,15 +1092,13 @@ impl Interactive for CircleM {
 
 fn finish_circle(s: &mut Session, center_wcs: Vec3, radius: f64) -> Result<()> {
     let ucs = s.ucs();
-    let mut ent = cadcraft_doc::Entity::new(
-        s.doc_mut()?.new_handle(),
+    s.add_entity_with_extrusion(
         cadcraft_doc::EntityKind::Circle(cadcraft_doc::Circle {
             center: center_wcs,
             radius,
         }),
-    );
-    ent.common.extrusion = ucs.z_axis;
-    s.add_entity_direct(ent)?;
+        ucs.z_axis,
+    )?;
     s.doc_mut()?.header.set_f64("CIRCLERAD", radius);
     Ok(())
 }

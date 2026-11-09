@@ -148,6 +148,9 @@ fn dsettings(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
             let _ = app.run("setvar", json!({ "name": name, "value": [after.x, after.y] }));
         }
     }
+    if settings.gridmode != app.session.settings.gridmode {
+        let _ = app.run("setvar", json!({ "name": "GRIDMODE", "value": app.session.settings.gridmode }));
+    }
 }
 
 /// The polar and object snap tracking options of Drafting Settings: additional angles

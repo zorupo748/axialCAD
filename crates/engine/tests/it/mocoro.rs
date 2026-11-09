@@ -80,14 +80,29 @@ fn scale_by_factor_or_point_and_refuses_a_zero_factor() {
     // A factor given by a point is its distance from the base point.
     s.script("S 3,4\n").unwrap();
     assert!(near(ends(&s, &l), ((0.0, 0.0), (100.0, 0.0))), "{:?}", ends(&s, &l));
-    // Zero is refused and the factor is asked again; Enter goes back to the option prompt.
-    s.script("S 0\n").unwrap();
+    // Interactively, zero is refused and the factor is asked again; Enter goes back to the option prompt.
+    let log_before = s.log.len();
+    s.cmdline("S 0").unwrap();
+    assert!(s.log[log_before..].iter().any(|m| m.contains("Requires a positive number.")), "{:?}", &s.log[log_before..]);
     assert!(s.prompt_text().contains("scale factor"), "{}", s.prompt_text());
     s.cmdline("").unwrap();
     assert!(s.prompt_text().contains("Rotate"), "{}", s.prompt_text());
     assert!(near(ends(&s, &l), ((0.0, 0.0), (100.0, 0.0))));
     s.cmdline("").unwrap();
     assert!(s.running.is_none(), "Enter at the option prompt is eXit");
+}
+
+#[test]
+fn script_aborts_on_zero_scale_factor_without_running_later_tokens() {
+    let mut s = Session::new();
+    let l = line(&mut s, [0.0, 0.0], [10.0, 0.0]);
+    // Prior valid step `S 2` applies in place, then `S 0` errors and aborts the script before `M 50,0 X` or `LINE 0,5 10,5`.
+    let res = s.script("MOCORO ALL  0,0 S 2 S 0 M 50,0 X\nLINE 0,5 10,5\n\n");
+    assert!(res.is_err(), "expected script error on zero scale factor, got {res:?}");
+    assert!(s.running.is_none(), "command must be cancelled on script error: {}", s.prompt_text());
+    // Prior valid `S 2` modification remains (not rolled back), while subsequent `M 50,0` and `LINE 0,5 10,5` were not executed.
+    assert!(near(ends(&s, &l), ((0.0, 0.0), (20.0, 0.0))), "{:?}", ends(&s, &l));
+    assert_eq!(lines(&s).len(), 1, "subsequent LINE command in script must not run: {:?}", lines(&s));
 }
 
 #[test]

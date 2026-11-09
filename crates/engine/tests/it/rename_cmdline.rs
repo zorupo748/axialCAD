@@ -76,13 +76,35 @@ fn rename_prompts_type_old_and_new_name() {
     assert!(d.block("Pump").is_some() && d.layer("New").is_some() && d.layer("Old").is_none(), "{:?}", s.log);
     assert_eq!(insert_targets(d), ["Assy", "Pump", "Pump", "Pump"]);
     assert_eq!(d.model.iter().filter(|e| matches!(e.kind, EntityKind::Line(_))).count(), 1);
-    // An unknown old name re-prompts; a type CADCraft lacks reads both names and reports.
-    s.script("-RENAME LA Missing\nNew\nNewer\n").unwrap();
+    // Interactively, an unknown old name is refused and re-prompts; a type CADCraft lacks reads both names and reports.
+    let log_before = s.log.len();
+    s.cmdline("-RENAME LA Missing").unwrap();
+    assert!(s.log[log_before..].iter().any(|l| l.contains("No layer named \"Missing\".")), "{:?}", &s.log[log_before..]);
+    assert!(s.prompt_text().contains("Enter old layer name"), "{}", s.prompt_text());
+    s.cmdline("New Newer").unwrap();
     assert!(s.running.is_none(), "{}", s.prompt_text());
-    assert!(s.doc().unwrap().layer("Newer").is_some());
+    assert!(s.doc().unwrap().layer("Newer").is_some() && s.doc().unwrap().layer("New").is_none());
     let n = s.log.len();
     s.script("-RENAME VP a b\nLINE 0,0 2,0\n\n").unwrap();
     assert!(s.running.is_none(), "{}", s.prompt_text());
     assert!(s.log[n..].iter().any(|l| l.contains("not available yet")), "{:?}", &s.log[n..]);
     assert_eq!(s.doc().unwrap().model.iter().filter(|e| matches!(e.kind, EntityKind::Line(_))).count(), 2);
+}
+
+#[test]
+fn script_aborts_on_missing_rename_source_without_consuming_later_tokens() {
+    let mut s = drawing();
+    s.execute("layer.new", &json!({ "name": "Old" })).unwrap();
+    // First `-RENAME LA Old New` succeeds; second `-RENAME LA Missing` fails in script mode and aborts
+    // before consuming `New` / `Newer` as recovery tokens or executing `LINE 0,0 1,0`.
+    let res = s.script("-RENAME LA Old New\n-RENAME LA Missing\nNew\nNewer\nLINE 0,0 1,0\n\n");
+    assert!(res.is_err(), "expected script error on missing layer, got {res:?}");
+    assert!(s.running.is_none(), "command must be cancelled on script error: {}", s.prompt_text());
+    let d = s.doc().unwrap();
+    // Prior valid rename (`Old` -> `New`) remains, `New` was not renamed to `Newer` (nor `LINE`), and `LINE` did not run.
+    assert!(d.layer("Old").is_none(), "prior valid rename should remain");
+    assert!(d.layer("New").is_some(), "existing layer New must not be renamed by post-error tokens");
+    assert!(d.layer("Newer").is_none(), "recovery token Newer must not be applied");
+    assert!(d.layer("LINE").is_none(), "subsequent command token LINE must not be consumed as a layer name");
+    assert_eq!(d.model.iter().filter(|e| matches!(e.kind, EntityKind::Line(_))).count(), 0, "subsequent LINE command must not execute");
 }

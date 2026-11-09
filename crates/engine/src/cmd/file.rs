@@ -387,6 +387,7 @@ fn run_close(s: &mut Session, p: &Value) -> Result<Value> {
     if s.active >= s.docs.len() {
         s.active = s.docs.len().saturating_sub(1);
     }
+    s.sync_active_doc_settings();
     ok()
 }
 
@@ -394,6 +395,7 @@ fn run_closeall(s: &mut Session, _p: &Value) -> Result<Value> {
     s.cancel();
     s.docs.clear();
     s.active = 0;
+    s.sync_active_doc_settings();
     ok()
 }
 
@@ -524,6 +526,7 @@ fn run_switch(s: &mut Session, p: &Value) -> Result<Value> {
     }
     s.cancel();
     s.active = i;
+    s.sync_active_doc_settings();
     ok()
 }
 

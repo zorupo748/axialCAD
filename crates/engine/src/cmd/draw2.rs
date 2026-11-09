@@ -613,30 +613,34 @@ impl Interactive for TanCircleM {
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
         let need = if self.radius_mode { 2 } else { 3 };
         if self.picks.len() < need {
-            return match i {
-                Input::Point(p) => {
-                    let h = curves::pick_at(s, p).ok_or_else(|| other("*Invalid selection*"))?;
-                    let o = tan_obj(s, h, p)?;
-                    self.picks.push((o, p));
-                    if !self.radius_mode && self.picks.len() == 3 {
-                        let (Some(a), Some(b), Some(c)) = (self.picks.first(), self.picks.get(1), self.picks.get(2)) else {
-                            return Ok(Step::Cancel);
-                        };
-                        let c = curves::ttt([*a, *b, *c]).ok_or_else(|| {
-                            self.picks.clear();
-                            other("Circle does not exist.")
-                        })?;
-                        s.add_entity(circle(c.center, c.radius))?;
-                        return Ok(Step::Done);
-                    }
-                    Ok(Step::Continue)
-                }
-                Input::Enter => Ok(Step::Cancel),
-                _ => Err(other("Select an object.")),
+            let pick = match i {
+                Input::Point(p) => Some(p),
+                Input::Point3(p3) => Some(p3.xy()),
+                Input::Enter => return Ok(Step::Cancel),
+                _ => None,
             };
+            let Some(p) = pick else {
+                return Err(other("Select an object."));
+            };
+            let h = curves::pick_at(s, p).ok_or_else(|| other("*Invalid selection*"))?;
+            let o = tan_obj(s, h, p)?;
+            self.picks.push((o, p));
+            if !self.radius_mode && self.picks.len() == 3 {
+                let (Some(a), Some(b), Some(c)) = (self.picks.first(), self.picks.get(1), self.picks.get(2)) else {
+                    return Ok(Step::Cancel);
+                };
+                let c = curves::ttt([*a, *b, *c]).ok_or_else(|| {
+                    self.picks.clear();
+                    other("Circle does not exist.")
+                })?;
+                s.add_entity(circle(c.center, c.radius))?;
+                return Ok(Step::Done);
+            }
+            return Ok(Step::Continue);
         }
         let r = match i {
             Input::Point(p) => self.picks.last().map(|x| x.1.dist(p)).unwrap_or(0.0),
+            Input::Point3(p3) => self.picks.last().map(|x| x.1.dist(p3.xy())).unwrap_or(0.0),
             Input::Text(t) => number(&t).ok_or_else(|| other("Requires numeric distance or second point."))?,
             Input::Enter => s.doc()?.header.f64("CIRCLERAD", 0.0),
             _ => return Ok(Step::Continue),
@@ -1858,19 +1862,23 @@ impl Interactive for RectM2 {
                 RAsk::Rotation => match i {
                     Input::Keyword(_) => self.asking = Some(RAsk::RotPick1),
                     Input::Point(p) => self.rotation = self.first.map(|f| f.angle_to(p)).unwrap_or(0.0),
+                    Input::Point3(p3) => {
+                        let p = s.ucs().to_local(p3).xy();
+                        self.rotation = self.first.map(|f| f.angle_to(p)).unwrap_or(0.0);
+                    }
                     Input::Text(t) => self.rotation = s.angle_settings().direction(&t).ok_or_else(|| other("Requires a valid angle."))?,
                     _ => {}
                 },
-                RAsk::RotPick1 => {
-                    if let Input::Point(p) = i {
-                        self.asking = Some(RAsk::RotPick2(p));
-                    }
-                }
-                RAsk::RotPick2(b) => {
-                    if let Input::Point(p) = i {
-                        self.rotation = b.angle_to(p);
-                    }
-                }
+                RAsk::RotPick1 => match i {
+                    Input::Point(p) => self.asking = Some(RAsk::RotPick2(p)),
+                    Input::Point3(p3) => self.asking = Some(RAsk::RotPick2(s.ucs().to_local(p3).xy())),
+                    _ => {}
+                },
+                RAsk::RotPick2(b) => match i {
+                    Input::Point(p) => self.rotation = b.angle_to(p),
+                    Input::Point3(p3) => self.rotation = b.angle_to(s.ucs().to_local(p3).xy()),
+                    _ => {}
+                },
             }
             return Ok(Step::Continue);
         }

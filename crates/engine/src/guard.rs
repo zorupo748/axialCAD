@@ -211,8 +211,13 @@ mod tests {
         // Input (already guarded by the session; the wrapper agrees).
         let mut s = Session::new();
         start(&mut s, "input").unwrap();
+        s.cursor3_valid = true;
+        s.cursor3_base = Some(cadcraft_geom::Vec3::ZERO);
+        s.input_is_explicit = true;
+        s.input_is_snapped = true;
         assert!(matches!(s.input(Input::Point(Vec2::ZERO)), Err(EngineError::Internal(..))));
         assert!(s.running.is_none());
         assert_eq!(points(&s), 0);
+        assert!(!s.cursor3_valid && s.cursor3_base.is_none() && !s.input_is_explicit && !s.input_is_snapped, "panic recovery must invalidate cursor3 context and provenance flags");
     }
 }

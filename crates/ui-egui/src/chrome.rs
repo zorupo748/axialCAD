@@ -455,7 +455,7 @@ pub fn status_bar(app: &mut CadApp, ui: &mut egui::Ui) {
         let right_zone_min_x = (pinned_left_end + min_strip_reserve + 8.0).min(r.right() - 28.0).max(pinned_left_end + 4.0);
 
         // Right side: toggles and drafting/space controls, right-aligned and bounded by `right_zone_min_x`.
-        let s = app.session.settings.clone();
+        let s = app.session.drafting_settings();
         let anno_all = app.session.doc().is_ok_and(|d| d.anno_all_visible());
         use cadcraft_engine::snap::mode;
         let toggles: Vec<(Icon, bool, &str, &str)> = vec![

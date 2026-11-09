@@ -84,6 +84,13 @@ impl Header {
     pub fn grid_unit(&self) -> Vec2 {
         self.spacing("GRIDUNIT", true)
     }
+    /// Whether grid display is enabled in model space. None if not specified in the document header.
+    pub fn grid_mode(&self) -> Option<bool> {
+        self.get("GRIDMODE").and_then(HVal::as_i64).map(|v| v != 0)
+    }
+    pub fn set_grid_mode(&mut self, on: bool) {
+        self.set("GRIDMODE", HVal::Int(if on { 1 } else { 0 }));
+    }
     fn spacing(&self, name: &str, allow_zero: bool) -> Vec2 {
         self.point(name)
             .map(|p| p.xy())

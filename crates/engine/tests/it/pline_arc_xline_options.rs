@@ -85,16 +85,32 @@ fn line_back_and_length() {
 
 #[test]
 fn bad_arc_answers_reprompt() {
-    // A radius too small for the chord is refused and the radius kept for another endpoint.
+    // Interactively, a radius too small for the chord is refused and the radius kept for another endpoint.
     let mut s = Session::new();
-    s.script("PLINE 0,0 A R 2 10,0").unwrap();
+    s.cmdline("PLINE 0,0 A R 2 10,0").unwrap();
+    assert!(s.log.iter().any(|m| m.contains("Invalid arc for these values.")), "{:?}", s.log);
     assert!(s.prompt_text().contains("Specify endpoint of arc"), "{}", s.prompt_text());
-    s.script("4,0\n\n").unwrap();
+    s.cmdline("4,0").unwrap();
+    s.cmdline("").unwrap();
+    assert!(s.running.is_none(), "{}", s.prompt_text());
     assert_pline(&s, &[(0.0, 0.0, 1.0), (4.0, 0.0, 0.0)]);
     // Enter at a sub-prompt goes back to the arc prompt.
     let mut s = Session::new();
     s.script("PLINE 0,0 A CE\n\n").unwrap();
     assert!(s.prompt_text().contains("Specify endpoint of arc or [Angle/CEnter"), "{}", s.prompt_text());
+}
+
+#[test]
+fn script_aborts_on_invalid_arc_endpoint_without_running_later_tokens() {
+    let mut s = Session::new();
+    // Prior segment `0,0 -> 0,5` is synced when the second vertex is added; then `A R 2 10,0` fails
+    // because chord length > diameter (4), aborting the script before `0,9` or `CIRCLE 20,20 3`.
+    let res = s.script("PLINE 0,0 0,5 A R 2 10,0 0,9\n\nCIRCLE 20,20 3\n");
+    assert!(res.is_err(), "expected script error on invalid arc endpoint, got {res:?}");
+    assert!(s.running.is_none(), "command must be cancelled on script error: {}", s.prompt_text());
+    // The prior two-vertex polyline segment remains, without the recovery arc vertex `(0,9)` and without the subsequent CIRCLE.
+    assert_eq!(s.doc().unwrap().model.len(), 1, "subsequent CIRCLE must not be created");
+    assert_pline(&s, &[(0.0, 0.0, 0.0), (0.0, 5.0, 0.0)]);
 }
 
 /// Base and unit direction of the last construction line or ray.

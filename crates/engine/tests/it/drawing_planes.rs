@@ -21,17 +21,16 @@ fn test_plane_command_and_aliases() {
     assert_eq!(v["plane"], "XZ");
     assert_eq!(s.drawing_plane(), DrawingPlane::XZ);
 
-    // ucs alias
-    let v = s.execute("ucs", &json!({"plane": "yz"})).unwrap();
-    assert_eq!(v["plane"], "YZ");
-    assert_eq!(s.drawing_plane(), DrawingPlane::YZ);
-
     // cplane alias
     let v = s.execute("cplane", &json!({"plane": "xy"})).unwrap();
     assert_eq!(v["plane"], "XY");
     assert_eq!(s.drawing_plane(), DrawingPlane::XY);
 
     // workplane alias
+    let v = s.execute("workplane", &json!({"plane": "yz"})).unwrap();
+    assert_eq!(v["plane"], "YZ");
+    assert_eq!(s.drawing_plane(), DrawingPlane::YZ);
+
     let v = s.execute("workplane", &json!({"plane": "xz"})).unwrap();
     assert_eq!(v["plane"], "XZ");
     assert_eq!(s.drawing_plane(), DrawingPlane::XZ);
@@ -45,6 +44,26 @@ fn test_plane_command_and_aliases() {
 
     s.execute("plane.xz", &json!({})).unwrap();
     assert_eq!(s.drawing_plane(), DrawingPlane::XZ);
+
+    // Real UCS command contract (independent of PLANE)
+    let ucs_v = s
+        .execute(
+            "ucs",
+            &json!({
+                "option": "3point",
+                "origin": [10.0, 20.0, 30.0],
+                "x_axis": [11.0, 20.0, 30.0],
+                "y_pt": [10.0, 20.0, 31.0]
+            }),
+        )
+        .unwrap();
+    assert_eq!(ucs_v["status"], "ok");
+    assert_eq!(s.ucs().origin, Vec3::new(10.0, 20.0, 30.0));
+    assert_eq!(s.ucs().z_axis, Vec3::new(0.0, -1.0, 0.0));
+
+    let world_v = s.execute("ucs", &json!({"option": "world"})).unwrap();
+    assert_eq!(world_v["ucs"], "world");
+    assert!(s.ucs().is_world());
 }
 
 #[test]
@@ -175,17 +194,40 @@ fn test_explicit_xyz_typing_overrides_active_plane() {
 #[test]
 fn test_2d_commands_compatible_with_active_3d_planes() {
     let mut s = Session::new();
+    s.execute("layer.new", &json!({"name": "Circles3D"})).unwrap();
+    s.execute("setvar", &json!({"name": "CLAYER", "value": "Circles3D"})).unwrap();
     s.set_drawing_plane(DrawingPlane::XZ);
 
-    // CIRCLE should accept Point3 cleanly by converting to 2D
+    // CIRCLE preserves the 3D WCS center, active layer/properties, and active UCS extrusion normal
     s.start("circle").unwrap();
     s.input(Input::Point3(Vec3::new(10.0, 20.0, 30.0))).unwrap();
     s.input(Input::Text("5".into())).unwrap();
 
     let e = s.doc().unwrap().model.iter().last().unwrap();
     let EntityKind::Circle(c) = &e.kind else { panic!("expected Circle") };
-    assert_eq!(c.center, Vec3::new(10.0, 20.0, 0.0));
+    assert_eq!(c.center, Vec3::new(10.0, 20.0, 30.0));
     assert_eq!(c.radius, 5.0);
+    assert_eq!(e.common.extrusion, Vec3::Z);
+    assert_eq!(e.common.layer, "Circles3D");
+
+    // On an inclined/rotated UCS (XZ plane at Y=15), CIRCLE records WCS center and UCS normal
+    s.execute(
+        "ucs",
+        &json!({
+            "option": "3point",
+            "origin": [0.0, 15.0, 0.0],
+            "x_axis": [1.0, 15.0, 0.0],
+            "y_pt": [0.0, 15.0, 1.0]
+        }),
+    )
+    .unwrap();
+    s.cmdline("circle 10,25 4").unwrap();
+    let e2 = s.doc().unwrap().model.iter().last().unwrap();
+    let EntityKind::Circle(c2) = &e2.kind else { panic!("expected Circle") };
+    assert_eq!(c2.center, Vec3::new(10.0, 15.0, 25.0));
+    assert_eq!(c2.radius, 4.0);
+    assert_eq!(e2.common.extrusion, Vec3::new(0.0, -1.0, 0.0));
+    assert_eq!(e2.common.layer, "Circles3D");
 }
 
 #[test]

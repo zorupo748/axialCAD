@@ -1626,6 +1626,12 @@ fn tables(tags: &[Tag], d: &mut Drawing, rx: &mut Rx) {
                 if let Some(a) = t.f(50).filter(|a| a.is_finite()) {
                     d.header.set_f64("SNAPANG", a);
                 }
+                if let Some(g) = t.i(76) {
+                    d.header.set_i64("GRIDMODE", g);
+                }
+                if let Some(s) = t.i(75) {
+                    d.header.set_i64("SNAPMODE", s);
+                }
             }
             "VIEW" => {
                 let name = t.s(2).unwrap_or_default();

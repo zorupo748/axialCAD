@@ -154,6 +154,9 @@ pub fn reset(s: &mut Session) {
     st.maxarray = d.maxarray;
     st.drawing_plane_offset = d.drawing_plane_offset;
     st.drawing_plane_offset_manual = d.drawing_plane_offset_manual;
+    if let Ok(doc) = s.doc_mut() {
+        doc.header.set_grid_mode(d.gridmode);
+    }
     crate::cmd::file::set_qnew_template("");
 }
 

@@ -201,6 +201,47 @@ fn circle_ttr_json_and_command_line() {
     assert!(s.running.is_none());
     let (c, r) = as_circle(&last(&s));
     assert!(near(c, 0.5, 0.5) && (r - 0.5).abs() < 1e-9);
+    // Radius specified by a second point (`Input::Point3` at the radius sub-prompt):
+    // second tangent pick is at (0, 6); point (0, 7.5) is 1.5 away.
+    s.cmdline("circle ttr 6,0 0,6 0,7.5").unwrap();
+    assert!(s.running.is_none());
+    let (c, r) = as_circle(&last(&s));
+    assert!(near(c, 1.5, 1.5) && (r - 1.5).abs() < 1e-9);
+
+    // Translated UCS (origin at 100, 200, 50, axes parallel to WCS):
+    // Picks in UCS (5,0) and (0,5) map to WCS (105,200,50) and (100,205,50);
+    // TTR solves in WCS XY at (102, 202), while `helpers::circle` commits Z=0 and extrusion=+Z.
+    let mut s_tr = Session::new();
+    s_tr.cmdline("ucs 3 100,200,50 101,200,50 100,201,50").unwrap();
+    s_tr.cmdline("line 0,0 10,0 ").unwrap();
+    s_tr.cmdline("line 0,0 0,10 ").unwrap();
+    s_tr.cmdline("circle ttr 5,0 0,5 2").unwrap();
+    assert!(s_tr.running.is_none());
+    let e_tr = s_tr.doc().unwrap().model.last().unwrap();
+    match &e_tr.kind {
+        EntityKind::Circle(ci) => {
+            assert!((ci.center.x - 102.0).abs() < 1e-9 && (ci.center.y - 202.0).abs() < 1e-9);
+            assert!((ci.center.z - 0.0).abs() < 1e-9, "current WCS-XY contract keeps center.z = 0");
+            assert!((ci.radius - 2.0).abs() < 1e-9);
+        }
+        k => panic!("{k:?}"),
+    }
+    assert_eq!(e_tr.common.extrusion, cadcraft_geom::Vec3::Z);
+
+    // Inclined UCS (vertical XZ plane: origin at 0,0,0, X=+X, Y=+Z, normal=-Y):
+    // A line along +Y_UCS ((0,0,0) -> (0,0,10)) projects to zero length in WCS XY,
+    // so `TanObj::from_kind` rejects it — documenting that TTR/TTT is WCS-XY only.
+    let mut s_inc = Session::new();
+    s_inc.cmdline("ucs 3 0,0,0 1,0,0 0,0,1").unwrap();
+    s_inc.cmdline("line 0,0 10,0 ").unwrap();
+    s_inc.cmdline("line 0,0 0,10 ").unwrap();
+    s_inc.cmdline("circle ttr 5,0 0,5 2").unwrap();
+    assert!(
+        s_inc.log.iter().any(|m| m.contains("Select a line, circle, arc or polyline segment.") || m.contains("*Invalid selection*")),
+        "{:?}",
+        s_inc.log
+    );
+    s_inc.cancel();
 }
 
 #[test]
@@ -620,6 +661,56 @@ fn rectang_options_command_line() {
     match &s.doc().unwrap().model.last().unwrap().kind {
         EntityKind::LwPolyline(p) => assert!(p.elevation == 2.0 && p.vertices.len() == 8),
         k => panic!("{k:?}"),
+    }
+    // Rotation sub-prompts (`r <pt>` and `r p <pt1> <pt2>`) on a translated and inclined UCS:
+    // 1) Translated UCS at (100, 200, 50) with `r <pt>` (45° from first corner (1,1) to (2,2)):
+    s.cmdline("ucs 3 100,200,50 101,200,50 100,201,50").unwrap();
+    s.cmdline("rectang 1,1 r 2,2 d 2 2 5,5").unwrap();
+    let e_tr = s.doc().unwrap().model.last().unwrap();
+    assert!((e_tr.common.extrusion - cadcraft_geom::Vec3::Z).len() < 1e-6);
+    let tr_pts: Vec<cadcraft_geom::Vec3> = match &e_tr.kind {
+        EntityKind::LwPolyline(p) => p
+            .vertices
+            .iter()
+            .map(|v| cadcraft_geom::Mat4::ocs_to_wcs(e_tr.common.extrusion, cadcraft_geom::Vec3::new(v.p.x, v.p.y, p.elevation)))
+            .collect(),
+        k => panic!("{k:?}"),
+    };
+    let s2 = 2f64.sqrt();
+    let want_tr = [
+        cadcraft_geom::Vec3::new(101.0, 201.0, 50.0),
+        cadcraft_geom::Vec3::new(101.0 + s2, 201.0 + s2, 50.0),
+        cadcraft_geom::Vec3::new(101.0, 201.0 + 2.0 * s2, 50.0),
+        cadcraft_geom::Vec3::new(101.0 - s2, 201.0 + s2, 50.0),
+    ];
+    for w in want_tr {
+        assert!(tr_pts.iter().any(|p| (*p - w).len() < 1e-6), "missing vertex {w:?} in {tr_pts:?}");
+    }
+
+    // 2) Translated and inclined UCS: origin at (10, 20, 30), X along +X, Y along +Z (vertical XZ plane, normal = -Y),
+    // using `r p <pt1> <pt2>` (45° in the XZ plane) and checking all 4 resulting 3D vertices in WCS:
+    s.cmdline("ucs w").unwrap();
+    s.cmdline("ucs 3 10,20,30 11,20,30 10,20,31").unwrap();
+    s.cmdline("rectang 0,0 r p 0,0 1,1 d 2 2 5,5").unwrap();
+    let e = s.doc().unwrap().model.last().unwrap();
+    assert!((e.common.extrusion - cadcraft_geom::Vec3::new(0.0, -1.0, 0.0)).len() < 1e-6);
+    let wcs_pts: Vec<cadcraft_geom::Vec3> = match &e.kind {
+        EntityKind::LwPolyline(p) => p
+            .vertices
+            .iter()
+            .map(|v| cadcraft_geom::Mat4::ocs_to_wcs(e.common.extrusion, cadcraft_geom::Vec3::new(v.p.x, v.p.y, p.elevation)))
+            .collect(),
+        k => panic!("{k:?}"),
+    };
+    let want_inc = [
+        cadcraft_geom::Vec3::new(10.0, 20.0, 30.0),
+        cadcraft_geom::Vec3::new(10.0 + s2, 20.0, 30.0 + s2),
+        cadcraft_geom::Vec3::new(10.0, 20.0, 30.0 + 2.0 * s2),
+        cadcraft_geom::Vec3::new(10.0 - s2, 20.0, 30.0 + s2),
+    ];
+    assert_eq!(wcs_pts.len(), 4);
+    for w in want_inc {
+        assert!(wcs_pts.iter().any(|p| (*p - w).len() < 1e-6), "missing vertex {w:?} in {wcs_pts:?}");
     }
 }
 

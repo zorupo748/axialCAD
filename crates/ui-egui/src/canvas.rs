@@ -103,6 +103,34 @@ pub struct SelectionWindow {
     pub anchor: Pos2,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VirtualNavState {
+    pub is_orbit: bool,
+    pub virtual_pos: Pos2,
+    pub viewport_rect: Rect,
+    pub doc_uid: u64,
+    pub using_relative: bool,
+}
+
+pub fn release_virtual_nav(ctx: &egui::Context, canvas: &mut CanvasState) {
+    if canvas.virtual_nav.take().is_some() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::None));
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+    }
+    canvas.pan_last = None;
+}
+
+pub fn wrap_virtual_cursor_pos(pos: Pos2, rect: Rect) -> Pos2 {
+    let w = rect.width();
+    let h = rect.height();
+    if w <= 1.0 || h <= 1.0 {
+        return pos;
+    }
+    let x = rect.min.x + (pos.x - rect.min.x).rem_euclid(w);
+    let y = rect.min.y + (pos.y - rect.min.y).rem_euclid(h);
+    Pos2::new(x, y)
+}
+
 #[derive(Default)]
 pub struct CanvasState {
     pub list: Option<DisplayList>,
@@ -166,6 +194,7 @@ pub struct CanvasState {
     /// Whether the view ray is parallel (ambiguous) to the active drawing plane.
     pub parallel_plane_warning: bool,
     pan_last: Option<Pos2>,
+    pub virtual_nav: Option<VirtualNavState>,
     /// True when the latest scroll came from a trackpad (or other precise-scrolling device):
     /// scrolling then pans and pinch zooms. A notched mouse wheel clears it so the wheel zooms.
     scroll_pans: bool,
@@ -1954,16 +1983,20 @@ fn effective_point(app: &mut CadApp, raw: Vec2, xf: &Xf, ctx: &egui::Context) ->
 }
 
 fn store_cursor_resolution(app: &mut CadApp, point: Option<(Vec2, Vec3)>) {
+    app.session.is_interactive_ui = true;
     if let Some((cursor, cursor3)) = point {
         app.canvas.cursor = Some(cursor);
         app.session.cursor = cursor;
         app.canvas.cursor3 = Some(cursor3);
         app.session.cursor3 = cursor3;
+        app.session.cursor3_valid = true;
+        app.session.cursor3_base = app.session.current_prompt().and_then(|p| p.base3);
         app.session.cursor_deferred = app.canvas.snap.and_then(|hit| hit.deferred);
         app.canvas.parallel_plane_warning = false;
     } else {
         app.canvas.cursor = None;
         app.canvas.cursor3 = None;
+        app.session.invalidate_cursor3();
         app.canvas.snap = None;
         app.canvas.active_axis_3d = None;
         app.canvas.axis_track_z_zero = false;
@@ -2426,7 +2459,11 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         app.canvas.zoom_pending = false;
         let _ = app.session.zoom_extents();
     }
-    let Ok(st) = app.session.state() else { return };
+    let Ok(st) = app.session.state() else {
+        release_virtual_nav(ui.ctx(), &mut app.canvas);
+        return;
+    };
+    let doc_uid = st.uid;
     let view = st.view();
     let scale = f64::from(rect.height()) / view.height.max(1e-12);
     let camera = if matches!(st.space, cadcraft_doc::Space::Paper(_)) && st.mspace.is_none() { None } else { Some(app.session.camera()) };
@@ -2532,37 +2569,105 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     {
         // Zoom with the mouse wheel about the cursor, each notch at once.
         let f = app.session.wheel_zoom_factor(f64::from(wheel));
-        let about = xf.to_world(hp);
-        let _ = app.session.zoom_about(f, about);
+        let c = rect.center();
+        let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
+        let _ = app.session.zoom_about_camera(f, q);
     }
     let zoom_pinch = ui.input(|i| crate::animation::zoom_delta(i, &opts, app.shows_animations()));
     if inside
         && (zoom_pinch - 1.0).abs() > 1e-4
         && let Some(hp) = hover_pos
     {
-        let _ = app.session.zoom_about(f64::from(zoom_pinch), xf.to_world(hp));
+        let c = rect.center();
+        let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
+        let _ = app.session.zoom_about_camera(f64::from(zoom_pinch), q);
     }
-    // Pan with the middle button (or Shift+middle-drag is 3D orbit).
+    let escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
     let middle_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Middle));
+    let primary_down = ui.input(|i| i.pointer.primary_down());
+    let primary_drag_started = resp.drag_started_by(egui::PointerButton::Primary) && app.session.orbit_active();
     let focused = ui.input(|i| i.focused);
-    if middle_down
-        && focused
-        && (app.canvas.pan_last.is_some() || (middle_pressed && inside))
-        && let Some(hp) = hover_pos
-    {
-        if let Some(last) = app.canvas.pan_last {
-            let d = hp - last;
-            if mods.shift {
-                // AutoCAD standard gesture: Shift + Middle Mouse Button Drag = 3D Orbit!
-                let _ = app.session.orbit_step(f64::from(d.x), f64::from(d.y));
-            } else {
-                // Middle Mouse Button Drag without Shift = 2D/3D Pan!
-                let _ = app.session.pan_step(f64::from(d.x), f64::from(d.y), scale);
-            }
+
+    if let Some(vnav) = app.canvas.virtual_nav {
+        let button_held = middle_down || (app.session.orbit_active() && primary_down);
+        let viewport_ok = vnav.doc_uid == doc_uid && vnav.viewport_rect == rect && rect.width() >= 10.0 && rect.height() >= 10.0;
+        if !focused || escape_pressed || !button_held || !viewport_ok {
+            release_virtual_nav(ui.ctx(), &mut app.canvas);
         }
+    }
+
+    let start_gesture = app.canvas.virtual_nav.is_none()
+        && focused
+        && !escape_pressed
+        && rect.width() >= 10.0
+        && rect.height() >= 10.0
+        && ((middle_down && middle_pressed && inside) || (app.session.orbit_active() && primary_drag_started && primary_down));
+
+    if start_gesture {
+        let is_orbit = mods.shift || app.session.orbit_active();
+        if is_orbit {
+            app.session.begin_orbit();
+        }
+        let hp = hover_pos.unwrap_or_else(|| rect.center());
+        app.canvas.virtual_nav = Some(VirtualNavState {
+            is_orbit,
+            virtual_pos: hp,
+            viewport_rect: rect,
+            doc_uid,
+            using_relative: false,
+        });
         app.canvas.pan_last = Some(hp);
-    } else {
-        app.canvas.pan_last = None;
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::viewport::CursorGrab::Locked));
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
+    }
+
+    if let Some(vnav) = &mut app.canvas.virtual_nav {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+
+        let (raw_mouse_delta, had_mouse_moved) = ui.input(|i| {
+            let mut delta = egui::Vec2::ZERO;
+            let mut had = false;
+            for ev in &i.raw.events {
+                if let egui::Event::MouseMoved(d) = ev {
+                    delta += *d;
+                    had = true;
+                }
+            }
+            (delta, had)
+        });
+
+        if had_mouse_moved && !vnav.using_relative {
+            vnav.using_relative = true;
+            app.canvas.pan_last = None;
+        }
+
+        let delta_points = if vnav.using_relative {
+            if had_mouse_moved {
+                let ppp = ui.ctx().pixels_per_point();
+                raw_mouse_delta / ppp.max(0.1)
+            } else {
+                egui::Vec2::ZERO
+            }
+        } else if let (Some(hp), Some(last)) = (hover_pos, app.canvas.pan_last) {
+            hp - last
+        } else {
+            resp.drag_delta()
+        };
+
+        let new_pos = vnav.virtual_pos + delta_points;
+        vnav.virtual_pos = wrap_virtual_cursor_pos(new_pos, vnav.viewport_rect);
+
+        if vnav.is_orbit {
+            let _ = app.session.orbit_step(f64::from(delta_points.x), f64::from(delta_points.y));
+        } else {
+            let _ = app.session.pan_step(f64::from(delta_points.x), f64::from(delta_points.y), scale);
+        }
+
+        if !vnav.using_relative
+            && let Some(hp) = hover_pos
+        {
+            app.canvas.pan_last = Some(hp);
+        }
     }
     if dbl_middle && inside {
         let _ = app.session.zoom_extents();
@@ -2570,11 +2675,6 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // ZOOM Realtime: dragging up zooms in, down zooms out.
     if resp.dragged_by(egui::PointerButton::Primary) && app.session.realtime_zoom_active() {
         let _ = app.session.realtime_zoom(f64::from(resp.drag_delta().y));
-    }
-    // 3DORBIT: dragging with primary button orbits camera.
-    if resp.dragged_by(egui::PointerButton::Primary) && app.session.orbit_active() {
-        let d = resp.drag_delta();
-        let _ = app.session.orbit_step(f64::from(d.x), f64::from(d.y));
     }
     // A click in another tile makes it current (or answers -VPORTS Join's prompts).
     if pressed_primary
@@ -3351,7 +3451,13 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         crate::cmdline::show(app, ui, full);
     }
     // Crosshair cursor.
-    if inside && !on_menu {
+    // Crosshair or virtual navigation cursor.
+    if let Some(vnav) = app.canvas.virtual_nav {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        let p = vnav.virtual_pos;
+        let p_clip = painter.with_clip_rect(vnav.viewport_rect);
+        draw_virtual_nav_cursor(&p_clip, p, vnav.is_orbit);
+    } else if inside && !on_menu {
         // Hide the OS cursor under the drawn crosshair, unless assistive tech needs it (#39).
         ui.ctx().set_cursor_icon(if app.ui.system_cursor { egui::CursorIcon::Crosshair } else { egui::CursorIcon::None });
         if let Some(hp) = hover_pos {
@@ -3665,6 +3771,36 @@ fn override_cursor(app: &mut CadApp, raw: Vec2, xf: &Xf) {
 fn pickbox_half(pickbox: f64) -> Option<f32> {
     let half = (pickbox * 1.5) as f32;
     (half.is_finite() && half >= 1.0).then_some(half)
+}
+
+fn draw_virtual_nav_cursor(painter: &egui::Painter, p: Pos2, is_orbit: bool) {
+    let shadow = egui::Color32::from_black_alpha(180);
+    let fill = egui::Color32::WHITE;
+    if is_orbit {
+        painter.circle_stroke(p, 9.0, egui::Stroke::new(3.0, shadow));
+        painter.circle_stroke(p, 9.0, egui::Stroke::new(1.5, fill));
+        painter.circle_filled(p, 2.0, fill);
+        for dir in [egui::vec2(0.0, -11.0), egui::vec2(11.0, 0.0), egui::vec2(0.0, 11.0), egui::vec2(-11.0, 0.0)] {
+            painter.line_segment([p + dir * 0.7, p + dir * 1.3], egui::Stroke::new(2.5, shadow));
+            painter.line_segment([p + dir * 0.7, p + dir * 1.3], egui::Stroke::new(1.2, fill));
+        }
+    } else {
+        for (dir, arrow_head) in [
+            (egui::vec2(0.0, -12.0), [egui::vec2(-3.0, -9.0), egui::vec2(3.0, -9.0)]),
+            (egui::vec2(0.0, 12.0), [egui::vec2(-3.0, 9.0), egui::vec2(3.0, 9.0)]),
+            (egui::vec2(-12.0, 0.0), [egui::vec2(-9.0, -3.0), egui::vec2(-9.0, 3.0)]),
+            (egui::vec2(12.0, 0.0), [egui::vec2(9.0, -3.0), egui::vec2(9.0, 3.0)]),
+        ] {
+            painter.line_segment([p, p + dir], egui::Stroke::new(3.0, shadow));
+            painter.line_segment([p, p + dir], egui::Stroke::new(1.5, fill));
+            painter.line_segment([p + dir, p + arrow_head[0]], egui::Stroke::new(2.5, shadow));
+            painter.line_segment([p + dir, p + arrow_head[0]], egui::Stroke::new(1.2, fill));
+            painter.line_segment([p + dir, p + arrow_head[1]], egui::Stroke::new(2.5, shadow));
+            painter.line_segment([p + dir, p + arrow_head[1]], egui::Stroke::new(1.2, fill));
+        }
+        painter.circle_filled(p, 2.5, shadow);
+        painter.circle_filled(p, 1.5, fill);
+    }
 }
 
 fn draw_crosshair(app: &CadApp, p: &egui::Painter, rect: Rect, at: Pos2, pickbox: bool, ink: Color32) {

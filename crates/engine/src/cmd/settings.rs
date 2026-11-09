@@ -15,6 +15,16 @@ fn toggle(s: &mut Session, p: &Value, get: fn(&mut crate::Settings) -> &mut bool
     Ok(json!({ "on": on, "message": format!("<{name} {}>", if on { "on" } else { "off" }) }))
 }
 
+fn run_grid(s: &mut Session, p: &Value) -> Result<Value> {
+    let on = p.get("on").and_then(Value::as_bool).unwrap_or(!s.settings.gridmode);
+    s.settings.gridmode = on;
+    if let Ok(d) = s.doc_mut() {
+        d.header.set_grid_mode(on);
+    }
+    s.touch();
+    Ok(json!({ "on": on, "message": format!("<Grid {}>", if on { "on" } else { "off" }) }))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("ortho", "Ortho Mode", |s, p| toggle(s, p, |st| &mut st.orthomode, "Ortho"))
@@ -29,7 +39,7 @@ pub fn specs() -> Vec<CommandSpec> {
             .enabled(always)
             .noundo()
             .transparent(),
-        CommandSpec::new("grid", "Grid Display", |s, p| toggle(s, p, |st| &mut st.gridmode, "Grid"))
+        CommandSpec::new("grid", "Grid Display", run_grid)
             .key("F7")
             .params("{on?: bool}")
             .enabled(always)

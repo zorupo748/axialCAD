@@ -194,6 +194,7 @@ impl MTextAsk {
         match (self, &i) {
             (_, Input::Enter) => Ok(if self == MTextAsk::SpacingType { Outcome::Ask(MTextAsk::SpacingFactor) } else { Outcome::Back }),
             (MTextAsk::Height, Input::Point(p)) => set_height(s, o, first.dist(*p)),
+            (MTextAsk::Height, Input::Point3(p3)) => set_height(s, o, first.dist(p3.xy())),
             (MTextAsk::Height, Input::Text(t)) => set_height(s, o, number(t).unwrap_or(f64::NAN)),
             (MTextAsk::Justify, _) => {
                 let k = word(&i).unwrap_or_default();
@@ -225,6 +226,10 @@ impl MTextAsk {
                 o.rotation = first.angle_to(*p);
                 Ok(Outcome::Back)
             }
+            (MTextAsk::Rotation, Input::Point3(p3)) => {
+                o.rotation = first.angle_to(p3.xy());
+                Ok(Outcome::Back)
+            }
             (MTextAsk::Rotation, Input::Text(t)) => {
                 o.rotation = s.angle_settings().direction(t).filter(|a| a.is_finite()).ok_or_else(|| other("Requires an angle."))?;
                 Ok(Outcome::Back)
@@ -243,6 +248,10 @@ impl MTextAsk {
             (MTextAsk::Width, Input::Point(p)) => {
                 // The distance along the text direction from the first corner.
                 o.width = Some((*p - first).rotate(-o.rotation).x.abs());
+                Ok(Outcome::Text)
+            }
+            (MTextAsk::Width, Input::Point3(p3)) => {
+                o.width = Some((p3.xy() - first).rotate(-o.rotation).x.abs());
                 Ok(Outcome::Text)
             }
             (MTextAsk::Width, Input::Text(t)) => {
@@ -269,6 +278,7 @@ fn column_input(q: MTextAsk, i: Input, o: &mut MTextOpts, first: Vec2) -> Result
     let length = |i: &Input, current: Option<f64>, down: bool| -> Result<f64> {
         let v = match i {
             Input::Point(p) => Some(if down { local(*p).y.abs() } else { local(*p).x.abs() }),
+            Input::Point3(p3) => Some(if down { local(p3.xy()).y.abs() } else { local(p3.xy()).x.abs() }),
             Input::Text(t) => number(t),
             Input::Enter => current,
             _ => None,
@@ -325,6 +335,7 @@ fn column_input(q: MTextAsk, i: Input, o: &mut MTextOpts, first: Vec2) -> Result
             let g = match &i {
                 Input::Text(t) => number(t).filter(|g| g.is_finite() && *g >= 0.0),
                 Input::Point(p) => Some(local(*p).x.abs()),
+                Input::Point3(p3) => Some(local(p3.xy()).x.abs()),
                 Input::Enter => current,
                 _ => None,
             }

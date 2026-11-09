@@ -41,6 +41,26 @@ fn dynamic_columns_and_defaults() {
     assert_eq!(c.kind, MTextColumnType::Dynamic);
     assert!(c.auto_height);
     assert_eq!((c.gutter, c.height), (0.5, 3.0));
+
+    // Point-picked ColumnWidth, ColumnGutter and ColumnHeight in World UCS and translated elevated UCS:
+    // World UCS from first corner (2, 10):
+    // - ColumnWidth point (10, 10) -> |x - 2| = 8.0
+    // - ColumnGutter point (3.5, 10) -> |x - 2| = 1.5
+    // - ColumnHeight point (2, 4) -> |y - 10| = 6.0
+    s.script("MTEXT 2,10 c d 10,10 3.5,10 2,4\npicked world\n\n").unwrap();
+    let tw = last_mtext(&s);
+    assert!((tw.width - 8.0).abs() < 1e-9);
+    let cw = tw.columns.expect("columns");
+    assert!((cw.gutter - 1.5).abs() < 1e-9 && (cw.height - 6.0).abs() < 1e-9);
+
+    // Translated elevated UCS (100, 200, 50):
+    s.cmdline("ucs 3 100,200,50 101,200,50 100,201,50").unwrap();
+    s.script("MTEXT 2,10 c d 10,10 3.5,10 2,4\npicked translated\n\n").unwrap();
+    let tt = last_mtext(&s);
+    assert!((tt.insert.x - 102.0).abs() < 1e-9 && (tt.insert.y - 210.0).abs() < 1e-9 && (tt.insert.z - 50.0).abs() < 1e-9);
+    assert!((tt.width - 8.0).abs() < 1e-9);
+    let ct = tt.columns.expect("columns");
+    assert!((ct.gutter - 1.5).abs() < 1e-9 && (ct.height - 6.0).abs() < 1e-9);
 }
 
 #[test]

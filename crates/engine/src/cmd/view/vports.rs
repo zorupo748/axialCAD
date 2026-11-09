@@ -143,11 +143,39 @@ fn apply(s: &mut Session, mut tiles: Vec<VportTile>, current: usize) -> Result<(
     let cur = tiles.remove(current.min(tiles.len() - 1));
     tiles.insert(0, cur);
     let st = s.state_mut()?;
+    let old_refs: Vec<((Vec2, Vec2), f64)> = st
+        .tiles
+        .rects
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, r)| {
+            let rh = if i == st.tiles.active {
+                st.ref_height
+            } else {
+                st.tiles.ref_heights.get(i).copied().unwrap_or(st.ref_height)
+            };
+            (r, rh)
+        })
+        .collect();
+    let fallback_ref = st.ref_height;
     let d = Arc::make_mut(&mut st.doc);
     d.vports.retain(|c| !c.is_active());
     if tiles.len() > 1 {
         d.vports.insert(0, VportConfig { name: VportConfig::ACTIVE.into(), tiles: tiles.clone() });
-        st.tiles = ModelTiles { rects: tiles.iter().map(rect).collect(), views: tiles.iter().map(view_of).collect(), active: 0 };
+        let ref_heights: Vec<f64> = tiles
+            .iter()
+            .map(|t| {
+                old_refs
+                    .iter()
+                    .find(|(r, _)| *r == rect(t))
+                    .map(|(_, rh)| *rh)
+                    .unwrap_or_else(|| if (t.height - cur.height).abs() < 1e-9 { fallback_ref } else { t.height.max(1e-6) })
+            })
+            .collect();
+        let active_ref = ref_heights.first().copied().unwrap_or(fallback_ref);
+        st.tiles = ModelTiles { rects: tiles.iter().map(rect).collect(), views: tiles.iter().map(view_of).collect(), ref_heights, active: 0 };
+        st.ref_height = active_ref;
     } else {
         st.tiles = ModelTiles::default();
     }
@@ -409,7 +437,22 @@ impl Session {
             return Ok(());
         }
         let st = self.state_mut()?;
-        st.tiles = ModelTiles { rects: tiles.iter().map(rect).collect(), views: tiles.iter().map(view_of).collect(), active: index };
+        let mut ref_heights = if st.tiles.ref_heights.len() == tiles.len() {
+            st.tiles.ref_heights.clone()
+        } else {
+            tiles.iter().map(|t| t.height.max(1e-6)).collect()
+        };
+        if active < ref_heights.len() {
+            ref_heights[active] = st.ref_height;
+        }
+        let next_ref = ref_heights.get(index).copied().unwrap_or_else(|| tiles.get(index).map_or(st.ref_height, |t| t.height.max(1e-6)));
+        st.tiles = ModelTiles {
+            rects: tiles.iter().map(rect).collect(),
+            views: tiles.iter().map(view_of).collect(),
+            ref_heights,
+            active: index,
+        };
+        st.ref_height = next_ref;
         if let Some(t) = tiles.get(index) {
             st.set_view_quiet(view_of(t));
         }

@@ -98,7 +98,7 @@ pub fn get(s: &Session, name: &str) -> Option<Value> {
         // Marker, tooltip and tracking tooltip always on (1 + 4 + 32); polar 8, tracking 16.
         "AUTOSNAP" => json!(37 + 8 * u32::from(st.polarmode) + 16 * u32::from(st.otrack)),
         "POLARANG" => json!(st.polarang.to_degrees()),
-        "GRIDMODE" => json!(i32::from(st.gridmode)),
+        "GRIDMODE" => json!(i32::from(s.drafting_settings().gridmode)),
         "SNAPMODE" => json!(i32::from(st.snapmode)),
         "SNAPSTYL" => json!(i32::from(st.isodraft)),
         "SNAPISOPAIR" => json!(st.isoplane.index()),
@@ -339,7 +339,13 @@ pub fn set(s: &mut Session, name: &str, v: &Value) -> Result<()> {
         },
         "QNEWTEMPLATE" => crate::cmd::file::set_qnew_template(v.as_str().ok_or_else(bad)?),
         "POLARANG" => st.polarang = as_f64(v).filter(|a| *a > 0.0).ok_or_else(bad)?.to_radians(),
-        "GRIDMODE" => st.gridmode = as_bool(v).ok_or_else(bad)?,
+        "GRIDMODE" => {
+            let on = as_bool(v).ok_or_else(bad)?;
+            st.gridmode = on;
+            if let Ok(d) = s.doc_mut() {
+                d.header.set_grid_mode(on);
+            }
+        }
         "SNAPMODE" => st.snapmode = as_bool(v).ok_or_else(bad)?,
         "SNAPSTYL" => st.isodraft = as_i(v).filter(|b| (0..=1).contains(b)).ok_or_else(bad)? == 1,
         "SNAPISOPAIR" => st.isoplane = as_i(v).and_then(crate::snap::iso::IsoPlane::from_index).ok_or_else(bad)?,
