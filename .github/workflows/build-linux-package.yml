@@ -49,7 +49,7 @@ jobs:
 
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
@@ -354,7 +354,7 @@ jobs:
           fi
 
       - name: Upload Build Artifacts (Private - No Release)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.provenance.outputs.ARTIFACT_NAME }}
           path: |
@@ -379,7 +379,7 @@ jobs:
 
     steps:
       - name: Download Build Artifacts from this execution
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ needs.build.outputs.artifact_name }}
           path: artifacts
