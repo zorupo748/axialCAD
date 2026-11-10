@@ -35,8 +35,9 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("limits", "Drawing Limits", run_limits).menu(&["Format", "Drawing Limits"]).params("{min: [x,y], max: [x,y]}"),
         CommandSpec::new("style", "Text Style...", run_style)
             .menu(&["Format", "Text Style..."])
-            .alias(&["st"])
-            .params("{name, font?, bigFont?, height?, widthFactor?, oblique? (degrees), backwards?, upsideDown?, vertical?, annotative?, current?} → styles"),
+            .alias(&["st", "-style"])
+            .params("{name, font?, bigFont?, height?, widthFactor?, oblique? (degrees), backwards?, upsideDown?, vertical?, annotative?, current?} → styles")
+            .interactive(|s| Ok(Box::new(StyleM::new(s)))),
         CommandSpec::new("style.list", "List Text Styles", run_style_list).params("{} → text styles").noundo(),
         CommandSpec::new("style.rename", "Rename Text Style", run_style_rename).params("{from, to}"),
         CommandSpec::new("style.delete", "Delete Text Style", run_style_delete).params("{name} (not Standard, the current style or one in use)"),
@@ -693,6 +694,184 @@ fn run_style_current(s: &mut Session, p: &Value) -> Result<Value> {
     let n = d.text_style(name).map(|t| t.name.clone()).ok_or_else(|| bad("style.current", format!("no text style `{name}`")))?;
     d.header.set_str("TEXTSTYLE", &n);
     ok()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StyleStep {
+    Name,
+    Font,
+    Height,
+    WidthFactor,
+    Oblique,
+    Backwards,
+    UpsideDown,
+    Vertical,
+}
+
+struct StyleM {
+    step: StyleStep,
+    name: String,
+    font: String,
+    height: f64,
+    width_factor: f64,
+    oblique: f64,
+    backwards: bool,
+    upside_down: bool,
+    vertical: bool,
+}
+
+impl StyleM {
+    fn new(s: &Session) -> Self {
+        let cur = s.doc().map(|d| d.header.str("TEXTSTYLE", "Standard")).unwrap_or_else(|_| "Standard".into());
+        let (font, height, width_factor, oblique, backwards, upside_down, vertical) = s
+            .doc()
+            .ok()
+            .and_then(|d| d.text_style(&cur))
+            .map(|st| (st.font.clone(), st.height, st.width_factor, st.oblique.to_degrees(), st.backwards, st.upside_down, st.vertical))
+            .unwrap_or(("txt.shx".into(), 0.0, 1.0, 0.0, false, false, false));
+        StyleM {
+            step: StyleStep::Name,
+            name: cur,
+            font,
+            height,
+            width_factor,
+            oblique,
+            backwards,
+            upside_down,
+            vertical,
+        }
+    }
+}
+
+impl Interactive for StyleM {
+    fn name(&self) -> &'static str {
+        "STYLE"
+    }
+
+    fn prompt(&self, _s: &Session) -> Prompt {
+        match self.step {
+            StyleStep::Name => Prompt::new("Enter name of text style or [?]", Accept::TEXT).kw(&["?"]).default(&self.name),
+            StyleStep::Font => Prompt::new("Specify full font name or font filename", Accept::TEXT).default(&self.font),
+            StyleStep::Height => Prompt::new("Specify text height", Accept::NUMBER).default(format!("{:.4}", self.height)),
+            StyleStep::WidthFactor => Prompt::new("Specify width factor", Accept::NUMBER).default(format!("{:.4}", self.width_factor)),
+            StyleStep::Oblique => Prompt::new("Specify obliquing angle", Accept::NUMBER).default(format!("{:.0}", self.oblique)),
+            StyleStep::Backwards => Prompt::new("Display text backwards? [Yes/No]", Accept::TEXT).kw(&["Yes", "No"]).default(if self.backwards { "Y" } else { "N" }),
+            StyleStep::UpsideDown => Prompt::new("Display text upside-down? [Yes/No]", Accept::TEXT).kw(&["Yes", "No"]).default(if self.upside_down { "Y" } else { "N" }),
+            StyleStep::Vertical => Prompt::new("Vertical? [Yes/No]", Accept::TEXT).kw(&["Yes", "No"]).default(if self.vertical { "Y" } else { "N" }),
+        }
+    }
+
+    fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
+        if matches!(i, Input::Cancel) {
+            return Ok(Step::Cancel);
+        }
+        let text = match i {
+            Input::Enter => "".to_string(),
+            Input::Text(t) => t.trim().to_string(),
+            Input::Keyword(k) => k.trim().to_string(),
+            _ => return Ok(Step::Continue),
+        };
+
+        match self.step {
+            StyleStep::Name => {
+                let name = if text.is_empty() { self.name.clone() } else { text };
+                if name == "?" {
+                    let styles = run_style_list(s, &Value::Null)?;
+                    s.echo(format!("Text styles: {}", styles));
+                    return Ok(Step::Continue);
+                }
+                self.name = name.clone();
+                if let Ok(d) = s.doc() && let Some(st) = d.text_style(&name) {
+                    self.font = st.font.clone();
+                    self.height = st.height;
+                    self.width_factor = st.width_factor;
+                    self.oblique = st.oblique.to_degrees();
+                    self.backwards = st.backwards;
+                    self.upside_down = st.upside_down;
+                    self.vertical = st.vertical;
+                }
+                self.step = StyleStep::Font;
+            }
+            StyleStep::Font => {
+                if !text.is_empty() {
+                    self.font = text;
+                }
+                self.step = StyleStep::Height;
+            }
+            StyleStep::Height => {
+                if !text.is_empty() {
+                    if let Ok(h) = text.parse::<f64>() && h >= 0.0 {
+                        self.height = h;
+                    }
+                }
+                self.step = StyleStep::WidthFactor;
+            }
+            StyleStep::WidthFactor => {
+                if !text.is_empty() {
+                    if let Ok(w) = text.parse::<f64>() && w > 0.0 && w <= 100.0 {
+                        self.width_factor = w;
+                    }
+                }
+                self.step = StyleStep::Oblique;
+            }
+            StyleStep::Oblique => {
+                if !text.is_empty() {
+                    if let Ok(o) = text.parse::<f64>() && o.abs() <= 85.0 {
+                        self.oblique = o;
+                    }
+                }
+                self.step = StyleStep::Backwards;
+            }
+            StyleStep::Backwards => {
+                if !text.is_empty() {
+                    let t = text.trim_start_matches('_');
+                    if t.eq_ignore_ascii_case("y") || t.eq_ignore_ascii_case("yes") {
+                        self.backwards = true;
+                    } else if t.eq_ignore_ascii_case("n") || t.eq_ignore_ascii_case("no") {
+                        self.backwards = false;
+                    }
+                }
+                self.step = StyleStep::UpsideDown;
+            }
+            StyleStep::UpsideDown => {
+                if !text.is_empty() {
+                    let t = text.trim_start_matches('_');
+                    if t.eq_ignore_ascii_case("y") || t.eq_ignore_ascii_case("yes") {
+                        self.upside_down = true;
+                    } else if t.eq_ignore_ascii_case("n") || t.eq_ignore_ascii_case("no") {
+                        self.upside_down = false;
+                    }
+                }
+                self.step = StyleStep::Vertical;
+            }
+            StyleStep::Vertical => {
+                if !text.is_empty() {
+                    let t = text.trim_start_matches('_');
+                    if t.eq_ignore_ascii_case("y") || t.eq_ignore_ascii_case("yes") {
+                        self.vertical = true;
+                    } else if t.eq_ignore_ascii_case("n") || t.eq_ignore_ascii_case("no") {
+                        self.vertical = false;
+                    }
+                }
+                run_style(
+                    s,
+                    &json!({
+                        "name": self.name,
+                        "font": self.font,
+                        "height": self.height,
+                        "widthFactor": self.width_factor,
+                        "oblique": self.oblique,
+                        "backwards": self.backwards,
+                        "upsideDown": self.upside_down,
+                        "vertical": self.vertical,
+                        "current": true,
+                    }),
+                )?;
+                return Ok(Step::Done);
+            }
+        }
+        Ok(Step::Continue)
+    }
 }
 
 /// Text style names used by entities (in model, paper spaces and blocks) and dimension styles.

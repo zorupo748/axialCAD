@@ -174,6 +174,10 @@ pub struct CanvasState {
     mesh_key: Option<u64>,
     mesh_slot: crate::gpu::MeshSlot,
     mesh_origin: Vec2,
+    /// 3D spatial mesh on the GPU with hardware depth testing (see [`draw_spatial_gpu`]).
+    spatial3d_key: Option<u64>,
+    spatial3d_slot: crate::gpu::Mesh3dSlot,
+    spatial3d_origin: Vec3,
     /// The dragged objects of a MOVE/COPY/ROTATE/SCALE preview, uploaded once per drag (see
     /// [`draw_drag_gpu`]).
     drag_key: Option<u64>,
@@ -955,6 +959,10 @@ fn screen_entity_polylines(doc: &cadcraft_doc::Drawing, entity: &cadcraft_doc::E
             }
             vec![pts.into_iter().map(|p| xf.to_screen3(p)).collect()]
         }
+        cadcraft_doc::EntityKind::Text(text) if !entity.common.extrusion.near(Vec3::Z, 1e-6) || text.insert.z.abs() > 1e-6 => {
+            let strokes = cadcraft_render::text_strokes_3d(doc, text, entity.common.extrusion);
+            strokes.into_iter().map(|s| s.into_iter().map(|p| xf.to_screen3(p)).collect()).collect()
+        }
         _ => cadcraft_engine::select::hit_polylines(doc, entity, (0.5 / xf.scale.max(1e-12)).max(1e-9))
             .into_iter()
             .map(|path| path.into_iter().map(|point| xf.to_screen3(Vec3::new(point.x, point.y, 0.0))).collect())
@@ -1146,9 +1154,567 @@ fn draw_spatial_lines(app: &CadApp, painter: &egui::Painter, xf: &Xf) {
                     }
                 }
             }
+            cadcraft_doc::EntityKind::Text(text)
+                if text.insert.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
+            {
+                let strokes = cadcraft_render::text_strokes_3d(&st.doc, text, e.common.extrusion);
+                for s in strokes {
+                    let screen_pts: Vec<Pos2> = s.into_iter().map(|p| xf.to_screen3(p)).collect();
+                    if screen_pts.len() >= 2 {
+                        painter.add(Shape::line(screen_pts, stroke));
+                    }
+                }
+            }
+            cadcraft_doc::EntityKind::Face3d(f) => {
+                let is_conceptual = app.session.settings.vscurrent.eq_ignore_ascii_case("conceptual");
+                let transparency = if app.session.settings.transparency_display {
+                    match e.common.transparency {
+                        cadcraft_doc::Transparency::Percent(p) => p.min(90),
+                        cadcraft_doc::Transparency::ByLayer => {
+                            st.doc.layer(&e.common.layer).map_or(0, |l| l.transparency.min(90))
+                        }
+                        cadcraft_doc::Transparency::ByBlock => 0,
+                    }
+                } else {
+                    0
+                };
+                let alpha = (((100 - transparency as u32) * 255) / 100) as u8;
+                draw_face3d(painter, xf, f, stroke, is_conceptual, color, alpha);
+            }
+            cadcraft_doc::EntityKind::Solid3d(s) => {
+                let is_conceptual = app.session.settings.vscurrent.eq_ignore_ascii_case("conceptual");
+                let transparency = if app.session.settings.transparency_display {
+                    match e.common.transparency {
+                        cadcraft_doc::Transparency::Percent(p) => p.min(90),
+                        cadcraft_doc::Transparency::ByLayer => {
+                            st.doc.layer(&e.common.layer).map_or(0, |l| l.transparency.min(90))
+                        }
+                        cadcraft_doc::Transparency::ByBlock => 0,
+                    }
+                } else {
+                    0
+                };
+                let alpha = (((100 - transparency as u32) * 255) / 100) as u8;
+                let view_dir = app.session.camera().view_dir();
+                draw_solid3d(painter, xf, s, stroke, is_conceptual, color, alpha, view_dir);
+            }
             _ => {}
         }
     }
+}
+
+fn draw_face3d(
+    painter: &egui::Painter,
+    xf: &Xf,
+    f: &cadcraft_doc::Face3d,
+    stroke: Stroke,
+    is_conceptual: bool,
+    color: Color32,
+    alpha: u8,
+) {
+    let c = &f.corners;
+    let is_triangle = c[2] == c[3];
+    if is_conceptual {
+        let v1 = c[1] - c[0];
+        let v2 = c[2] - c[0];
+        let n = v1.cross(v2);
+        let normal = if n.len() > 1e-9 { n.normalized() } else { Vec3::Z };
+        let light = Vec3::new(0.5, 0.5, 0.707).normalized();
+        let diff = normal.dot(light).abs() as f32;
+        let factor = 0.4 + 0.6 * diff;
+        let r = ((f32::from(color.r()) * factor).clamp(0.0, 255.0)) as u8;
+        let g = ((f32::from(color.g()) * factor).clamp(0.0, 255.0)) as u8;
+        let b = ((f32::from(color.b()) * factor).clamp(0.0, 255.0)) as u8;
+        let fill_color = Color32::from_rgba_unmultiplied(r, g, b, alpha);
+
+        let pts: Vec<Pos2> = if is_triangle {
+            vec![xf.to_screen3(c[0]), xf.to_screen3(c[1]), xf.to_screen3(c[2])]
+        } else {
+            vec![xf.to_screen3(c[0]), xf.to_screen3(c[1]), xf.to_screen3(c[2]), xf.to_screen3(c[3])]
+        };
+        if pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()) && pts.len() >= 3 {
+            painter.add(Shape::convex_polygon(pts, fill_color, Stroke::NONE));
+        }
+    }
+
+    let edge_count = if is_triangle { 3 } else { 4 };
+    for i in 0..edge_count {
+        if f.hidden_edges & (1 << i) == 0 {
+            let next = if is_triangle && i == 2 { 0 } else { (i + 1) % 4 };
+            let p1 = c[i];
+            let p2 = c[next];
+            if p1 != p2 {
+                let s1 = xf.to_screen3(p1);
+                let s2 = xf.to_screen3(p2);
+                if s1.x.is_finite() && s1.y.is_finite() && s2.x.is_finite() && s2.y.is_finite() {
+                    painter.line_segment([s1, s2], stroke);
+                }
+            }
+        }
+    }
+}
+
+/// Heurística angular provisional para mallas cerradas sin procedencia topológica:
+/// Si dos caras contiguas tienen un ángulo diedro mayor a 30° (dot < cos(30°) ≈ 0.866),
+/// se tratan provisionalmente como arista viva (crease). Si el diedro es menor o igual a 30°,
+/// solo se dibujan cuando forman silueta con la cámara.
+/// NOTA: Esto es una heurística geométrica provisional, no un estándar industrial ni una
+/// garantía formal de discretización. Cuando existe procedencia topológica (e.g. extrusiones
+/// poligonales), las aristas topológicas reales se conservan sin importar su ángulo diedro.
+const CREASE_ANGLE_DOT_HEURISTIC: f64 = 0.866_025_403_784_438_6;
+
+fn classify_solid_edges(s: &cadcraft_doc::Solid3d, view_dir: Vec3) -> Vec<(Vec3, Vec3)> {
+    let quantize = |v: Vec3| -> (i64, i64, i64) {
+        ((v.x * 10000.0).round() as i64, (v.y * 10000.0).round() as i64, (v.z * 10000.0).round() as i64)
+    };
+
+    let is_smooth_curved = s.recipe.features.iter().any(|f| matches!(f.op, cadcraft_doc::FeatureOp::Cylinder { .. } | cadcraft_doc::FeatureOp::Sphere { .. }));
+
+    struct EdgeRecord {
+        p1: Vec3,
+        p2: Vec3,
+        normals: Vec<Vec3>,
+    }
+
+    let mut edges: std::collections::HashMap<((i64, i64, i64), (i64, i64, i64)), EdgeRecord> =
+        std::collections::HashMap::new();
+
+    for f in &s.faces {
+        let c = &f.corners;
+        let is_triangle = c[2] == c[3];
+        let edge_count = if is_triangle { 3 } else { 4 };
+        let v1 = c[1] - c[0];
+        let v2 = c[2] - c[0];
+        let n = v1.cross(v2);
+        if n.len() <= 1e-9 {
+            continue;
+        }
+        let normal = n.normalized();
+
+        for i in 0..edge_count {
+            let next = if is_triangle && i == 2 { 0 } else { (i + 1) % 4 };
+            let p1 = c[i];
+            let p2 = c[next];
+            if p1 == p2 {
+                continue;
+            }
+            let q1 = quantize(p1);
+            let q2 = quantize(p2);
+            if q1 == q2 {
+                continue;
+            }
+            let key = if q1 < q2 { (q1, q2) } else { (q2, q1) };
+            let rec = edges.entry(key).or_insert_with(|| EdgeRecord {
+                p1,
+                p2,
+                normals: Vec::with_capacity(2),
+            });
+            if rec.normals.len() < 8 {
+                rec.normals.push(normal);
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+
+    for rec in edges.values() {
+        let draw_this_edge = match rec.normals.len() {
+            0 => false,
+            1 => {
+                // Open boundary edge: edge belongs to only 1 face (open sheet / unclosed mesh). Always draw.
+                true
+            }
+            _ => {
+                if !is_smooth_curved {
+                    // Sólido facetado (e.g. extrusión de polígono, prisma o caja):
+                    // Todas las aristas topológicas reales se conservan, incluso si el ángulo diedro es <= 30°.
+                    // Solo se descartan diagonales coplanares idénticas (diedro 0°, n1 . n2 > 0.9999) fruto de triangulación plana.
+                    let coplanar = rec.normals.windows(2).all(|w| w[0].dot(w[1]) > 0.9999);
+                    !coplanar
+                } else {
+                    // Superficie analítica curva discretizada (cilindro / esfera):
+                    // Evaluar si es arista viva (diedro > 30° como heurística provisional) o silueta respecto a la cámara.
+                    let mut is_crease = false;
+                    let mut has_front = false;
+                    let mut has_back = false;
+
+                    // Robusto para 2 o más normales (incidencias no manifold)
+                    for i in 0..rec.normals.len() {
+                        let ni = rec.normals[i];
+                        let dot_cam = ni.dot(view_dir);
+                        // Tolerancia de 1e-5 para estados casi tangentes de cámara (grazing angles)
+                        if dot_cam > 1e-5 {
+                            has_front = true;
+                        } else if dot_cam < -1e-5 {
+                            has_back = true;
+                        }
+
+                        for j in (i + 1)..rec.normals.len() {
+                            let nj = rec.normals[j];
+                            if ni.dot(nj) < CREASE_ANGLE_DOT_HEURISTIC {
+                                is_crease = true;
+                                break;
+                            }
+                        }
+                        if is_crease {
+                            break;
+                        }
+                    }
+
+                    if is_crease {
+                        true
+                    } else if view_dir.len() > 1e-6 && has_front && has_back {
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        };
+
+        if draw_this_edge {
+            result.push((rec.p1, rec.p2));
+        }
+    }
+
+    result
+}
+
+fn draw_solid3d(
+    painter: &egui::Painter,
+    xf: &Xf,
+    s: &cadcraft_doc::Solid3d,
+    stroke: Stroke,
+    is_conceptual: bool,
+    color: Color32,
+    alpha: u8,
+    view_dir: Vec3,
+) {
+    if s.faces.is_empty() {
+        return;
+    }
+
+    // Step 1: Render filled faces when in Conceptual mode (separated from edge lines)
+    if is_conceptual {
+        let light = Vec3::new(0.5, 0.5, 0.707).normalized();
+        for f in &s.faces {
+            let c = &f.corners;
+            let is_triangle = c[2] == c[3];
+            let v1 = c[1] - c[0];
+            let v2 = c[2] - c[0];
+            let n = v1.cross(v2);
+            if n.len() <= 1e-9 {
+                continue;
+            }
+            let normal = n.normalized();
+            let diff = normal.dot(light).abs() as f32;
+            let factor = 0.4 + 0.6 * diff;
+            let r = ((f32::from(color.r()) * factor).clamp(0.0, 255.0)) as u8;
+            let g = ((f32::from(color.g()) * factor).clamp(0.0, 255.0)) as u8;
+            let b = ((f32::from(color.b()) * factor).clamp(0.0, 255.0)) as u8;
+            let fill_color = Color32::from_rgba_unmultiplied(r, g, b, alpha);
+
+            let pts: Vec<Pos2> = if is_triangle {
+                vec![xf.to_screen3(c[0]), xf.to_screen3(c[1]), xf.to_screen3(c[2])]
+            } else {
+                vec![xf.to_screen3(c[0]), xf.to_screen3(c[1]), xf.to_screen3(c[2]), xf.to_screen3(c[3])]
+            };
+            if pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()) && pts.len() >= 3 {
+                let area2 = (pts[1].x - pts[0].x) * (pts[2].y - pts[0].y) - (pts[1].y - pts[0].y) * (pts[2].x - pts[0].x);
+                if area2.abs() >= 1e-2 {
+                    painter.add(Shape::convex_polygon(pts, fill_color, Stroke::NONE));
+                }
+            }
+        }
+    }
+
+    // Step 2: Render classified edges
+    let edges = classify_solid_edges(s, view_dir);
+    for (p1, p2) in edges {
+        let s1 = xf.to_screen3(p1);
+        let s2 = xf.to_screen3(p2);
+        if s1.x.is_finite() && s1.y.is_finite() && s2.x.is_finite() && s2.y.is_finite() && s1.distance(s2) >= 0.5 {
+            painter.line_segment([s1, s2], stroke);
+        }
+    }
+}
+
+pub(crate) fn build_3d_mesh(
+    session: &cadcraft_engine::Session,
+    origin: Vec3,
+    view_dir: Vec3,
+    is_conceptual: bool,
+    hover_handle: Option<cadcraft_doc::Handle>,
+) -> crate::gpu::Mesh3dData {
+    let mut m = crate::gpu::Mesh3dData::default();
+    let Ok(st) = session.state() else { return m };
+    let space = session.space();
+    let Some(store) = st.doc.space(&space) else { return m };
+    let sel = session.selection();
+    let t = Tokens::get();
+    let selection_look = Look::selection(&session.settings);
+    let preview_look = Look::preview(&session.settings);
+
+    let light = Vec3::new(0.5, 0.5, 0.707).normalized();
+
+    for e in store.iter() {
+        if !st.doc.is_visible(e) {
+            continue;
+        }
+        let is_sel = sel.contains(&e.handle);
+        let look = if is_sel {
+            selection_look
+        } else if hover_handle == Some(e.handle) {
+            Some(preview_look)
+        } else {
+            None
+        };
+        let (color_r, color_g, color_b) = if is_sel && look.is_some() {
+            (t.selection.r(), t.selection.g(), t.selection.b())
+        } else if !is_sel && look.is_some() {
+            (t.hover.r(), t.hover.g(), t.hover.b())
+        } else {
+            let layer_color = st.doc.layer(&e.common.layer).map_or(cadcraft_color::Color::WHITE, |layer| layer.color);
+            let rgb = e.common.color.resolve(layer_color, cadcraft_color::Color::WHITE);
+            (rgb.0, rgb.1, rgb.2)
+        };
+        let transparency = if session.settings.transparency_display {
+            match e.common.transparency {
+                cadcraft_doc::Transparency::Percent(p) => p.min(90),
+                cadcraft_doc::Transparency::ByLayer => {
+                    st.doc.layer(&e.common.layer).map_or(0, |l| l.transparency.min(90))
+                }
+                cadcraft_doc::Transparency::ByBlock => 0,
+            }
+        } else {
+            0
+        };
+        let alpha = (((100 - transparency as u32) * 255) / 100) as u8;
+        let edge_col = crate::gpu::premultiplied_u8([color_r, color_g, color_b], alpha);
+
+        match &e.kind {
+            cadcraft_doc::EntityKind::Face3d(f) => {
+                let c = &f.corners;
+                let is_triangle = c[2] == c[3];
+                // 1. Filled faces in Conceptual mode
+                if is_conceptual {
+                    let v1 = c[1] - c[0];
+                    let v2 = c[2] - c[0];
+                    let n = v1.cross(v2);
+                    if n.len() > 1e-9 {
+                        let normal = n.normalized();
+                        let diff = normal.dot(light).abs() as f32;
+                        let factor = 0.4 + 0.6 * diff;
+                        let r = ((f32::from(color_r) * factor).clamp(0.0, 255.0)) as u8;
+                        let g = ((f32::from(color_g) * factor).clamp(0.0, 255.0)) as u8;
+                        let b = ((f32::from(color_b) * factor).clamp(0.0, 255.0)) as u8;
+                        let fill_col = crate::gpu::premultiplied_u8([r, g, b], alpha);
+
+                        let p0 = [ (c[0].x - origin.x) as f32, (c[0].y - origin.y) as f32, (c[0].z - origin.z) as f32 ];
+                        let p1 = [ (c[1].x - origin.x) as f32, (c[1].y - origin.y) as f32, (c[1].z - origin.z) as f32 ];
+                        let p2 = [ (c[2].x - origin.x) as f32, (c[2].y - origin.y) as f32, (c[2].z - origin.z) as f32 ];
+
+                        crate::gpu::push_vertex3d(&mut m.tris, p0, fill_col);
+                        crate::gpu::push_vertex3d(&mut m.tris, p1, fill_col);
+                        crate::gpu::push_vertex3d(&mut m.tris, p2, fill_col);
+
+                        if !is_triangle {
+                            let p3 = [ (c[3].x - origin.x) as f32, (c[3].y - origin.y) as f32, (c[3].z - origin.z) as f32 ];
+                            crate::gpu::push_vertex3d(&mut m.tris, p0, fill_col);
+                            crate::gpu::push_vertex3d(&mut m.tris, p2, fill_col);
+                            crate::gpu::push_vertex3d(&mut m.tris, p3, fill_col);
+                        }
+                    }
+                }
+                // 2. Edges according to hidden_edges
+                let edge_count = if is_triangle { 3 } else { 4 };
+                for i in 0..edge_count {
+                    if f.hidden_edges & (1 << i) == 0 {
+                        let next = if is_triangle && i == 2 { 0 } else { (i + 1) % 4 };
+                        let p1 = c[i];
+                        let p2 = c[next];
+                        if p1 != p2 {
+                            let rel1 = [ (p1.x - origin.x) as f32, (p1.y - origin.y) as f32, (p1.z - origin.z) as f32 ];
+                            let rel2 = [ (p2.x - origin.x) as f32, (p2.y - origin.y) as f32, (p2.z - origin.z) as f32 ];
+                            crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                            crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
+                        }
+                    }
+                }
+            }
+            cadcraft_doc::EntityKind::Solid3d(s) => {
+                if s.faces.is_empty() {
+                    continue;
+                }
+                // 1. Filled faces in Conceptual mode
+                if is_conceptual {
+                    for f in &s.faces {
+                        let c = &f.corners;
+                        let is_triangle = c[2] == c[3];
+                        let v1 = c[1] - c[0];
+                        let v2 = c[2] - c[0];
+                        let n = v1.cross(v2);
+                        if n.len() <= 1e-9 {
+                            continue;
+                        }
+                        let normal = n.normalized();
+                        let diff = normal.dot(light).abs() as f32;
+                        let factor = 0.4 + 0.6 * diff;
+                        let r = ((f32::from(color_r) * factor).clamp(0.0, 255.0)) as u8;
+                        let g = ((f32::from(color_g) * factor).clamp(0.0, 255.0)) as u8;
+                        let b = ((f32::from(color_b) * factor).clamp(0.0, 255.0)) as u8;
+                        let fill_col = crate::gpu::premultiplied_u8([r, g, b], alpha);
+
+                        let p0 = [ (c[0].x - origin.x) as f32, (c[0].y - origin.y) as f32, (c[0].z - origin.z) as f32 ];
+                        let p1 = [ (c[1].x - origin.x) as f32, (c[1].y - origin.y) as f32, (c[1].z - origin.z) as f32 ];
+                        let p2 = [ (c[2].x - origin.x) as f32, (c[2].y - origin.y) as f32, (c[2].z - origin.z) as f32 ];
+
+                        crate::gpu::push_vertex3d(&mut m.tris, p0, fill_col);
+                        crate::gpu::push_vertex3d(&mut m.tris, p1, fill_col);
+                        crate::gpu::push_vertex3d(&mut m.tris, p2, fill_col);
+
+                        if !is_triangle {
+                            let p3 = [ (c[3].x - origin.x) as f32, (c[3].y - origin.y) as f32, (c[3].z - origin.z) as f32 ];
+                            crate::gpu::push_vertex3d(&mut m.tris, p0, fill_col);
+                            crate::gpu::push_vertex3d(&mut m.tris, p2, fill_col);
+                            crate::gpu::push_vertex3d(&mut m.tris, p3, fill_col);
+                        }
+                    }
+                }
+                // 2. Classified edges
+                let edges = classify_solid_edges(s, view_dir);
+                for (p1, p2) in edges {
+                    let rel1 = [ (p1.x - origin.x) as f32, (p1.y - origin.y) as f32, (p1.z - origin.z) as f32 ];
+                    let rel2 = [ (p2.x - origin.x) as f32, (p2.y - origin.y) as f32, (p2.z - origin.z) as f32 ];
+                    crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                    crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
+                }
+            }
+            cadcraft_doc::EntityKind::Line(l) if l.a.z != 0.0 || l.b.z != 0.0 => {
+                let rel1 = [ (l.a.x - origin.x) as f32, (l.a.y - origin.y) as f32, (l.a.z - origin.z) as f32 ];
+                let rel2 = [ (l.b.x - origin.x) as f32, (l.b.y - origin.y) as f32, (l.b.z - origin.z) as f32 ];
+                crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
+            }
+            cadcraft_doc::EntityKind::Circle(c)
+                if c.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
+            {
+                let pts3 = c.sample_points_3d(e.common.extrusion, 64);
+                for seg in pts3.windows(2) {
+                    let rel1 = [ (seg[0].x - origin.x) as f32, (seg[0].y - origin.y) as f32, (seg[0].z - origin.z) as f32 ];
+                    let rel2 = [ (seg[1].x - origin.x) as f32, (seg[1].y - origin.y) as f32, (seg[1].z - origin.z) as f32 ];
+                    crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                    crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
+                }
+                if let (Some(first), Some(last)) = (pts3.first(), pts3.last()) {
+                    let rel1 = [ (last.x - origin.x) as f32, (last.y - origin.y) as f32, (last.z - origin.z) as f32 ];
+                    let rel2 = [ (first.x - origin.x) as f32, (first.y - origin.y) as f32, (first.z - origin.z) as f32 ];
+                    crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                    crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
+                }
+            }
+            cadcraft_doc::EntityKind::LwPolyline(pl)
+                if pl.elevation.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
+            {
+                let mut pts3 = pl.vertices_3d(e.common.extrusion);
+                if pl.closed && !pts3.is_empty() {
+                    pts3.push(pts3[0]);
+                }
+                for seg in pts3.windows(2) {
+                    let rel1 = [ (seg[0].x - origin.x) as f32, (seg[0].y - origin.y) as f32, (seg[0].z - origin.z) as f32 ];
+                    let rel2 = [ (seg[1].x - origin.x) as f32, (seg[1].y - origin.y) as f32, (seg[1].z - origin.z) as f32 ];
+                    crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                    crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
+                }
+            }
+            cadcraft_doc::EntityKind::Text(text)
+                if text.insert.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
+            {
+                let strokes = cadcraft_render::text_strokes_3d(&st.doc, text, e.common.extrusion);
+                for s in strokes {
+                    for seg in s.windows(2) {
+                        let rel1 = [ (seg[0].x - origin.x) as f32, (seg[0].y - origin.y) as f32, (seg[0].z - origin.z) as f32 ];
+                        let rel2 = [ (seg[1].x - origin.x) as f32, (seg[1].y - origin.y) as f32, (seg[1].z - origin.z) as f32 ];
+                        crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                        crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    m
+}
+
+pub(crate) fn draw_spatial_gpu(
+    c: &mut CanvasState,
+    session: &cadcraft_engine::Session,
+    painter: &egui::Painter,
+    xf: &Xf,
+) {
+    let cam = session.camera();
+    let is_conceptual = session.settings.vscurrent.eq_ignore_ascii_case("conceptual");
+    let target = cam.target;
+    let right = cam.right_dir();
+    let up = cam.up_dir();
+    let view_dir = cam.view_dir();
+    let center = xf.rect.center();
+
+    let space = session.space();
+    let view_key = (
+        cam.azimuth.to_bits(),
+        cam.elevation.to_bits(),
+        target.x.to_bits(),
+        target.y.to_bits(),
+        target.z.to_bits(),
+        xf.scale.to_bits(),
+        is_conceptual,
+        session.settings.transparency_display,
+    );
+
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (c.list_gen, view_key, c.hover).hash(&mut h);
+        h.finish()
+    };
+
+    let origin = target;
+
+    if c.spatial3d_key != Some(key) {
+        let mesh = build_3d_mesh(session, origin, view_dir, is_conceptual, c.hover);
+        if let Ok(mut slot) = c.spatial3d_slot.lock() {
+            *slot = Some(mesh);
+        }
+        c.spatial3d_key = Some(key);
+        c.spatial3d_origin = origin;
+    }
+
+    let depth_range = {
+        let extents_span = session.state().map(|st| {
+            let bb = st.doc.extents(&space);
+            (bb.max - bb.min).len()
+        }).unwrap_or(1000.0);
+        let view_span = (xf.rect.width().max(xf.rect.height()) as f64 / xf.scale.max(1e-6)) * 4.0;
+        extents_span.max(view_span).max(2000.0) as f32
+    };
+
+    painter.add(egui_wgpu::Callback::new_paint_callback(
+        xf.rect,
+        crate::gpu::Spatial3dCallback {
+            key,
+            slot: c.spatial3d_slot.clone(),
+            target: [target.x as f32, target.y as f32, target.z as f32],
+            right: [right.x as f32, right.y as f32, right.z as f32],
+            up: [up.x as f32, up.y as f32, up.z as f32],
+            view_dir: [view_dir.x as f32, view_dir.y as f32, view_dir.z as f32],
+            scale: xf.scale as f32,
+            center: [center.x, center.y],
+            origin: [origin.x as f32, origin.y as f32, origin.z as f32],
+            depth_range,
+        },
+    ));
 }
 
 fn clip_infinite(xf: &Xf, base: Vec2, dir: Vec2, ray: bool) -> Option<[Pos2; 2]> {
@@ -3151,10 +3717,13 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     }
     if app.canvas.gpu.is_some() {
         draw_list_gpu(&mut app.canvas, &painter, &xf_paper, bg, app.session.settings.lwdisplay);
-    } else if let Some(list) = &app.canvas.list {
-        draw_list(&painter, &xf_paper, list, bg, app.session.settings.lwdisplay);
+        draw_spatial_gpu(&mut app.canvas, &app.session, &painter, &xf);
+    } else {
+        if let Some(list) = &app.canvas.list {
+            draw_list(&painter, &xf_paper, list, bg, app.session.settings.lwdisplay);
+        }
+        draw_spatial_lines(app, &painter, &xf);
     }
-    draw_spatial_lines(app, &painter, &xf);
     if let Some(vp) = &active_vp {
         // The active viewport: a heavy border, highlights in model units clipped to it.
         let r = Rect::from_two_pos(
@@ -6785,5 +7354,99 @@ mod hatch_pick_tests {
         let drawn_loc_b = ucs.to_local(drawn_line.b);
         assert!((drawn_loc_a.z - loc1.z).abs() < 1e-4, "Endpoint 1 local Z must match loc1.z: got {}, expected {}", drawn_loc_a.z, loc1.z);
         assert!((drawn_loc_b.z - loc2.z).abs() < 1e-4, "Endpoint 2 local Z must match loc2.z: got {}, expected {}", drawn_loc_b.z, loc2.z);
+    }
+
+    #[test]
+    fn test_faceted_solid_preserves_edges_with_sub_30_degree_dihedral() {
+        use std::f64::consts::PI;
+        // Construct a 16-gon prism. The angle between adjacent lateral face normals is:
+        // 360 / 16 = 22.5 degrees, which is <= 30 degrees.
+        let n = 16;
+        let r = 10.0;
+        let h = 20.0;
+        let mut bottom_ring = Vec::new();
+        let mut top_ring = Vec::new();
+        for i in 0..n {
+            let theta = (i as f64) * 2.0 * PI / (n as f64);
+            let x = r * theta.cos();
+            let y = r * theta.sin();
+            bottom_ring.push(Vec3::new(x, y, 0.0));
+            top_ring.push(Vec3::new(x, y, h));
+        }
+
+        let mut faces = Vec::new();
+        // 16 lateral quad faces
+        for i in 0..n {
+            let next = (i + 1) % n;
+            let b0 = bottom_ring[i];
+            let b1 = bottom_ring[next];
+            let t1 = top_ring[next];
+            let t0 = top_ring[i];
+            faces.push(cadcraft_doc::Face3d {
+                corners: [b0, b1, t1, t0],
+                hidden_edges: 0,
+            });
+        }
+        // Top and bottom cap faces (fan from center)
+        let center_bottom = Vec3::new(0.0, 0.0, 0.0);
+        let center_top = Vec3::new(0.0, 0.0, h);
+        for i in 0..n {
+            let next = (i + 1) % n;
+            faces.push(cadcraft_doc::Face3d {
+                corners: [center_bottom, bottom_ring[next], bottom_ring[i], bottom_ring[i]],
+                hidden_edges: 0,
+            });
+            faces.push(cadcraft_doc::Face3d {
+                corners: [center_top, top_ring[i], top_ring[next], top_ring[next]],
+                hidden_edges: 0,
+            });
+        }
+
+        // 1. Procedural solid with FeatureOp::Extrusion (faceted solid)
+        let mut rec1 = cadcraft_doc::Recipe::new();
+        rec1.add_feature(1, cadcraft_doc::FeatureOp::Extrusion {
+            profile: bottom_ring.clone(),
+            direction: Vec3::new(0.0, 0.0, h),
+        });
+        let mut faceted_solid = cadcraft_doc::Solid3d::new(rec1);
+        faceted_solid.faces = faces.clone();
+
+        let view_dir = Vec3::new(0.0, 1.0, 0.0);
+        let edges = super::classify_solid_edges(&faceted_solid, view_dir);
+
+        // Every lateral edge (bottom_ring[i] to top_ring[i]) has a dihedral angle of 22.5 deg <= 30 deg.
+        // Because it has procedural provenance of Extrusion, all 16 lateral edges MUST be preserved!
+        for i in 0..n {
+            let b = bottom_ring[i];
+            let t = top_ring[i];
+            let found = edges.iter().any(|(p1, p2)| {
+                (p1.near(b, 1e-4) && p2.near(t, 1e-4)) || (p1.near(t, 1e-4) && p2.near(b, 1e-4))
+            });
+            assert!(found, "Lateral edge {} (dihedral 22.5 deg <= 30 deg) must be preserved for faceted solid", i);
+        }
+
+        // 2. Analytic smooth cylinder with the same mesh:
+        let mut rec2 = cadcraft_doc::Recipe::new();
+        rec2.add_feature(1, cadcraft_doc::FeatureOp::Cylinder {
+            center: center_bottom,
+            radius: r,
+            height: h,
+            axis: Vec3::Z,
+        });
+        let mut smooth_solid = cadcraft_doc::Solid3d::new(rec2);
+        smooth_solid.faces = faces;
+
+        let smooth_edges = super::classify_solid_edges(&smooth_solid, view_dir);
+        // For smooth cylinder, interior lateral edges (not silhouette and dihedral 22.5 deg <= 30 deg)
+        // are treated as discretization facets and omitted, while silhouettes and caps are preserved.
+        let lateral_edges_count = (0..n).filter(|&i| {
+            let b = bottom_ring[i];
+            let t = top_ring[i];
+            smooth_edges.iter().any(|(p1, p2)| {
+                (p1.near(b, 1e-4) && p2.near(t, 1e-4)) || (p1.near(t, 1e-4) && p2.near(b, 1e-4))
+            })
+        }).count();
+        assert!(lateral_edges_count < n, "Smooth cylinder must not draw all discretization facet edges");
+        assert!(lateral_edges_count >= 2, "Smooth cylinder must retain silhouette lateral edges");
     }
 }

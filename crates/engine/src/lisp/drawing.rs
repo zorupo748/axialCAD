@@ -94,6 +94,9 @@ pub fn command(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
                 };
                 if let Err(e) = r {
                     ctx.s.echo(e.to_string());
+                    if ctx.s.in_script {
+                        return Err(LispError::new(e.to_string()));
+                    }
                 }
             }
             Value::Int(_) | Value::Real(_) => {

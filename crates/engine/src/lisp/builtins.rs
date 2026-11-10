@@ -1018,6 +1018,9 @@ fn open(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
         "a" => (true, true),
         _ => return Err(LispError::new(format!("bad argument value: file mode {mode}"))),
     };
+    if ctx.s.in_script && writing {
+        return Err(LispError::new("file writing is restricted in scripts"));
+    }
     let mut f = LispFile { path: path.clone(), writing, append, lines: Default::default(), text: String::new() };
     if !writing {
         match read_text_file(&path) {
@@ -1307,6 +1310,9 @@ fn exit(_ctx: &mut Ctx<'_>, _a: Vec<Value>) -> Result<Flow, LispError> {
 
 /// `(load file [onfailure])`: evaluate a file's forms; its last value is the result.
 fn load(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
+    if ctx.s.in_script {
+        return Err(LispError::new("loading external files is restricted in scripts"));
+    }
     arity(&a, 1, 2)?;
     let name = string(&a[0])?.to_string();
     let text = super::load_source(ctx.s, &name);
@@ -1323,6 +1329,9 @@ fn load(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
 /// the definition the file gave it. Startup files register commands this way without loading
 /// every routine up front.
 fn autoload(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
+    if ctx.s.in_script {
+        return Err(LispError::new("autoload is restricted in scripts"));
+    }
     arity(&a, 2, 2)?;
     let file = string(&a[0])?;
     for cmd in list_arg(&a[1])? {
@@ -1340,6 +1349,14 @@ fn autoload(ctx: &mut Ctx<'_>, a: Vec<Value>) -> Result<Flow, LispError> {
         ctx.env.set(&Sym::new(&format!("C:{name}")), stub);
     }
     Ok(Flow::Value(Value::Nil))
+}
+
+fn redraw(ctx: &mut Ctx<'_>, _a: Vec<Value>) -> Result<Flow, LispError> {
+    ctx.s.touch();
+    if let Ok(st) = ctx.s.state_mut() {
+        st.revision += 1;
+    }
+    Ok(Flow::Wait(super::eval::Need::Yield))
 }
 
 fn noop(_a: &[Value]) -> R {
@@ -1488,7 +1505,7 @@ static BUILTINS: &[Builtin] = &[
     pure!("VL-CATCH-ALL-ERROR-MESSAGE", vl_catch_all_error_message),
     pure!("VL-LOAD-COM", noop),
     pure!("GC", noop),
-    pure!("REDRAW", noop),
+    ctx!("REDRAW", redraw),
     pure!("VER", ver),
     ctx!("PRINC", princ),
     ctx!("PRIN1", prin1),

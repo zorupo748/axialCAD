@@ -352,22 +352,34 @@ pub(crate) fn justify(j: &str) -> Option<(HAlign, VAlign)> {
     })
 }
 
-pub(crate) fn make_text(s: &Session, at: Vec2, value: &str, height: f64, rotation: f64, j: (HAlign, VAlign)) -> EntityKind {
+pub(crate) fn make_text_entity(
+    s: &Session,
+    at_wcs: Vec3,
+    value: &str,
+    height: f64,
+    rotation_ocs: f64,
+    j: (HAlign, VAlign),
+) -> EntityKind {
     let style = s.doc().map(|d| d.header.str("TEXTSTYLE", "Standard")).unwrap_or_else(|_| "Standard".into());
     let (h, v) = j;
     let left = h == HAlign::Left && v == VAlign::Baseline;
     EntityKind::Text(Text {
-        insert: v3(at),
-        align_pt: if left { None } else { Some(v3(at)) },
+        insert: at_wcs,
+        align_pt: if left { None } else { Some(at_wcs) },
         height,
         value: value.into(),
-        rotation,
+        rotation: rotation_ocs,
         width_factor: 1.0,
         oblique: 0.0,
         style,
         halign: h,
         valign: v,
     })
+}
+
+#[allow(dead_code)]
+pub(crate) fn make_text(s: &Session, at: Vec2, value: &str, height: f64, rotation: f64, j: (HAlign, VAlign)) -> EntityKind {
+    make_text_entity(s, v3(at), value, height, rotation, j)
 }
 
 fn run_text(s: &mut Session, p: &Value) -> Result<Value> {
@@ -378,8 +390,15 @@ fn run_text(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("text", "height must be positive"));
     }
     let j = justify(str_param(p, "justify").unwrap_or("L")).ok_or_else(|| bad("text", "unknown justification"))?;
-    let k = make_text(s, at, text, height, f64_or(p, "rotation", 0.0).to_radians(), j);
-    added(s.add_entity(k)?)
+    let rot = f64_or(p, "rotation", 0.0).to_radians();
+    let ucs = s.ucs();
+    let at_wcs = ucs.to_world2(at);
+    let n = ucs.z_axis;
+    let (ax, ay, _) = cadcraft_geom::Mat4::ocs_basis(n);
+    let d = ucs.x_axis * rot.cos() + ucs.y_axis * rot.sin();
+    let rot_ocs = d.dot(ay).atan2(d.dot(ax));
+    let k = make_text_entity(s, at_wcs, text, height, rot_ocs, j);
+    added(s.add_entity_with_extrusion(k, n)?)
 }
 
 fn run_mtext(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1672,6 +1691,7 @@ impl Interactive for DonutM {
 
 struct TextM {
     at: Option<Vec2>,
+    at_z: f64,
     height: Option<f64>,
     rotation: Option<f64>,
     justify: (HAlign, VAlign),
@@ -1684,14 +1704,17 @@ struct TextM {
 
 impl TextM {
     fn new(s: &Session) -> Self {
+        let single_line = s.lisp_running()
+            || s.script_runner.as_ref().is_some_and(|r| r.check_eof_pending);
         TextM {
             at: None,
+            at_z: 0.0,
             height: None,
             rotation: None,
             justify: (HAlign::Left, VAlign::Baseline),
             asking_justify: false,
             line: 0,
-            single_line: s.lisp_running(),
+            single_line,
         }
     }
 }
@@ -1716,9 +1739,14 @@ impl Interactive for TextM {
     fn begin(&mut self, s: &mut Session) -> Result<Step> {
         let d = s.doc()?;
         let style = d.header.str("TEXTSTYLE", "Standard");
+        if let Some(st) = d.text_style(&style) {
+            if st.height > 0.0 {
+                self.height = Some(st.height);
+            }
+        }
         let anno = if d.text_style(&style).is_some_and(|st| st.annotative) { "Yes" } else { "No" };
         let msg =
-            format!("Current text style:  \"{style}\"  Text height:  {:.4}  Annotative:  {anno}  Justify:  Left", d.header.f64("TEXTSIZE", 0.2));
+            format!("Current text style:  \"{style}\"  Text height:  {:.4}  Annotative:  {anno}  Justify:  Left", self.height.unwrap_or_else(|| d.header.f64("TEXTSIZE", 0.2)));
         s.echo(msg);
         Ok(Step::Continue)
     }
@@ -1735,9 +1763,18 @@ impl Interactive for TextM {
         let th = s.doc()?.header.f64("TEXTSIZE", 0.2);
         match (self.at, self.height, self.rotation, i) {
             (None, _, _, Input::Keyword(k)) if k == "Justify" => self.asking_justify = true,
-            (None, _, _, Input::Point(p)) => self.at = Some(p),
+            (None, _, _, Input::Point(p)) => {
+                self.at = Some(p);
+                self.at_z = 0.0;
+            }
+            (None, _, _, Input::Point3(p3)) => {
+                let loc = s.ucs().to_local(p3);
+                self.at = Some(loc.xy());
+                self.at_z = loc.z;
+            }
             (Some(_), None, _, Input::Enter) => self.height = Some(th),
             (Some(a), None, _, Input::Point(p)) => self.height = Some(a.dist(p).max(1e-9)),
+            (Some(a), None, _, Input::Point3(p3)) => self.height = Some(a.dist(s.ucs().to_local(p3).xy()).max(1e-9)),
             (Some(_), None, _, Input::Text(t)) => {
                 let h = number(&t).filter(|h| *h > 0.0).ok_or_else(|| crate::EngineError::Other("Requires a positive height.".into()))?;
                 self.height = Some(h);
@@ -1745,13 +1782,20 @@ impl Interactive for TextM {
             }
             (Some(_), Some(_), None, Input::Enter) => self.rotation = Some(0.0),
             (Some(a), Some(_), None, Input::Point(p)) => self.rotation = Some(a.angle_to(p)),
+            (Some(a), Some(_), None, Input::Point3(p3)) => self.rotation = Some(a.angle_to(s.ucs().to_local(p3).xy())),
             (Some(_), Some(_), None, Input::Text(t)) => {
                 self.rotation = Some(s.angle_settings().direction(&t).ok_or_else(|| crate::EngineError::Other("Requires an angle.".into()))?)
             }
             (Some(a), Some(h), Some(r), Input::Text(t)) => {
-                let at = a + Vec2::from_angle(r - std::f64::consts::FRAC_PI_2) * (h * 5.0 / 3.0 * self.line as f64);
-                let k = make_text(s, at, &t, h, r, self.justify);
-                s.add_entity(k)?;
+                let at_ucs = a + Vec2::from_angle(r - std::f64::consts::FRAC_PI_2) * (h * 5.0 / 3.0 * self.line as f64);
+                let ucs = s.ucs();
+                let at_wcs = ucs.to_world(Vec3::new(at_ucs.x, at_ucs.y, self.at_z));
+                let n = ucs.z_axis;
+                let (ax, ay, _) = cadcraft_geom::Mat4::ocs_basis(n);
+                let d = ucs.x_axis * r.cos() + ucs.y_axis * r.sin();
+                let rot_ocs = d.dot(ay).atan2(d.dot(ax));
+                let k = make_text_entity(s, at_wcs, &t, h, rot_ocs, self.justify);
+                s.add_entity_with_extrusion(k, n)?;
                 self.line += 1;
                 if self.single_line {
                     return Ok(Step::Done);

@@ -629,3 +629,33 @@ fn test_solid3d_document_lifecycle() {
     let back: Solid3d = serde_json::from_str(&json).expect("deserialize solid");
     assert_eq!(back, *s_orig);
 }
+
+#[test]
+fn test_high_aspect_ratio_cylinder_mesh_and_extents3() {
+    let mut d = Drawing::new_metric();
+    let center = Vec3::new(1060.0, 50.619, 139.0745);
+    let radius = 1.5;
+    let height = 212.33;
+    let axis = Vec3::new(-104.5, -141.0, 119.5);
+    let faces = crate::solid3d::cylinder_faces(center, radius, height, axis, 32);
+
+    // Bounded mesh size (exactly 96 faces: 32 lateral quads + 64 cap triangles)
+    assert_eq!(faces.len(), 96);
+    for (i, f) in faces.iter().enumerate() {
+        let v1 = f.corners[1] - f.corners[0];
+        let v2 = f.corners[2] - f.corners[0];
+        let n = v1.cross(v2);
+        assert!(n.len() > 1e-6, "Face {i} normal must be non-zero");
+        assert!(n.x.is_finite() && n.y.is_finite() && n.z.is_finite(), "Face {i} normal must be finite");
+    }
+
+    let recipe = Recipe::new();
+    let bbox = Bounds3::new(center, center + axis.normalized() * height);
+    let solid = Solid3d::with_faces(recipe, bbox, faces);
+    d.add(&Space::Model, Common::default(), EntityKind::Solid3d(solid)).expect("add solid");
+
+    let ext3 = d.extents3(&Space::Model);
+    assert!(!ext3.is_empty());
+    assert!(ext3.min.x <= 1060.0);
+    assert!(ext3.min.z <= 139.0745);
+}

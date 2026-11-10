@@ -170,6 +170,13 @@ pub fn specs() -> Vec<CommandSpec> {
             .noundo()
             .transparent()
             .interactive(|_| Ok(Box::new(OrbitM))),
+        CommandSpec::new("vscurrent", "Visual Style", run_vscurrent)
+            .menu(&["View", "Visual Styles"])
+            .alias(&["vs"])
+            .params("{style: 2dwireframe|wireframe|hidden|realistic|conceptual|shaded|shaded_with_edges|shades_of_gray|sketchy|xray}")
+            .noundo()
+            .transparent()
+            .interactive(|_| Ok(Box::new(VscurrentM))),
     ];
     v.extend(named_views::specs());
     v.extend(vports::specs());
@@ -803,13 +810,105 @@ fn run_vpoint(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({ "status": "ok", "direction": [0.0, 0.0, 1.0] }))
 }
 
-fn run_view_preset(s: &mut Session, name: &str) -> Result<Value> {
+pub(super) fn run_view_preset(s: &mut Session, name: &str) -> Result<Value> {
     let mut cam = s.camera();
     cam.set_preset(name);
     s.set_camera(cam);
     s.zoom_extents()?;
     s.echo(format!("View orientation set to {name}."));
     Ok(json!({ "status": "ok", "preset": name }))
+}
+
+pub(crate) fn normalize_visual_style(style: &str) -> Option<(&'static str, bool)> {
+    let s = style.trim().trim_start_matches('_').to_ascii_lowercase();
+    match s.as_str() {
+        "2dwireframe" | "2d" | "2" | "wireframe" | "w" => Some(("2dWireframe", true)),
+        "conceptual" | "c" => Some(("Conceptual", true)),
+        "realistic" | "r" | "hidden" | "h" | "shaded" | "s" | "shaded with edges" | "edges" | "e"
+        | "shades of gray" | "gray" | "g" | "sketchy" | "k" | "xray" | "x-ray" | "x" => {
+            Some(("", false))
+        }
+        _ => None,
+    }
+}
+
+fn run_vscurrent(s: &mut Session, p: &Value) -> Result<Value> {
+    let raw = str_param(p, "style").unwrap_or("2dWireframe");
+    match normalize_visual_style(raw) {
+        Some((canonical, true)) => {
+            s.settings.vscurrent = canonical.to_string();
+            s.echo(format!("Visual style set to {canonical}."));
+            s.touch();
+            Ok(json!({ "status": "ok", "style": canonical }))
+        }
+        Some((_, false)) => {
+            let name = raw.trim().trim_start_matches('_');
+            Err(bad("vscurrent", format!("Visual style '{name}' is not supported yet: axialCAD renderer currently supports 2dWireframe and Conceptual.")))
+        }
+        None => {
+            let name = raw.trim().trim_start_matches('_');
+            Err(bad("vscurrent", format!("Unknown visual style '{name}'. Enter an option [2dWireframe/Wireframe/Hidden/Realistic/Conceptual/Shaded/shaded with Edges/shades of Gray/Sketchy/X-ray].")))
+        }
+    }
+}
+
+#[derive(Default)]
+struct VscurrentM;
+
+impl Interactive for VscurrentM {
+    fn name(&self) -> &'static str {
+        "VSCURRENT"
+    }
+
+    fn prompt(&self, s: &Session) -> Prompt {
+        let mut p = Prompt::new("Enter an option", Accept { enter: true, text: true, ..Accept::default() });
+        p.keywords = vec![
+            "2dWireframe".into(),
+            "Wireframe".into(),
+            "Hidden".into(),
+            "Realistic".into(),
+            "Conceptual".into(),
+            "Shaded".into(),
+            "shaded with Edges".into(),
+            "shades of Gray".into(),
+            "Sketchy".into(),
+            "X-ray".into(),
+        ];
+        p.default = Some(s.settings.vscurrent.clone());
+        p
+    }
+
+    fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
+        match i {
+            Input::Enter => {
+                let current = s.settings.vscurrent.clone();
+                s.echo(format!("Visual style set to {current}."));
+                Ok(Step::Done)
+            }
+            Input::Text(t) | Input::Keyword(t) => {
+                let trimmed = t.trim();
+                if trimmed.is_empty() {
+                    let current = s.settings.vscurrent.clone();
+                    s.echo(format!("Visual style set to {current}."));
+                    return Ok(Step::Done);
+                }
+                match normalize_visual_style(trimmed) {
+                    Some((canonical, true)) => {
+                        s.settings.vscurrent = canonical.to_string();
+                        s.echo(format!("Visual style set to {canonical}."));
+                        s.touch();
+                        Ok(Step::Done)
+                    }
+                    Some((_, false)) => {
+                        let name = trimmed.trim_start_matches('_');
+                        Err(EngineError::Other(format!("Visual style '{name}' is not supported yet: axialCAD renderer currently supports 2dWireframe and Conceptual.")))
+                    }
+                    None => Err(EngineError::Other("Invalid option keyword.".into())),
+                }
+            }
+            _ => Err(EngineError::Other("Invalid option keyword.".into())),
+        }
+    }
 }
 
 #[derive(Default)]

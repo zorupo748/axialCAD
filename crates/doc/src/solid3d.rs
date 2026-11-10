@@ -199,6 +199,20 @@ impl Bounds3 {
     pub fn center(&self) -> Vec3 {
         if self.is_empty() { Vec3::ZERO } else { (self.min + self.max) * 0.5 }
     }
+
+    /// Eight corners of the 3D bounding box.
+    pub fn corners(&self) -> [Vec3; 8] {
+        [
+            Vec3::new(self.min.x, self.min.y, self.min.z),
+            Vec3::new(self.max.x, self.min.y, self.min.z),
+            Vec3::new(self.min.x, self.max.y, self.min.z),
+            Vec3::new(self.max.x, self.max.y, self.min.z),
+            Vec3::new(self.min.x, self.min.y, self.max.z),
+            Vec3::new(self.max.x, self.min.y, self.max.z),
+            Vec3::new(self.min.x, self.max.y, self.max.z),
+            Vec3::new(self.max.x, self.max.y, self.max.z),
+        ]
+    }
 }
 
 /// Evaluation and validity state of a 3D solid entity.
@@ -294,5 +308,62 @@ pub fn sphere_faces(center: Vec3, radius: f64, lat_segments: usize, lon_segments
             });
         }
     }
+    faces
+}
+
+/// Generates a discrete tessellated mesh of quad and triangle `Face3d`s representing a cylinder.
+pub fn cylinder_faces(center: Vec3, radius: f64, height: f64, axis: Vec3, segments: usize) -> Vec<crate::Face3d> {
+    let mut faces = Vec::new();
+    let n = segments.max(8);
+    let axis_unit = if axis.len() > 1e-9 { axis.normalized() } else { Vec3::Z };
+    let u = if axis_unit.z.abs() < 0.9 {
+        axis_unit.cross(Vec3::Z).normalized()
+    } else {
+        axis_unit.cross(Vec3::X).normalized()
+    };
+    let v = axis_unit.cross(u).normalized();
+    let top_center = center + axis_unit * height;
+
+    let mut circle_bottom = Vec::with_capacity(n);
+    let mut circle_top = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let angle = (i as f64) * std::f64::consts::TAU / (n as f64);
+        let radial = (u * angle.cos() + v * angle.sin()) * radius;
+        circle_bottom.push(center + radial);
+        circle_top.push(top_center + radial);
+    }
+
+    // Lateral quad faces
+    for i in 0..n {
+        let next = (i + 1) % n;
+        let p00 = circle_bottom[i];
+        let p01 = circle_bottom[next];
+        let p11 = circle_top[next];
+        let p10 = circle_top[i];
+        faces.push(crate::Face3d {
+            corners: [p00, p01, p11, p10],
+            hidden_edges: 0,
+        });
+    }
+
+    // Bottom cap fan (outward normal = -axis_unit)
+    for i in 0..n {
+        let next = (i + 1) % n;
+        faces.push(crate::Face3d {
+            corners: [center, circle_bottom[next], circle_bottom[i], circle_bottom[i]],
+            hidden_edges: 0,
+        });
+    }
+
+    // Top cap fan (outward normal = +axis_unit)
+    for i in 0..n {
+        let next = (i + 1) % n;
+        faces.push(crate::Face3d {
+            corners: [top_center, circle_top[i], circle_top[next], circle_top[next]],
+            hidden_edges: 0,
+        });
+    }
+
     faces
 }

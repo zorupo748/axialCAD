@@ -904,7 +904,11 @@ impl CadApp {
                     lines_executed += 1;
                     let file_name = self.session.script_runner.as_ref().map(|r| r.name.clone()).unwrap_or_else(|| "<script>".into());
                     match self.session.step_script() {
-                        cadcraft_engine::ScriptStep::Progress { .. } => {}
+                        cadcraft_engine::ScriptStep::Progress { .. } => {
+                            if self.session.lisp_running() {
+                                break;
+                            }
+                        }
                         cadcraft_engine::ScriptStep::Done { total } => {
                             let msg = format!("Script '{file_name}' completed successfully ({total} lines).");
                             self.session.echo(msg.clone());

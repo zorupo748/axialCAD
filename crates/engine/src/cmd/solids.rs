@@ -191,7 +191,7 @@ fn create_and_add_cylinder(s: &mut Session, center: Vec3, radius: f64, height: f
 
     let evaluated = BrepSolid::evaluate_recipe(&recipe).map_err(|e| bad("cylinder", format!("evaluation failed: {e}")))?;
     let bbox = evaluated.bounding_box();
-    let faces = evaluated.to_face3d_mesh(0.05).unwrap_or_default();
+    let faces = cadcraft_doc::solid3d::cylinder_faces(center, radius, height, axis, 32);
 
     let solid = Solid3d::with_faces(recipe, bbox, faces);
     s.add_entity(EntityKind::Solid3d(solid))

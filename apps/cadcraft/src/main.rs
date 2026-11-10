@@ -380,8 +380,10 @@ fn main() -> eframe::Result {
             .with_title_shown(false)
             .with_app_id(APP_ID),
         persist_window: false,
-        // A stencil buffer clips the contents of clipped layout viewports on the GPU.
+        // A stencil buffer clips the contents of clipped layout viewports on the GPU;
+        // a 24-bit depth buffer enables hardware depth testing for 3D geometry.
         stencil_buffer: STENCIL_BITS,
+        depth_buffer: 24,
         ..Default::default()
     };
     if let Some(icon) = app_icon() {
@@ -453,7 +455,7 @@ fn main() -> eframe::Result {
                 app.frame_cap = Some(cadcraft_ui_egui::gpu::FrameCap::new(240));
             }
             if let Some(rs) = &cc.wgpu_render_state {
-                app.set_wgpu(rs, eframe::egui_wgpu::depth_format_from_bits(0, STENCIL_BITS));
+                app.set_wgpu(rs, eframe::egui_wgpu::depth_format_from_bits(24, STENCIL_BITS));
             }
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());

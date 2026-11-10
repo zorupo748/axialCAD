@@ -1,5 +1,5 @@
-use cadcraft_engine::Session;
-use serde_json::json;
+use cadcraft_engine::{Input, Session};
+use serde_json::{json, Value};
 
 fn temp_script(name: &str, content: &[u8]) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -182,22 +182,110 @@ fn test_restricted_commands_rejected() {
 }
 
 #[test]
-fn test_autolisp_expressions_rejected() {
-    let lisp_expressions = [
-        "(+ 1 2)\n",
-        "(defun c:mytest () (princ))\n",
-        "!myvar\n",
-    ];
+fn test_autolisp_user_function_and_wait_execution() {
+    // 1. Definition and call of user function in SCR
+    // 2. The same wait function under a different name ("mi_espera", not "esp")
+    // 3. Continuation persistence across slices and script order: circle line runs only after completion
+    let scr = b"; AutoLISP user function and wait test\n\
+(defun mi_espera (ms / t0) (setq t0 (getvar \"MILLISECS\")) (while (< (- (getvar \"MILLISECS\") t0) ms)))\n\
+(mi_espera 30)\n\
+circle 0,0 15\n";
+    let path = temp_script("lisp_wait.scr", scr);
+    let mut s = Session::new();
+    let r = s.execute("script", &json!({ "path": path })).unwrap();
+    assert_eq!(r["lines"], 4);
+    assert_eq!(s.state().unwrap().doc.model.len(), 1, "Circle must be executed after mi_espera finishes");
+    let _ = std::fs::remove_file(&path);
+}
 
-    for expr in lisp_expressions {
-        let scr = format!("circle 0,0 5\n{expr}circle 0,0 10\n");
-        let path = temp_script("lisp_expr.scr", scr.as_bytes());
-        let mut s = Session::new();
-        let err = s.execute("script", &json!({ "path": path })).unwrap_err().to_string();
-        assert!(err.contains("AutoLISP expressions are not allowed in scripts"), "Expected LISP rejection: {err}");
-        assert_eq!(s.state().unwrap().doc.model.len(), 1);
-        assert!(!s.is_script_running());
+#[test]
+fn test_millisecs_numeric_and_readonly() {
+    let mut s = Session::new();
+    let r = s.execute("getvar", &json!({"name": "MILLISECS"})).unwrap();
+    let val = r["value"].as_i64().expect("MILLISECS must be an integer");
+    assert!(val >= 0, "MILLISECS must be non-negative");
+
+    // Must be read-only
+    let err = s.execute("setvar", &json!({"name": "MILLISECS", "value": 100})).unwrap_err().to_string();
+    assert!(err.contains("read-only"), "MILLISECS must be rejected as read-only: {err}");
+}
+
+#[test]
+fn test_lisp_script_security_restrictions() {
+    let mut s = Session::new();
+
+    // 1. Direct forbidden command from LISP in script
+    let scr1 = b"; Forbidden command via LISP\n(command \"quit\")\ncircle 0,0 10\n";
+    let path1 = temp_script("lisp_sec1.scr", scr1);
+    let err1 = s.execute("script", &json!({ "path": path1 })).unwrap_err().to_string();
+    assert!(err1.contains("restricted in scripts"), "Expected restriction: {err1}");
+    assert_eq!(s.doc().unwrap().model.len(), 0);
+    let _ = std::fs::remove_file(&path1);
+
+    // 2. User function calling forbidden command
+    let scr2 = b"; User function calling forbidden command\n(defun peligro () (command \"save\"))\n(peligro)\ncircle 0,0 10\n";
+    let path2 = temp_script("lisp_sec2.scr", scr2);
+    let err2 = s.execute("script", &json!({ "path": path2 })).unwrap_err().to_string();
+    assert!(err2.contains("restricted in scripts"), "Expected restriction: {err2}");
+    assert_eq!(s.doc().unwrap().model.len(), 0);
+    let _ = std::fs::remove_file(&path2);
+
+    // 3. File write attempt from script
+    let scr3 = b"; File write from script\n(open \"/tmp/cadcraft_test_bad.txt\" \"w\")\ncircle 0,0 10\n";
+    let path3 = temp_script("lisp_sec3.scr", scr3);
+    let err3 = s.execute("script", &json!({ "path": path3 })).unwrap_err().to_string();
+    assert!(err3.contains("file writing is restricted in scripts"), "Expected file restriction: {err3}");
+    assert_eq!(s.doc().unwrap().model.len(), 0);
+    let _ = std::fs::remove_file(&path3);
+}
+
+#[test]
+fn test_script_escape_cancels_infinite_lisp_loop() {
+    let mut s = Session::new();
+    let scr = b"(while t)\ncircle 0,0 20\n";
+    s.start_script_file("infinite_loop.scr", std::str::from_utf8(scr).unwrap()).unwrap();
+
+    // Step once to launch the while loop
+    let step = s.step_script();
+    assert!(matches!(step, cadcraft_engine::ScriptStep::Progress { .. }));
+    assert!(s.lisp_running(), "LISP must be running the while loop");
+
+    // User presses Escape
+    let cancel = s.cancel_script().expect("Cancel script must return Cancelled step");
+    assert!(matches!(cancel, cadcraft_engine::ScriptStep::Cancelled { .. }));
+    assert!(!s.lisp_running(), "LISP must be aborted");
+    assert!(!s.is_script_running(), "Script must be stopped");
+    assert_eq!(s.doc().unwrap().model.len(), 0, "Subsequent circle must not be created");
+}
+
+#[test]
+fn test_parentheses_in_text_command_treated_as_literal_text() {
+    let mut s = Session::new();
+    let scr = b"; Text with parentheses\n_TEXT\n0,0\n1.5\n0\n(synthetic text with parentheses)\n\n";
+    let path = temp_script("text_parens.scr", scr);
+    let r = s.execute("script", &json!({ "path": path })).unwrap();
+    assert_eq!(r["lines"], 7);
+    let doc = s.doc().unwrap();
+    assert_eq!(doc.model.len(), 1);
+    let ent = doc.model.iter().next().unwrap();
+    if let cadcraft_doc::EntityKind::Text(t) = &ent.kind {
+        assert_eq!(t.value, "(synthetic text with parentheses)");
+    } else {
+        panic!("Expected text entity");
     }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn test_lisp_runtime_error_reports_script_line_and_context() {
+    let mut s = Session::new();
+    let scr = b"; LISP division by zero on line 2\n(/ 10 0)\ncircle 0,0 10\n";
+    let path = temp_script("lisp_div0.scr", scr);
+    let err = s.execute("script", &json!({ "path": path })).unwrap_err().to_string();
+    assert!(err.contains("line 2"), "Error must report script line 2: {err}");
+    assert!(err.contains("divide by zero") || err.contains("division by zero") || err.contains("error"), "Expected div0: {err}");
+    assert_eq!(s.doc().unwrap().model.len(), 0, "Subsequent circle must not be created");
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -234,5 +322,299 @@ fn test_synthetic_multicommand_workflow_script() {
     let doc = s.doc().unwrap();
     assert!(doc.layer("L_WORKFLOW").is_some(), "Layer L_WORKFLOW created by script");
     assert!(doc.model.len() >= 2, "Entities created by workflow script");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn test_script_dynmode_consumes_value_and_proceeds() {
+    let scr = b"; DYNMODE test\n_OSMODE\n0\n_DYNMODE\n0\ncircle 0,0 5\n";
+    let path = temp_script("dynmode_off.scr", scr);
+    let mut s = Session::new();
+    s.settings.dynmode = true;
+    let r = s.execute("script", &json!({ "path": path })).unwrap();
+    assert_eq!(r["lines"], 6);
+    assert_eq!(s.settings.dynmode, false, "DYNMODE 0 must turn dynmode off");
+    assert_eq!(s.doc().unwrap().model.len(), 1, "Circle following DYNMODE must be executed");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn test_script_dynmode_on_and_transparent_toggle() {
+    let mut s = Session::new();
+    s.settings.dynmode = false;
+    let scr = b"; DYNMODE 3\n_DYNMODE\n3\n";
+    let path = temp_script("dynmode_on.scr", scr);
+    s.execute("script", &json!({ "path": path })).unwrap();
+    assert_eq!(s.settings.dynmode, true, "DYNMODE 3 must turn dynmode on");
+    let _ = std::fs::remove_file(&path);
+
+    // Verify F12 transparent toggle with empty params
+    s.execute("dynmode", &json!({})).unwrap();
+    assert_eq!(s.settings.dynmode, false, "Empty params toggles dynmode");
+    s.execute("dynmode", &json!({})).unwrap();
+    assert_eq!(s.settings.dynmode, true, "Empty params toggles dynmode back");
+    s.execute("dynmode", &Value::Null).unwrap();
+    assert_eq!(s.settings.dynmode, false, "Null params toggles dynmode");
+}
+
+#[test]
+fn test_dynmode_strict_validation_and_no_unwanted_state_change() {
+    let mut s = Session::new();
+    s.settings.dynmode = true;
+
+    // Invalid parameters via programmatic execute: must return Err and NOT toggle state
+    assert!(s.execute("dynmode", &json!({"bogus": "value"})).is_err());
+    assert_eq!(s.settings.dynmode, true, "State must remain true after bad object");
+
+    assert!(s.execute("dynmode", &json!("invalid_string")).is_err());
+    assert_eq!(s.settings.dynmode, true, "State must remain true after bad string");
+
+    // Out-of-range value (> 3 or < -3): must return Err and NOT change state
+    assert!(s.execute("dynmode", &json!({"value": 4})).is_err());
+    assert_eq!(s.settings.dynmode, true, "State must remain true after out-of-range 4");
+
+    assert!(s.execute("dynmode", &json!({"value": -4})).is_err());
+    assert_eq!(s.settings.dynmode, true, "State must remain true after out-of-range -4");
+
+    assert!(s.execute("dynmode", &json!(4)).is_err());
+    assert_eq!(s.settings.dynmode, true);
+
+    // Interactive console: Enter accepts default without state change
+    s.start("dynmode").unwrap();
+    assert!(s.running.is_some());
+    s.input(Input::Enter).unwrap();
+    assert!(s.running.is_none());
+    assert_eq!(s.settings.dynmode, true, "Enter must preserve true");
+
+    // Interactive console: Cancel cancels without state change
+    s.start("dynmode").unwrap();
+    assert!(s.running.is_some());
+    s.input(Input::Cancel).unwrap();
+    assert!(s.running.is_none());
+    assert_eq!(s.settings.dynmode, true, "Cancel must preserve true");
+
+    // Interactive console: Out-of-range interactive input reprompts with error message without state change
+    s.start("dynmode").unwrap();
+    s.input(Input::Text("5".into())).unwrap();
+    assert_eq!(s.settings.dynmode, true, "Out-of-range interactive text must not change state");
+    assert!(s.running.is_some(), "Interactive console stays active and reprompts on invalid input");
+    assert!(s.log.last().is_some_and(|msg| msg.contains("between -3 and 3")));
+    s.input(Input::Cancel).unwrap();
+
+    // Interactive console: invalid string reprompts with error message without state change
+    s.start("dynmode").unwrap();
+    s.input(Input::Text("not_a_number".into())).unwrap();
+    assert_eq!(s.settings.dynmode, true, "Invalid text must not change state");
+    assert!(s.running.is_some(), "Interactive console stays active and reprompts on invalid input");
+    assert!(s.log.last().is_some_and(|msg| msg.contains("between -3 and 3")));
+    s.input(Input::Cancel).unwrap();
+
+    // Interactive console: valid ON/OFF
+    s.start("dynmode").unwrap();
+    s.input(Input::Keyword("OFF".into())).unwrap();
+    assert_eq!(s.settings.dynmode, false, "OFF must set false");
+
+    s.start("dynmode").unwrap();
+    s.input(Input::Keyword("ON".into())).unwrap();
+    assert_eq!(s.settings.dynmode, true, "ON must set true");
+
+    // SETVAR / GETVAR coherence
+    s.execute("setvar", &json!({"name": "DYNMODE", "value": 0})).unwrap();
+    assert_eq!(s.settings.dynmode, false);
+    let r = s.execute("getvar", &json!({"name": "DYNMODE"})).unwrap();
+    assert_eq!(r["value"], 0);
+
+    s.execute("setvar", &json!({"name": "DYNMODE", "value": 3})).unwrap();
+    assert_eq!(s.settings.dynmode, true);
+    let r = s.execute("getvar", &json!({"name": "DYNMODE"})).unwrap();
+    assert_eq!(r["value"], 1);
+
+    // SETVAR out of range: must fail and leave dynmode true
+    assert!(s.execute("setvar", &json!({"name": "DYNMODE", "value": 4})).is_err());
+    assert_eq!(s.settings.dynmode, true, "SETVAR with 4 must fail and keep dynmode true");
+
+    assert!(s.execute("setvar", &json!({"name": "DYNMODE", "value": -4})).is_err());
+    assert_eq!(s.settings.dynmode, true, "SETVAR with -4 must fail and keep dynmode true");
+
+    // Script execution with invalid DYNMODE halts on that line without executing following commands
+    let scr = b"; Bad dynmode script\n_DYNMODE\n4\ncircle 0,0 5\n";
+    let path = temp_script("dynmode_err.scr", scr);
+    let err = s.execute("script", &json!({ "path": path })).unwrap_err().to_string();
+    assert!(err.contains("between -3 and 3"), "Script error must report range: {err}");
+    assert_eq!(s.doc().unwrap().model.len(), 0, "Circle following bad DYNMODE must not be created");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn test_text_literal_command_names_not_inferred_as_commands() {
+    let mut s = Session::new();
+    // Script enters literal command names at TEXT prompt: CIRCLE, LINE, ERASE, _UCS
+    let scr = b"; Literal command names as text
+_TEXT
+0,0
+1.0
+0
+CIRCLE
+_TEXT
+0,2
+1.0
+0
+LINE
+_TEXT
+0,4
+1.0
+0
+ERASE
+_TEXT
+0,6
+1.0
+0
+_UCS
+";
+    let path = temp_script("text_literal_cmds.scr", scr);
+    let r = s.execute("script", &json!({ "path": path })).unwrap();
+    assert_eq!(r["lines"], 21);
+    let doc = s.doc().unwrap();
+    assert_eq!(doc.model.len(), 4, "Must have created exactly 4 text entities");
+
+    let values: Vec<String> = doc.model.iter().filter_map(|e| {
+        if let cadcraft_doc::EntityKind::Text(t) = &e.kind {
+            Some(t.value.clone())
+        } else {
+            None
+        }
+    }).collect();
+
+    assert_eq!(values, vec!["CIRCLE", "LINE", "ERASE", "_UCS"]);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn test_text_style_fixed_vs_variable_height() {
+    let mut s = Session::new();
+    // 1. Variable height style (Standard default: height = 0.0)
+    // Sequence: point, height, rotation, text
+    let scr_var = b"; Variable height text
+_TEXT
+0,0
+2.75
+0
+VarHeightText
+";
+    let path_var = temp_script("text_var_ht.scr", scr_var);
+    s.execute("script", &json!({ "path": path_var })).unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), 1);
+    if let cadcraft_doc::EntityKind::Text(t) = &s.doc().unwrap().model.iter().next().unwrap().kind {
+        assert_eq!(t.value, "VarHeightText");
+        assert!((t.height - 2.75).abs() < 1e-4);
+    } else {
+        panic!("Expected text entity");
+    }
+    let _ = std::fs::remove_file(&path_var);
+
+    // 2. Fixed height style: define style with fixed height 4.2
+    s.execute("style", &json!({ "name": "FIXED_HT", "font": "txt", "height": 4.2 })).unwrap();
+    s.execute("setvar", &json!({ "name": "TEXTSTYLE", "value": "FIXED_HT" })).unwrap();
+
+    // Sequence for fixed height: point, rotation, text (NO height prompt!)
+    let scr_fixed = b"; Fixed height text (skips height prompt)
+_TEXT
+10,10
+0
+FixedHeightText
+";
+    let path_fixed = temp_script("text_fixed_ht.scr", scr_fixed);
+    s.execute("script", &json!({ "path": path_fixed })).unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), 2);
+    let last = s.doc().unwrap().model.iter().last().unwrap();
+    if let cadcraft_doc::EntityKind::Text(t) = &last.kind {
+        assert_eq!(t.value, "FixedHeightText");
+        assert!((t.height - 4.2).abs() < 1e-4, "Height must match style's fixed height");
+    } else {
+        panic!("Expected text entity");
+    }
+    let _ = std::fs::remove_file(&path_fixed);
+}
+
+#[test]
+fn test_empty_line_semantics_cases_a_b_c_d_e() {
+    let mut s = Session::new();
+
+    // Case (a): Empty line consumed by active command
+    let scr_a = b"; Case a: empty line ends active line command
+line 0,0 10,10
+
+";
+    let path_a = temp_script("empty_a.scr", scr_a);
+    s.execute("script", &json!({ "path": path_a })).unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), 1);
+    assert!(s.running.is_none());
+    let _ = std::fs::remove_file(&path_a);
+
+    // Case (e) & (b): Script repeating a command via blank line at prompt level
+    // Line 1: LINE 0,0 10,0
+    // Line 2: empty line (ends first LINE)
+    // Line 3: empty line at prompt level -> repeats LINE
+    // Line 4: 20,0 30,0 (drawn by repeated LINE)
+    // Line 5: empty line (ends repeated LINE)
+    let scr_e = b"; Case e: repeating command via empty line
+line 0,0 10,0
+
+
+20,0 30,0
+
+";
+    let path_e = temp_script("empty_e.scr", scr_e);
+    s.execute("script", &json!({ "path": path_e })).unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), 3, "Original line + 2 new lines = 3");
+    assert!(s.running.is_none());
+    let _ = std::fs::remove_file(&path_e);
+
+    // Case (c): Trailing empty lines at EOF (must not cause EofPending error)
+    let scr_c = b"; Case c: trailing empty lines at EOF
+circle 5,5 2
+
+
+
+";
+    let path_c = temp_script("empty_c.scr", scr_c);
+    s.execute("script", &json!({ "path": path_c })).unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), 4, "3 lines + 1 circle = 4");
+    assert!(s.running.is_none());
+    let _ = std::fs::remove_file(&path_c);
+
+    // Case (d): Multiple consecutive empty lines between commands
+    // Line 1: line 10,10 20,20
+    // Line 2: empty line (ends first line)
+    // Line 3: empty line at prompt level (repeats line)
+    // Line 4: empty line (ends repeated line without adding entities)
+    // Line 5: circle 25,25 4
+    let scr_d = b"; Case d: multiple empty lines between commands
+line 10,10 20,20
+
+
+
+circle 25,25 4
+
+";
+    let path_d = temp_script("empty_d.scr", scr_d);
+    s.execute("script", &json!({ "path": path_d })).unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), 6, "4 previous + 2 new circles = 6");
+    assert!(s.running.is_none());
+    let _ = std::fs::remove_file(&path_d);
+}
+
+#[test]
+fn test_lisp_custom_wait_function_renamed() {
+    let mut s = Session::new();
+    // Test wait function with completely different name: 'mi_espera'
+    let scr = b"(defun mi_espera (ms / t0) (setq t0 (getvar \"MILLISECS\")) (while (< (- (getvar \"MILLISECS\") t0) ms)))
+(progn (redraw) (mi_espera 50))
+circle 0,0 10
+";
+    let path = temp_script("lisp_renamed_wait.scr", scr);
+    let r = s.execute("script", &json!({ "path": path })).unwrap();
+    assert_eq!(r["lines"], 3);
+    assert_eq!(s.doc().unwrap().model.len(), 1, "Circle drawn after custom wait function");
     let _ = std::fs::remove_file(&path);
 }

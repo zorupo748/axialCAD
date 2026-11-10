@@ -1110,6 +1110,9 @@ fn entity_parts(b: &mut Builder, ctx: &Ctx, e: &Entity) {
             if !b.opts.text {
                 return;
             }
+            if b.opts.skip_spatial && (t.insert.z.abs() > 1e-6 || !e.common.extrusion.near(cadcraft_geom::Vec3::Z, 1e-6)) {
+                return;
+            }
             let (sh, _) = place_text_entity(ctx.d, t, &t.value);
             b.shaped(ctx, rgb, lw, &sh);
         }
@@ -1295,6 +1298,8 @@ fn entity_parts(b: &mut Builder, ctx: &Ctx, e: &Entity) {
             if b.opts.skip_spatial && (c.center.z.abs() > 1e-6 || !e.common.extrusion.near(cadcraft_geom::Vec3::Z, 1e-6)) => {}
         EntityKind::Arc(a)
             if b.opts.skip_spatial && (a.center.z.abs() > 1e-6 || !e.common.extrusion.near(cadcraft_geom::Vec3::Z, 1e-6)) => {}
+        EntityKind::Face3d(_) if b.opts.skip_spatial => {}
+        EntityKind::Solid3d(_) if b.opts.skip_spatial => {}
         kind => {
             for prim in kind.prims() {
                 match prim {
@@ -1349,6 +1354,45 @@ pub fn place_text_entity(d: &Drawing, t: &cadcraft_doc::Text, value: &str) -> (c
         upside_down: ts.upside_down,
     };
     cadcraft_fonts::place(&font, value, &p)
+}
+
+/// Returns 3D line stroke polylines in WCS for a TEXT entity with arbitrary extrusion.
+pub fn text_strokes_3d(d: &Drawing, t: &cadcraft_doc::Text, extrusion: cadcraft_geom::Vec3) -> Vec<Vec<cadcraft_geom::Vec3>> {
+    let ts = text_style(d, &t.style);
+    let font = cadcraft_fonts::TextFont::resolve(&ts.font);
+    let (h, v) = align(t.halign, t.valign);
+    let (ax, ay, _) = cadcraft_geom::Mat4::ocs_basis(extrusion);
+    let align_pt = t.align_pt.map(|a| {
+        let delta = a - t.insert;
+        cadcraft_geom::Vec2::new(delta.dot(ax), delta.dot(ay))
+    });
+    let p = cadcraft_fonts::TextParams {
+        insert: cadcraft_geom::Vec2::ZERO,
+        align_pt,
+        height: t.height,
+        rotation: t.rotation,
+        width_factor: t.width_factor,
+        oblique: t.oblique,
+        h,
+        v,
+        backwards: ts.backwards,
+        upside_down: ts.upside_down,
+    };
+    let (sh, _) = cadcraft_fonts::place(&font, &t.value, &p);
+    let mut out = Vec::new();
+    for s in sh.strokes {
+        out.push(s.into_iter().map(|q| t.insert + ax * q.x + ay * q.y).collect());
+    }
+    for glyph_loops in sh.glyphs {
+        for loop_pts in glyph_loops {
+            let mut pts: Vec<cadcraft_geom::Vec3> = loop_pts.into_iter().map(|q| t.insert + ax * q.x + ay * q.y).collect();
+            if let Some(first) = pts.first().copied() {
+                pts.push(first);
+            }
+            out.push(pts);
+        }
+    }
+    out
 }
 
 /// Lay out an MTEXT with its style's font.

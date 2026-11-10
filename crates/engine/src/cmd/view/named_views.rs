@@ -62,7 +62,7 @@ fn space_label(v: &NamedView) -> String {
 }
 
 fn run_view(s: &mut Session, p: &Value) -> Result<Value> {
-    let option = str_param(p, "option").unwrap_or("list").trim().to_ascii_lowercase();
+    let option = str_param(p, "option").unwrap_or("list").trim().trim_start_matches('_').to_ascii_lowercase();
     match option.as_str() {
         "save" | "s" | "window" | "w" => {
             let name = str_param(p, "name").map(str::trim).ok_or_else(|| bad("view", "`name` is required"))?;
@@ -92,7 +92,10 @@ fn run_view(s: &mut Session, p: &Value) -> Result<Value> {
             Ok(json!({ "layerSnapshot": s.settings.view_layer_snapshot }))
         }
         "orthographic" | "o" => Err(EngineError::Other("Orthographic views are not available yet: CADCraft views are 2D.".into())),
-        _ => Err(bad("view", "option must be save, window, restore, delete, list or settings")),
+        "swiso" | "seiso" | "neiso" | "nwiso" | "top" | "bottom" | "left" | "right" | "front" | "back" => {
+            super::run_view_preset(s, &option)
+        }
+        _ => Err(bad("view", "option must be save, window, restore, delete, list, settings, or a view preset")),
     }
 }
 
@@ -297,20 +300,41 @@ impl Interactive for ViewM {
                 let Some(t) = text else {
                     return if i == Input::Enter { Ok(Step::Done) } else { Err(EngineError::Other("Invalid option keyword.".into())) };
                 };
-                self.stage = match t.to_ascii_lowercase().as_str() {
-                    "?" => Stage::List,
-                    "delete" | "d" => Stage::Delete,
-                    "restore" | "r" => Stage::Restore,
-                    "save" | "s" => Stage::Save,
-                    "window" | "w" => Stage::WindowName,
-                    "settings" | "e" => Stage::Settings,
+                let norm = t.trim().trim_start_matches('_').to_ascii_lowercase();
+                match norm.as_str() {
+                    "?" => {
+                        self.stage = Stage::List;
+                        Ok(Step::Continue)
+                    }
+                    "delete" | "d" => {
+                        self.stage = Stage::Delete;
+                        Ok(Step::Continue)
+                    }
+                    "restore" | "r" => {
+                        self.stage = Stage::Restore;
+                        Ok(Step::Continue)
+                    }
+                    "save" | "s" => {
+                        self.stage = Stage::Save;
+                        Ok(Step::Continue)
+                    }
+                    "window" | "w" => {
+                        self.stage = Stage::WindowName;
+                        Ok(Step::Continue)
+                    }
+                    "settings" | "e" => {
+                        self.stage = Stage::Settings;
+                        Ok(Step::Continue)
+                    }
                     "orthographic" | "o" => {
                         s.echo("Orthographic views are not available yet: CADCraft views are 2D.");
-                        return Ok(Step::Done);
+                        Ok(Step::Done)
                     }
-                    _ => return Err(EngineError::Other("Invalid option keyword.".into())),
-                };
-                Ok(Step::Continue)
+                    "swiso" | "seiso" | "neiso" | "nwiso" | "top" | "bottom" | "left" | "right" | "front" | "back" => {
+                        report(s, |s| super::run_view_preset(s, &norm))
+                    }
+                    _ => Err(EngineError::Other("Invalid option keyword.".into())),
+                }
             }
             Stage::List => {
                 let names = text.filter(|t| !t.is_empty()).unwrap_or_else(|| "*".into());

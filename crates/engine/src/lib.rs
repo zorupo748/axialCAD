@@ -508,6 +508,8 @@ pub struct Settings {
     pub zlock: bool,
     /// Softly track global X/Y/Z directions while drawing LINE in oblique views.
     pub axistrack: bool,
+    /// VSCURRENT: current visual style name ("2dWireframe", "Conceptual", etc.).
+    pub vscurrent: String,
 }
 
 impl Default for Settings {
@@ -578,6 +580,7 @@ impl Default for Settings {
             polardist: 0.0,
             auditctl: false,
             drawing_plane: cadcraft_geom::DrawingPlane::XY,
+            vscurrent: "2dWireframe".into(),
         }
     }
 }
@@ -777,6 +780,8 @@ pub struct Session {
     pub hatch_preview_params: Option<serde_json::Value>,
     /// Multiplier for 3D orbit angular sensitivity, frozen at the start of each orbit gesture.
     pub orbit_sensitivity: f64,
+    /// Monotonic start time of this session, for elapsed time measurements (e.g. MILLISECS).
+    pub started_at: std::time::Instant,
 }
 
 impl Default for Session {
@@ -843,6 +848,7 @@ impl Session {
             hatch_picks: None,
             hatch_preview_params: None,
             orbit_sensitivity: 1.0,
+            started_at: std::time::Instant::now(),
         }
     }
     /// Synchronize session-level drafting settings (`gridmode`) from the currently active drawing's header.
@@ -1567,6 +1573,7 @@ impl Session {
                                 | "ucs.origin"
                                 | "circle"
                                 | "rectang"
+                                | "text"
                         ) =>
                     {
                         Input::Point(p3.xy())
@@ -1897,18 +1904,32 @@ impl Session {
             if self.running.is_some() || self.lisp_prompt().is_some() {
                 self.typed(tok)?;
             } else if tok.trim().is_empty() {
-                self.input(Input::Enter)?;
-            } else if lisp_expression(tok) {
-                if script {
-                    return Err(EngineError::BadParams {
-                        cmd: "script".into(),
-                        msg: "AutoLISP expressions are not allowed in scripts".into(),
-                    });
+                if !script || self.script_has_more_input() {
+                    self.input(Input::Enter)?;
                 }
+            } else if lisp_expression(tok) {
                 // `(expression)` or `!variable` at Command: evaluates LISP and shows the value.
                 let src = tok.trim().strip_prefix('!').unwrap_or(tok.trim()).to_string();
-                if let Err(e) = self.lisp_eval(&src, true, false, Vec::new()) {
-                    self.echo(e.to_string());
+                match self.lisp_eval(&src, !script, false, Vec::new()) {
+                    Ok(Some(Err(err))) => {
+                        if script {
+                            return Err(EngineError::BadParams {
+                                cmd: "script".into(),
+                                msg: format!("AutoLISP error: {err}"),
+                            });
+                        }
+                        self.echo(format!("; error: {err}"));
+                    }
+                    Err(e) => {
+                        if script {
+                            return Err(EngineError::BadParams {
+                                cmd: "script".into(),
+                                msg: e.to_string(),
+                            });
+                        }
+                        self.echo(e.to_string());
+                    }
+                    _ => {}
                 }
             } else {
                 if script && let Some(reason) = is_script_forbidden(tok) {
@@ -1954,17 +1975,17 @@ impl Session {
         // A LISP expression typed at a command's prompt: its value is the answer.
         // Not at a free-text prompt: there the text is the answer (CAL takes "(3+4)*2").
         if lisp_expression(tt) && !prompt.accept.text && self.lisp_prompt().is_none() && !self.lisp_groups_undo() {
-            if self.in_script {
-                return Err(EngineError::BadParams {
-                    cmd: "script".into(),
-                    msg: "AutoLISP expressions are not allowed in scripts".into(),
-                });
-            }
             let src = tt.strip_prefix('!').unwrap_or(tt).to_string();
             let v = match self.lisp_eval(&src, false, true, Vec::new()) {
                 Ok(Some(Ok(v))) => v,
                 Ok(_) => return Ok(()),
                 Err(e) => {
+                    if self.in_script {
+                        return Err(EngineError::BadParams {
+                            cmd: "script".into(),
+                            msg: e.to_string(),
+                        });
+                    }
                     self.echo(e.to_string());
                     return Ok(());
                 }
@@ -2129,6 +2150,17 @@ impl Session {
         self.in_script
     }
 
+    /// Whether there are remaining non-empty, non-comment lines in the running script.
+    pub fn script_has_more_input(&self) -> bool {
+        if let Some(runner) = &self.script_runner {
+            runner.lines[runner.index..]
+                .iter()
+                .any(|l| !l.trim().is_empty() && !l.trim_start().starts_with(';'))
+        } else {
+            false
+        }
+    }
+
     /// Prepare a script for execution.
     pub fn start_script(&mut self, name: &str, text: &str) -> Result<()> {
         self.start_script_opts(name, text, false)
@@ -2166,6 +2198,28 @@ impl Session {
             self.in_script = false;
             return ScriptStep::Done { total: 0 };
         };
+
+        if self.lisp_running() {
+            let line = runner.index.min(runner.lines.len());
+            let total = runner.lines.len();
+            self.script_runner = Some(runner);
+            return ScriptStep::Progress { line, total };
+        }
+
+        if let Some(Err(err)) = self.lisp_last.take() {
+            let line_num = runner.index.min(runner.lines.len());
+            let line_idx = line_num.saturating_sub(1);
+            let total = runner.lines.len();
+            let line_text = runner.lines.get(line_idx).cloned().unwrap_or_default();
+            self.cancel();
+            self.in_script = false;
+            return ScriptStep::Error {
+                line: line_num,
+                total,
+                line_text,
+                error: format!("AutoLISP error: {err}"),
+            };
+        }
 
         if runner.index >= runner.lines.len() {
             self.in_script = false;
@@ -2205,10 +2259,18 @@ impl Session {
             return ScriptStep::Progress { line: line_num, total };
         }
 
+        self.script_runner = Some(runner.clone());
         let res = self.input_line(&line_text, true);
+        if let Some(r) = self.script_runner.take() {
+            runner = r;
+        }
 
         match res {
             Ok(()) => {
+                if self.lisp_running() {
+                    self.script_runner = Some(runner);
+                    return ScriptStep::Progress { line: line_num, total };
+                }
                 if runner.index >= runner.lines.len() {
                     self.in_script = false;
                     if runner.check_eof_pending && let Some(r) = &self.running {
@@ -2241,6 +2303,9 @@ impl Session {
     /// Cancel the active script execution.
     pub fn cancel_script(&mut self) -> Option<ScriptStep> {
         if let Some(runner) = self.script_runner.take() {
+            if self.lisp_running() {
+                self.lisp_abort("Function cancelled");
+            }
             self.cancel();
             self.in_script = false;
             let line = runner.index.min(runner.lines.len());
@@ -2266,6 +2331,9 @@ impl Session {
     pub fn script_named(&mut self, name: &str, text: &str) -> Result<()> {
         self.start_script(name, text)?;
         while self.in_script {
+            if self.lisp_busy() {
+                self.lisp_tick();
+            }
             match self.step_script() {
                 ScriptStep::Progress { .. } => {}
                 ScriptStep::Done { .. } => return Ok(()),
@@ -2296,6 +2364,9 @@ impl Session {
     pub fn script_file(&mut self, name: &str, text: &str) -> Result<()> {
         self.start_script_file(name, text)?;
         while self.in_script {
+            if self.lisp_busy() {
+                self.lisp_tick();
+            }
             match self.step_script() {
                 ScriptStep::Progress { .. } => {}
                 ScriptStep::Done { .. } => return Ok(()),
@@ -2489,8 +2560,39 @@ impl Session {
 
     pub fn zoom_extents(&mut self) -> Result<()> {
         let space = self.space();
-        let ext = self.doc()?.extents(&space);
         let (w, h) = self.viewport_px;
+        let is_3d = self.state().map_or(false, |st| !st.camera.is_plan() && (!matches!(st.space, Space::Paper(_)) || st.mspace.is_some()));
+
+        if is_3d {
+            let ext3 = self.doc()?.extents3(&space);
+            if !ext3.is_empty() {
+                let center3 = ext3.center();
+                let st = self.state_mut()?;
+                st.camera.target = center3;
+                let aspect = st.zoom_aspect(w / h.max(1.0));
+
+                let mut u_min = f64::INFINITY;
+                let mut u_max = f64::NEG_INFINITY;
+                let mut v_min = f64::INFINITY;
+                let mut v_max = f64::NEG_INFINITY;
+                for corner in ext3.corners() {
+                    let q = st.camera.project_point(corner);
+                    u_min = u_min.min(q.x);
+                    u_max = u_max.max(q.x);
+                    v_min = v_min.min(q.y);
+                    v_max = v_max.max(q.y);
+                }
+                let span_u = (u_max - u_min).max(1e-6);
+                let span_v = (v_max - v_min).max(1e-6);
+                let height = span_v.max(span_u / aspect.max(1e-6)) * 1.10;
+                st.camera.height = height;
+                st.set_zoom_frame(View { center: center3.xy(), height });
+                st.set_ref_height(height);
+                return Ok(());
+            }
+        }
+
+        let ext = self.doc()?.extents(&space);
         let ext = if ext.is_empty() { self.zoom_limits()? } else { ext };
         let st = self.state_mut()?;
         let aspect = st.zoom_aspect(w / h.max(1.0));

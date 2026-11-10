@@ -291,6 +291,63 @@ fn lwpolyline_bounds(p: &LwPolyline) -> Bounds2 {
     b
 }
 
+pub fn entity_bounds3(d: &Drawing, e: &Entity) -> crate::Bounds3 {
+    match &e.kind {
+        EntityKind::Solid3d(s) => s.bbox,
+        EntityKind::Face3d(f) => {
+            let mut b = crate::Bounds3::EMPTY;
+            for c in &f.corners {
+                b.add_point(*c);
+            }
+            b
+        }
+        EntityKind::Line(l) => {
+            let mut b = crate::Bounds3::EMPTY;
+            b.add_point(l.a);
+            b.add_point(l.b);
+            b
+        }
+        EntityKind::Point(p) => {
+            let mut b = crate::Bounds3::EMPTY;
+            b.add_point(p.p);
+            b
+        }
+        EntityKind::Polyline3d(p) => {
+            let mut b = crate::Bounds3::EMPTY;
+            for pt in &p.points {
+                b.add_point(*pt);
+            }
+            b
+        }
+        EntityKind::Text(t) if !e.common.extrusion.near(cadcraft_geom::Vec3::Z, 1e-6) || t.insert.z.abs() > 1e-6 => {
+            let mut b = crate::Bounds3::EMPTY;
+            let (ax, ay, _) = cadcraft_geom::Mat4::ocs_basis(e.common.extrusion);
+            let w = t.height * 0.9 * t.width_factor.abs().max(0.01) * t.value.chars().count().max(1) as f64;
+            let corners = [
+                t.insert,
+                t.insert + ax * w,
+                t.insert + ax * w + ay * t.height,
+                t.insert + ay * t.height,
+            ];
+            for c in corners {
+                b.add_point(c);
+            }
+            b
+        }
+        _ => {
+            let b2 = entity_bounds(d, e, 0);
+            if b2.is_empty() {
+                crate::Bounds3::EMPTY
+            } else {
+                crate::Bounds3::new(
+                    cadcraft_geom::Vec3::new(b2.min.x, b2.min.y, 0.0),
+                    cadcraft_geom::Vec3::new(b2.max.x, b2.max.y, 0.0),
+                )
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

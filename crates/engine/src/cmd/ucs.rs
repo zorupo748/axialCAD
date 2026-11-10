@@ -46,6 +46,12 @@ pub fn specs() -> Vec<CommandSpec> {
             .params("{}")
             .noundo()
             .transparent(),
+        CommandSpec::new("ucs.view", "UCS View", run_ucs_view)
+            .alias(&["scp.vista"])
+            .menu(&["Tools", "New UCS", "View"])
+            .params("{}")
+            .noundo()
+            .transparent(),
     ]
 }
 
@@ -54,9 +60,10 @@ pub(crate) fn run_ucs(s: &mut Session, p: &Value) -> Result<Value> {
         match opt.trim().to_ascii_lowercase().as_str() {
             "w" | "world" | "universal" | "mundo" => return run_ucs_world(s, p),
             "p" | "prev" | "previous" | "previo" => return run_ucs_previous(s, p),
+            "v" | "view" | "vista" => return run_ucs_view(s, p),
             "o" | "m" | "origin" | "move" | "origen" => return run_ucs_origin(s, p),
             "3" | "3p" | "3point" => return run_ucs_3point(s, p),
-            _ => return Err(EngineError::Other(format!("Unknown UCS option `{opt}`. Options: World, Previous, Origin, 3point."))),
+            _ => return Err(EngineError::Other(format!("Unknown UCS option `{opt}`. Options: World, Previous, View, Origin, 3point."))),
         }
     }
     if p.get("origin").is_some() && p.get("x_axis").is_some() && p.get("y_pt").is_some() {
@@ -124,6 +131,25 @@ pub(crate) fn run_ucs_3point(s: &mut Session, p: &Value) -> Result<Value> {
     }))
 }
 
+pub(crate) fn run_ucs_view(s: &mut Session, _p: &Value) -> Result<Value> {
+    let cam = s.camera();
+    let x_axis = cam.right_dir();
+    let y_axis = cam.up_dir();
+    let z_axis = cam.view_dir();
+    let orig = s.ucs().origin;
+    let new_ucs = UcsFrame::new(orig, x_axis, y_axis, z_axis);
+    s.set_ucs(new_ucs)?;
+    s.echo("UCS set to current view direction.");
+    Ok(json!({
+        "status": "ok",
+        "ucs": "view",
+        "origin": [orig.x, orig.y, orig.z],
+        "x_axis": [x_axis.x, x_axis.y, x_axis.z],
+        "y_axis": [y_axis.x, y_axis.y, y_axis.z],
+        "z_axis": [z_axis.x, z_axis.y, z_axis.z],
+    }))
+}
+
 // -----------------------------------------------------------------------------
 // Interactive machines
 // -----------------------------------------------------------------------------
@@ -144,10 +170,10 @@ impl Interactive for UcsM {
         }
         let cur = if s.ucs().is_world() { "World" } else { "Custom" };
         Prompt::new(
-            format!("Specify origin of UCS or [3point/Move/Previous/World] <{cur}>:"),
+            format!("Specify origin of UCS or [3point/Move/Previous/View/World] <{cur}>:"),
             Accept { enter: true, point: true, text: true, ..Accept::default() },
         )
-        .kw(&["3point", "Move", "Previous", "World"])
+        .kw(&["3point", "Move", "Previous", "View", "World"])
         .default(cur)
     }
 
@@ -182,8 +208,12 @@ impl Interactive for UcsM {
                     let _ = run_ucs_previous(s, &json!({}))?;
                     Ok(Step::Done)
                 }
+                "v" | "view" | "vista" => {
+                    let _ = run_ucs_view(s, &json!({}))?;
+                    Ok(Step::Done)
+                }
                 _ => {
-                    s.echo("Invalid option. Specify 3point, Move, Previous, or World.");
+                    s.echo("Invalid option. Specify 3point, Move, Previous, View, or World.");
                     Ok(Step::Continue)
                 }
             },
