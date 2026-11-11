@@ -223,6 +223,26 @@ pub struct Polyline3d {
     pub points: Vec<Vec3>,
     pub closed: bool,
 }
+
+impl Polyline3d {
+    /// True when any vertex lies outside the XY ground plane (`|z| > 1e-6`).
+    pub fn is_spatial(&self) -> bool {
+        self.points.iter().any(|p| p.z.abs() > 1e-6)
+    }
+
+    /// 3D vertex sequence in WCS, appending the starting point if `closed`.
+    pub fn path_3d(&self) -> Vec<Vec3> {
+        let mut pts = self.points.clone();
+        if self.closed
+            && pts.len() >= 2
+            && let Some(first) = pts.first().copied()
+            && !pts.last().is_some_and(|last| last.near(first, 1e-12))
+        {
+            pts.push(first);
+        }
+        pts
+    }
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HAlign {

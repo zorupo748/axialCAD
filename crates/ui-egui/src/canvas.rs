@@ -959,6 +959,9 @@ fn screen_entity_polylines(doc: &cadcraft_doc::Drawing, entity: &cadcraft_doc::E
             }
             vec![pts.into_iter().map(|p| xf.to_screen3(p)).collect()]
         }
+        cadcraft_doc::EntityKind::Polyline3d(pl) if pl.is_spatial() => {
+            vec![pl.path_3d().into_iter().map(|p| xf.to_screen3(p)).collect()]
+        }
         cadcraft_doc::EntityKind::Text(text) if !entity.common.extrusion.near(Vec3::Z, 1e-6) || text.insert.z.abs() > 1e-6 => {
             let strokes = cadcraft_render::text_strokes_3d(doc, text, entity.common.extrusion);
             strokes.into_iter().map(|s| s.into_iter().map(|p| xf.to_screen3(p)).collect()).collect()
@@ -1083,6 +1086,26 @@ fn screen_window_selection(app: &CadApp, xf: &Xf, start: Pos2, end: Pos2) -> Vec
         .collect()
 }
 
+fn draw_spatial_polyline(painter: &egui::Painter, xf: &Xf, pts3: &[Vec3], stroke: Stroke, dashed: bool) {
+    let screen_pts: Vec<Pos2> = pts3.iter().map(|p| xf.to_screen3(*p)).collect();
+    if screen_pts.len() >= 2 {
+        if dashed {
+            painter.extend(Shape::dashed_line(&screen_pts, stroke, 6.0, 4.0));
+        } else {
+            painter.add(Shape::line(screen_pts, stroke));
+        }
+    }
+}
+
+fn push_3d_polyline(lines: &mut Vec<u8>, origin: Vec3, pts3: &[Vec3], color: [u8; 4]) {
+    for seg in pts3.windows(2) {
+        let rel1 = [(seg[0].x - origin.x) as f32, (seg[0].y - origin.y) as f32, (seg[0].z - origin.z) as f32];
+        let rel2 = [(seg[1].x - origin.x) as f32, (seg[1].y - origin.y) as f32, (seg[1].z - origin.z) as f32];
+        crate::gpu::push_vertex3d(lines, rel1, color);
+        crate::gpu::push_vertex3d(lines, rel2, color);
+    }
+}
+
 fn draw_spatial_lines(app: &CadApp, painter: &egui::Painter, xf: &Xf) {
     let Ok(st) = app.session.state() else { return };
     let space = app.session.space();
@@ -1145,14 +1168,10 @@ fn draw_spatial_lines(app: &CadApp, painter: &egui::Painter, xf: &Xf) {
                 if pl.closed && !pts3.is_empty() {
                     pts3.push(pts3[0]);
                 }
-                let screen_pts: Vec<Pos2> = pts3.into_iter().map(|p| xf.to_screen3(p)).collect();
-                if screen_pts.len() >= 2 {
-                    if look.is_some_and(|l| l.dashed) {
-                        painter.extend(Shape::dashed_line(&screen_pts, stroke, 6.0, 4.0));
-                    } else {
-                        painter.add(Shape::line(screen_pts, stroke));
-                    }
-                }
+                draw_spatial_polyline(painter, xf, &pts3, stroke, look.is_some_and(|l| l.dashed));
+            }
+            cadcraft_doc::EntityKind::Polyline3d(pl) if pl.is_spatial() => {
+                draw_spatial_polyline(painter, xf, &pl.path_3d(), stroke, look.is_some_and(|l| l.dashed));
             }
             cadcraft_doc::EntityKind::Text(text)
                 if text.insert.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
@@ -1620,12 +1639,10 @@ pub(crate) fn build_3d_mesh(
                 if pl.closed && !pts3.is_empty() {
                     pts3.push(pts3[0]);
                 }
-                for seg in pts3.windows(2) {
-                    let rel1 = [ (seg[0].x - origin.x) as f32, (seg[0].y - origin.y) as f32, (seg[0].z - origin.z) as f32 ];
-                    let rel2 = [ (seg[1].x - origin.x) as f32, (seg[1].y - origin.y) as f32, (seg[1].z - origin.z) as f32 ];
-                    crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
-                    crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
-                }
+                push_3d_polyline(&mut m.lines, origin, &pts3, edge_col);
+            }
+            cadcraft_doc::EntityKind::Polyline3d(pl) if pl.is_spatial() => {
+                push_3d_polyline(&mut m.lines, origin, &pl.path_3d(), edge_col);
             }
             cadcraft_doc::EntityKind::Text(text)
                 if text.insert.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
@@ -7448,5 +7465,234 @@ mod hatch_pick_tests {
         }).count();
         assert!(lateral_edges_count < n, "Smooth cylinder must not draw all discretization facet edges");
         assert!(lateral_edges_count >= 2, "Smooth cylinder must retain silhouette lateral edges");
+    }
+
+    #[test]
+    fn test_spatial_3dpoly_wgpu_mesh_and_isometric_projection() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.cmdline("3dpoly 0,0,10 20,0,25 20,20,15 0,20,5 c").unwrap();
+        assert!(app.session.running.is_none());
+
+        app.session.execute("view.swiso", &serde_json::json!({})).unwrap();
+        let cam_swiso = app.session.camera();
+        let origin = cam_swiso.target;
+
+        // 1. WGPU 3D mesh route (`build_3d_mesh`) must contain 4 closed 3D segments (8 vertices * 16 bytes) with true Z
+        let mesh = super::build_3d_mesh(&app.session, origin, cam_swiso.view_dir(), false, None);
+        assert_eq!(mesh.lines.len(), 8 * 16, "Closed 4-point 3D polyline must emit 4 line segments (8 vertices)");
+        let zs: Vec<f32> = mesh
+            .lines
+            .chunks_exact(16)
+            .map(|c| f32::from_le_bytes([c[8], c[9], c[10], c[11]]) + origin.z as f32)
+            .collect();
+        assert!(zs.iter().any(|&z| (z - 25.0).abs() < 1e-3), "Mesh vertices must preserve Z=25: {zs:?}");
+        assert!(zs.iter().any(|&z| (z - 10.0).abs() < 1e-3), "Mesh vertices must preserve Z=10: {zs:?}");
+
+        // 2. Screen projection (`screen_entity_polylines` used by CPU path / hit-testing)
+        // must project spatial Z != 0 strictly above the Z=0 ground plane and move when orbiting
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)));
+        let mut time = 0.0;
+        let mut run_frame = |app: &mut CadApp| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+        app.session.zoom_extents().unwrap();
+        run_frame(&mut app);
+        let xf_swiso = app.canvas.xf.expect("xf must be set");
+        let st = app.session.state().unwrap();
+        let ent = st.doc.model.iter().next().expect("Polyline3d must exist");
+
+        let screen_paths = super::screen_entity_polylines(&st.doc, ent, &xf_swiso);
+        assert_eq!(screen_paths.len(), 1);
+        assert_eq!(screen_paths[0].len(), 5, "Closed 4-point path includes closing vertex");
+        // Vertex index 1 is (20, 0, 25); its screen position must differ from flattened (20, 0, 0)
+        let projected_3d = screen_paths[0][1];
+        let projected_ground = xf_swiso.to_screen3(Vec3::new(20.0, 0.0, 0.0));
+        assert!(
+            projected_3d.distance(projected_ground) > 5.0,
+            "Spatial vertex at Z=25 must not collapse onto Z=0 ground projection"
+        );
+
+        // Orbit to SEISO and confirm projection shifts cleanly
+        app.session.execute("view.seiso", &serde_json::json!({})).unwrap();
+        run_frame(&mut app);
+        let xf_seiso = app.canvas.xf.expect("xf must be set");
+        let st2 = app.session.state().unwrap();
+        let ent2 = st2.doc.model.iter().next().unwrap();
+        let orbited_paths = super::screen_entity_polylines(&st2.doc, ent2, &xf_seiso);
+        assert!(
+            orbited_paths[0][1].distance(projected_3d) > 5.0,
+            "3D polyline projection must change when orbiting camera"
+        );
+    }
+
+    #[test]
+    fn test_shared_vertex_line3d_and_3dpoly_coincident_across_routes_and_orbit() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        let p_shared = Vec3::new(30.0, 40.0, 0.0);
+        let p_top = Vec3::new(15.0, 20.0, 35.0);
+        let p_other1 = Vec3::new(10.0, 50.0, 20.0);
+        let p_other2 = Vec3::new(35.0, 10.0, 50.0);
+
+        // Synthetic 3D auxiliary line with one Z=0 endpoint and one Z!=0 endpoint, plus a Z=0 point,
+        // and a closed 3D polyline sharing `p_shared` (index 1) and `p_top` (index 0).
+        app.session.cmdline("line 30,40,0 15,20,35 ").unwrap();
+        app.session.cmdline("point 30,40,0").unwrap();
+        app.session.cmdline("3dpoly 15,20,35 30,40,0 35,10,50 10,50,20 c").unwrap();
+        assert!(app.session.running.is_none());
+
+        // 1. Verify stored XYZ coordinates match identically across Line, Point, and Polyline3d.
+        let st = app.session.state().unwrap();
+        let mut stored_line = None;
+        let mut stored_point = None;
+        let mut stored_poly = None;
+        for ent in st.doc.model.iter() {
+            match &ent.kind {
+                cadcraft_doc::EntityKind::Line(l) => stored_line = Some(l.clone()),
+                cadcraft_doc::EntityKind::Point(pt) => stored_point = Some(pt.p),
+                cadcraft_doc::EntityKind::Polyline3d(pl) => stored_poly = Some(pl.clone()),
+                _ => {}
+            }
+        }
+        let line = stored_line.expect("3D line stored");
+        let point = stored_point.expect("Z=0 point stored");
+        let poly = stored_poly.expect("Polyline3d stored");
+        assert!(line.a.near(p_shared, 1e-9) && line.b.near(p_top, 1e-9));
+        assert!(point.near(p_shared, 1e-9));
+        assert!(poly.closed && poly.points.len() == 4);
+        assert!(poly.points[0].near(p_top, 1e-9));
+        assert!(poly.points[1].near(p_shared, 1e-9));
+        assert!(poly.points[2].near(p_other2, 1e-9));
+        assert!(poly.points[3].near(p_other1, 1e-9));
+
+        // 2. Verify cadcraft_render with `skip_spatial: true` omits both 3D entities (no flattened duplicate)
+        // while retaining only the flat Z=0 point in the 2D display list.
+        let flat_list = cadcraft_render::build(
+            &st.doc,
+            &cadcraft_doc::Space::Model,
+            &cadcraft_render::Options { skip_spatial: true, ..cadcraft_render::Options::default() },
+        );
+        assert_eq!(flat_list.prims.len(), 1, "Only the flat Z=0 point belongs in the 2D list when skip_spatial=true");
+
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)));
+        let mut time = 0.0;
+        let mut run_frame = |app: &mut CadApp| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        let mut check_view = |app: &mut CadApp, label: &str| {
+            run_frame(app);
+            let xf = app.canvas.xf.expect("xf must be set");
+            let cam = app.session.camera();
+            let origin = cam.target;
+            let c = xf.rect.center();
+
+            // WGPU 3D vertex buffer path (`build_3d_mesh`)
+            let mesh = super::build_3d_mesh(&app.session, origin, cam.view_dir(), false, None);
+            // 1 segment for Line (2 verts) + 4 segments for closed 4-pt Polyline3d (8 verts) = 10 verts
+            assert_eq!(mesh.lines.len(), 10 * 16, "{label}: expected 10 3D line vertices");
+            let mesh_pts: Vec<Vec3> = mesh
+                .lines
+                .chunks_exact(16)
+                .map(|b| {
+                    let x = f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64 + origin.x;
+                    let y = f32::from_le_bytes([b[4], b[5], b[6], b[7]]) as f64 + origin.y;
+                    let z = f32::from_le_bytes([b[8], b[9], b[10], b[11]]) as f64 + origin.z;
+                    Vec3::new(x, y, z)
+                })
+                .collect();
+
+            // Exact occurrences of p_shared and p_top across Line (verts 0..2) and Polyline3d (verts 2..10)
+            let line_shared = mesh_pts[0..2].iter().find(|v| v.near(p_shared, 1e-4)).expect("Line must emit p_shared");
+            let poly_shared = mesh_pts[2..10].iter().find(|v| v.near(p_shared, 1e-4)).expect("Poly must emit p_shared");
+            let line_top = mesh_pts[0..2].iter().find(|v| v.near(p_top, 1e-4)).expect("Line must emit p_top");
+            let poly_top = mesh_pts[2..10].iter().find(|v| v.near(p_top, 1e-4)).expect("Poly must emit p_top");
+
+            // Evaluate SHADER_3D projection for each GPU 3D mesh vertex
+            let project_shader3d = |p: Vec3| -> egui::Pos2 {
+                let d = p - cam.target;
+                let u = d.dot(cam.right_dir());
+                let v = d.dot(cam.up_dir());
+                egui::pos2(c.x + (u * xf.scale) as f32, c.y - (v * xf.scale) as f32)
+            };
+            let gpu3d_line_shared = project_shader3d(*line_shared);
+            let gpu3d_poly_shared = project_shader3d(*poly_shared);
+            let gpu3d_line_top = project_shader3d(*line_top);
+            let gpu3d_poly_top = project_shader3d(*poly_top);
+
+            // Evaluate 2D CanvasCallback (`gpu_mesh_xform`) projection for the Z=0 point
+            let mesh_origin = Vec2::new(20.0, 25.0);
+            let (m, off) = super::gpu_mesh_xform(mesh_origin, xf.center, xf.camera.as_ref());
+            let rel = [
+                (p_shared.x - mesh_origin.x) as f32,
+                (p_shared.y - mesh_origin.y) as f32,
+            ];
+            let qx = m[0] * rel[0] + m[2] * rel[1] + m[4] + off[0];
+            let qy = m[1] * rel[0] + m[3] * rel[1] + m[5] + off[1];
+            let gpu2d_point_shared = egui::pos2(c.x + qx * xf.scale as f32, c.y - qy * xf.scale as f32);
+
+            // CPU / picking route (`screen_entity_polylines` + `xf.to_screen3`)
+            let st = app.session.state().unwrap();
+            let mut cpu_line_pts = None;
+            let mut cpu_poly_pts = None;
+            for ent in st.doc.model.iter() {
+                match &ent.kind {
+                    cadcraft_doc::EntityKind::Line(_) => {
+                        cpu_line_pts = Some(super::screen_entity_polylines(&st.doc, ent, &xf));
+                    }
+                    cadcraft_doc::EntityKind::Polyline3d(_) => {
+                        cpu_poly_pts = Some(super::screen_entity_polylines(&st.doc, ent, &xf));
+                    }
+                    _ => {}
+                }
+            }
+            let cpu_line = cpu_line_pts.unwrap();
+            let cpu_poly = cpu_poly_pts.unwrap();
+            let ref_shared = xf.to_screen3(p_shared);
+            let ref_top = xf.to_screen3(p_top);
+
+            assert!(cpu_line[0][0].distance(ref_shared) < 1e-3, "{label}: CPU line shared mismatch");
+            assert!(cpu_poly[0][1].distance(ref_shared) < 1e-3, "{label}: CPU poly shared mismatch");
+            assert!(gpu3d_line_shared.distance(ref_shared) < 1e-3, "{label}: GPU3D line shared mismatch");
+            assert!(gpu3d_poly_shared.distance(ref_shared) < 1e-3, "{label}: GPU3D poly shared mismatch");
+            assert!(gpu2d_point_shared.distance(ref_shared) < 1e-2, "{label}: GPU2D point shared mismatch");
+
+            assert!(cpu_line[0][1].distance(ref_top) < 1e-3, "{label}: CPU line top mismatch");
+            assert!(cpu_poly[0][0].distance(ref_top) < 1e-3, "{label}: CPU poly top mismatch");
+            assert!(gpu3d_line_top.distance(ref_top) < 1e-3, "{label}: GPU3D line top mismatch");
+            assert!(gpu3d_poly_top.distance(ref_top) < 1e-3, "{label}: GPU3D poly top mismatch");
+
+            (ref_shared, ref_top)
+        };
+
+        app.session.zoom_extents().unwrap();
+        app.session.execute("view.swiso", &serde_json::json!({})).unwrap();
+        let (swiso_shared, swiso_top) = check_view(&mut app, "swiso");
+
+        app.session.execute("view.seiso", &serde_json::json!({})).unwrap();
+        let (seiso_shared, seiso_top) = check_view(&mut app, "seiso");
+        assert!(seiso_top.distance(swiso_top) > 5.0 || seiso_shared.distance(swiso_shared) > 5.0);
+
+        app.session.execute("view.top", &serde_json::json!({})).unwrap();
+        let _ = check_view(&mut app, "top");
+
+        app.session.execute("view.front", &serde_json::json!({})).unwrap();
+        let _ = check_view(&mut app, "front");
+
+        // Arbitrary oblique orbit with non-zero target
+        let mut orbit_cam = app.session.camera();
+        orbit_cam.target = Vec3::new(12.0, -5.0, 10.0);
+        orbit_cam.set_view_dir(Vec3::new(0.9, -1.4, 0.6));
+        app.session.set_camera(orbit_cam);
+        let _ = check_view(&mut app, "arbitrary_orbit");
     }
 }

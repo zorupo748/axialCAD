@@ -1970,13 +1970,13 @@ fn run_3dpoly(s: &mut Session, p: &Value) -> Result<Value> {
 
 #[derive(Default)]
 struct Poly3dM {
-    pts: Vec<Vec2>,
+    pts: Vec<Vec3>,
     handle: Option<Handle>,
 }
 
 impl Poly3dM {
     fn sync(&mut self, s: &mut Session, closed: bool) -> Result<()> {
-        let k = EntityKind::Polyline3d(Polyline3d { points: self.pts.iter().map(|p| v3(*p)).collect(), closed });
+        let k = EntityKind::Polyline3d(Polyline3d { points: self.pts.clone(), closed });
         match (self.handle, self.pts.len() >= 2) {
             (Some(h), true) => s.doc_mut()?.modify_entity(h, |e| e.kind = k)?,
             (None, true) => self.handle = Some(s.add_entity(k)?),
@@ -1988,31 +1988,50 @@ impl Poly3dM {
         }
         Ok(())
     }
+
+    fn push_point(&mut self, s: &mut Session, p: Vec3) -> Result<Step> {
+        if self.pts.last().is_none_or(|l| !l.near(p, 1e-12)) && self.pts.len() < MAX_GEN {
+            self.pts.push(p);
+            self.sync(s, false)?;
+        }
+        s.last_point = s.drawing_plane().coordinates(p);
+        s.last_point3 = p;
+        s.invalidate_cursor3();
+        Ok(Step::Continue)
+    }
 }
 
 impl Interactive for Poly3dM {
     fn name(&self) -> &'static str {
         "3DPOLY"
     }
-    fn prompt(&self, _s: &Session) -> Prompt {
+    fn prompt(&self, s: &Session) -> Prompt {
+        let base = self.pts.last().map(|p| s.drawing_plane().coordinates(*p));
+        let base3 = self.pts.last().copied();
         match self.pts.len() {
             0 => Prompt::new("Specify start point of polyline", Accept::POINT),
-            1 | 2 => Prompt::new("Specify endpoint of line", Accept::POINT).kw(&["Undo"]).base_opt(self.pts.last().copied()),
-            _ => Prompt::new("Specify endpoint of line", Accept::POINT).kw(&["Close", "Undo"]).base_opt(self.pts.last().copied()),
+            1 | 2 => Prompt::new("Specify endpoint of line", Accept::POINT).kw(&["Undo"]).base3_opt(base3).base_opt(base),
+            _ => Prompt::new("Specify endpoint of line", Accept::POINT).kw(&["Close", "Undo"]).base3_opt(base3).base_opt(base),
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
         match i {
             Input::Point(p) => {
-                if self.pts.last().is_none_or(|l| !l.near(p, 1e-12)) && self.pts.len() < MAX_GEN {
-                    self.pts.push(p);
-                    self.sync(s, false)?;
-                }
-                Ok(Step::Continue)
+                let offset = self
+                    .pts
+                    .last()
+                    .map_or_else(|| s.effective_drawing_plane_offset(), |last| s.drawing_plane().normal_offset(*last));
+                self.push_point(s, s.drawing_plane().embed(p, offset))
             }
+            Input::Point3(p3) => self.push_point(s, p3),
             Input::Keyword(k) if k == "Undo" => {
                 self.pts.pop();
                 self.sync(s, false)?;
+                if let Some(&prev) = self.pts.last() {
+                    s.last_point = s.drawing_plane().coordinates(prev);
+                    s.last_point3 = prev;
+                    s.invalidate_cursor3();
+                }
                 Ok(Step::Continue)
             }
             Input::Keyword(k) if k == "Close" => {
@@ -2023,8 +2042,14 @@ impl Interactive for Poly3dM {
             _ => Ok(Step::Continue),
         }
     }
-    fn preview(&self, _s: &Session, c: Vec2) -> Vec<EntityKind> {
-        self.pts.last().map(|l| vec![line(*l, c)]).unwrap_or_default()
+    fn preview(&self, s: &Session, c: Vec2) -> Vec<EntityKind> {
+        self.pts
+            .last()
+            .map(|l| {
+                let end = if s.cursor3_valid { s.cursor3 } else { s.drawing_plane().embed(c, s.drawing_plane().normal_offset(*l)) };
+                vec![line3(*l, end)]
+            })
+            .unwrap_or_default()
     }
 }
 

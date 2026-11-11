@@ -1,5 +1,5 @@
 use cadcraft_doc::EntityKind;
-use cadcraft_geom::{Arc, Vec2};
+use cadcraft_geom::{Arc, Vec2, Vec3};
 use serde_json::json;
 
 use crate::{Input, Session};
@@ -831,6 +831,43 @@ fn poly3d_json_and_command_line() {
     assert!(s.running.is_none());
     assert!(matches!(last(&s), EntityKind::Polyline3d(p) if p.points.len() == 3 && p.closed));
     assert_eq!(s.state().unwrap().undo.len(), 2);
+}
+
+#[test]
+fn poly3d_command_line_3d_points_vertical_relative_and_ucs() {
+    let mut s = Session::new();
+    // Vertical segment (same XY, different Z) + relative 3D delta + Close
+    s.cmdline("3dpoly").unwrap();
+    s.cmdline("5,6,0").unwrap();
+    s.cmdline("5,6,12.5").unwrap();
+    s.cmdline("@10,-2,4.5").unwrap();
+    s.cmdline("c").unwrap();
+    assert!(s.running.is_none());
+    assert!(matches!(
+        last(&s),
+        EntityKind::Polyline3d(p)
+            if p.closed
+                && p.points == vec![
+                    Vec3::new(5.0, 6.0, 0.0),
+                    Vec3::new(5.0, 6.0, 12.5),
+                    Vec3::new(15.0, 4.0, 17.0),
+                ]
+    ));
+
+    // With rotated UCS (YZ plane): local (x, y, z) maps into WCS
+    let mut s2 = Session::new();
+    s2.cmdline("UCS 3 0,0,0 0,1,0 0,0,1").unwrap();
+    s2.cmdline("3dpoly").unwrap();
+    s2.cmdline("0,0,0").unwrap();
+    s2.cmdline("10,0,0").unwrap();
+    s2.cmdline("10,20,5").unwrap();
+    s2.cmdline("").unwrap();
+    assert!(s2.running.is_none());
+    let EntityKind::Polyline3d(p2) = last(&s2) else { panic!("expected Polyline3d") };
+    assert!(!p2.closed);
+    assert!(p2.points[0].near(Vec3::new(0.0, 0.0, 0.0), 1e-6));
+    assert!(p2.points[1].near(Vec3::new(0.0, 10.0, 0.0), 1e-6));
+    assert!(p2.points[2].near(Vec3::new(5.0, 10.0, 20.0), 1e-6));
 }
 
 #[test]

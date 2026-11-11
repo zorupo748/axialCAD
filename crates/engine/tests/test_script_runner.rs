@@ -618,3 +618,93 @@ circle 0,0 10
     assert_eq!(s.doc().unwrap().model.len(), 1, "Circle drawn after custom wait function");
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn test_script_3dpoly_preserves_xyz_and_closes_cleanly() {
+    use cadcraft_engine::doc::EntityKind;
+    use cadcraft_geom::Vec3;
+
+    // Case 1: SCR execution with _3DPOLY, non-zero variable Z, _C close, and immediate next command
+    let scr = b"; Synthetic 3DPOLY XYZ + Close + subsequent command
+_-LAYER
+_M
+SYNTH_LAYER
+_C
+3
+SYNTH_LAYER
+
+_3DPOLY
+10.0,20.0,5.5
+30.0,20.0,15.25
+30.0,40.0,25.75
+10.0,40.0,16.0
+_C
+_CLAYER
+0
+_LINE
+0,0,0
+0,0,12.0
+
+";
+    let path = temp_script("poly3d_z.scr", scr);
+    let mut s = Session::new();
+    let r = s.execute("script", &json!({ "path": path })).unwrap();
+    assert_eq!(r["lines"], 20);
+    assert!(s.running.is_none(), "No command should remain active after script completes");
+    let _ = std::fs::remove_file(&path);
+
+    let doc = s.doc().unwrap();
+    assert_eq!(doc.model.len(), 2, "Expected 1 Polyline3d + 1 Line");
+
+    let poly_ent = doc
+        .model
+        .iter()
+        .find(|e| matches!(e.kind, EntityKind::Polyline3d(_)))
+        .expect("Polyline3d must exist");
+    assert_eq!(poly_ent.common.layer, "SYNTH_LAYER");
+    let EntityKind::Polyline3d(pl) = &poly_ent.kind else { unreachable!() };
+    assert!(pl.closed, "Polyline3d must be closed by _C");
+    assert_eq!(
+        pl.points,
+        vec![
+            Vec3::new(10.0, 20.0, 5.5),
+            Vec3::new(30.0, 20.0, 15.25),
+            Vec3::new(30.0, 40.0, 25.75),
+            Vec3::new(10.0, 40.0, 16.0),
+        ]
+    );
+
+    let line_ent = doc
+        .model
+        .iter()
+        .find(|e| matches!(e.kind, EntityKind::Line(_)))
+        .expect("Subsequent Line must exist");
+    assert_eq!(line_ent.common.layer, "0", "_CLAYER 0 after _C must be consumed properly");
+    let EntityKind::Line(ln) = &line_ent.kind else { unreachable!() };
+    assert_eq!(ln.a, Vec3::new(0.0, 0.0, 0.0));
+    assert_eq!(ln.b, Vec3::new(0.0, 0.0, 12.0));
+
+    // Case 2: Interactive cmdline sequence (with Undo)
+    let mut s2 = Session::new();
+    s2.cmdline("_3DPOLY").unwrap();
+    s2.cmdline("1,2,3").unwrap();
+    s2.cmdline("4,5,9").unwrap();
+    s2.cmdline("99,99,99").unwrap();
+    s2.cmdline("_U").unwrap();
+    s2.cmdline("7,8,-4.5").unwrap();
+    s2.cmdline("_C").unwrap();
+    assert!(s2.running.is_none());
+    let doc2 = s2.doc().unwrap();
+    let EntityKind::Polyline3d(pl2) = &doc2.model.iter().next().unwrap().kind else {
+        panic!("Expected Polyline3d");
+    };
+    assert!(pl2.closed);
+    assert_eq!(
+        pl2.points,
+        vec![
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(4.0, 5.0, 9.0),
+            Vec3::new(7.0, 8.0, -4.5),
+        ]
+    );
+}

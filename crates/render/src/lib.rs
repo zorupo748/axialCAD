@@ -1294,6 +1294,7 @@ fn entity_parts(b: &mut Builder, ctx: &Ctx, e: &Entity) {
             }
         }
         EntityKind::Line(l) if b.opts.skip_spatial && (l.a.z != 0.0 || l.b.z != 0.0) => {}
+        EntityKind::Polyline3d(p) if b.opts.skip_spatial && p.is_spatial() => {}
         EntityKind::Circle(c)
             if b.opts.skip_spatial && (c.center.z.abs() > 1e-6 || !e.common.extrusion.near(cadcraft_geom::Vec3::Z, 1e-6)) => {}
         EntityKind::Arc(a)

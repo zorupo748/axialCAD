@@ -1562,6 +1562,7 @@ impl Session {
                         if !matches!(
                             run.id.as_str(),
                             "line"
+                                | "3dpoly"
                                 | "3dface"
                                 | "cylinder"
                                 | "solid.cylinder"
