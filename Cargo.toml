@@ -81,3 +81,15 @@ opt-level = 3
 lto = "thin"
 codegen-units = 16
 debug = 0
+
+[patch."https://github.com/ricosjp/truck.git"]
+truck-base = { path = "vendor/truck/truck-base" }
+truck-derivers = { path = "vendor/truck/truck-derivers" }
+truck-geometry = { path = "vendor/truck/truck-geometry" }
+truck-geotrait = { path = "vendor/truck/truck-geotrait" }
+truck-meshalgo = { path = "vendor/truck/truck-meshalgo" }
+truck-modeling = { path = "vendor/truck/truck-modeling" }
+truck-polymesh = { path = "vendor/truck/truck-polymesh" }
+truck-shapeops = { path = "vendor/truck/truck-shapeops" }
+truck-stepio = { path = "vendor/truck/truck-stepio" }
+truck-topology = { path = "vendor/truck/truck-topology" }

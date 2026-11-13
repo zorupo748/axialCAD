@@ -104,9 +104,9 @@ fn test_cw_and_inclined_extrusion_outward_normals_and_through_hole() {
     let expected_vol = 40.0 * 30.0 * 5.0 - std::f64::consts::PI * 16.0 * 5.0;
     assert!((rep_coarse.signed_volume - expected_vol).abs() < 20.0, "got {}", rep_coarse.signed_volume);
 
-    // Upstream truck_meshalgo produces open trim seam edges on boolean cylinder cuts at tol=0.05;
-    // validate_for_stl must reject rather than passing an unclosed STL mesh.
-    assert!(plate_hole.triangulate(0.05).expect("triangulate").validate_for_stl(1e-5).is_err());
+    // Fine meshing at tol=0.05 now succeeds and produces a valid watertight STL mesh!
+    let rep_fine = plate_hole.triangulate(0.05).expect("triangulate at 0.05").validate_for_stl(1e-5).expect("valid STL at tol=0.05");
+    assert!((rep_fine.signed_volume - expected_vol).abs() < 10.0, "got {}", rep_fine.signed_volume);
 }
 
 #[test]
@@ -409,4 +409,137 @@ fn test_binary_stl_header_and_layout_invariants() {
     assert_eq!(&plate_bytes[..80], &expected_header[..]);
     assert_eq!(u32::from_le_bytes([plate_bytes[80], plate_bytes[81], plate_bytes[82], plate_bytes[83]]), 12);
     assert_eq!(plate_bytes.len(), 684);
+}
+
+#[test]
+fn test_validation_suite_cases_a_through_g() {
+    let pi = std::f64::consts::PI;
+
+    // Case A: Standalone cylinder at 0.05 mm
+    let cyl_a = BrepSolid::cylinder(Vec3::new(20.0, 15.0, 0.0), 4.0, 5.0, Vec3::Z).expect("case A cylinder");
+    let mesh_a = cyl_a.triangulate(0.05).expect("case A triangulate");
+    let rep_a = mesh_a.validate_for_stl(1e-5).expect("case A STL valid");
+    assert_eq!(rep_a.open_edges, 0);
+    assert_eq!(rep_a.non_manifold_edges, 0);
+    assert_eq!(rep_a.degenerate_faces, 0);
+    assert!(rep_a.consistent_orientation);
+    let vol_a_expected = pi * 16.0 * 5.0; // ~251.327
+    assert!((rep_a.signed_volume - vol_a_expected).abs() < 2.0);
+
+    // Case B: Solid extruded plate 40x30x5 at 0.05 mm
+    let rect_b = vec![
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(40.0, 0.0, 0.0),
+        Vec3::new(40.0, 30.0, 0.0),
+        Vec3::new(0.0, 30.0, 0.0),
+    ];
+    let plate_b = BrepSolid::extrude(&rect_b, Vec3::new(0.0, 0.0, 5.0)).expect("case B extrude");
+    let mesh_b = plate_b.triangulate(0.05).expect("case B triangulate");
+    let rep_b = mesh_b.validate_for_stl(1e-5).expect("case B STL valid");
+    assert_eq!(rep_b.open_edges, 0);
+    assert_eq!(rep_b.non_manifold_edges, 0);
+    assert_eq!(rep_b.degenerate_faces, 0);
+    assert!(rep_b.consistent_orientation);
+    assert!((rep_b.signed_volume - 6000.0).abs() < 1e-2);
+
+    // Case C: Holed plate 40x30x5 with hole R=4 at tol=0.25 mm
+    let hole_tool = BrepSolid::cylinder(Vec3::new(20.0, 15.0, -1.0), 4.0, 7.0, Vec3::Z).expect("hole tool");
+    let plate_c = plate_b.subtract(&hole_tool, SubtractOptions { tolerance: 0.25 }).expect("case C subtract");
+    let mesh_c = plate_c.triangulate(0.25).expect("case C triangulate");
+    let rep_c = mesh_c.validate_for_stl(1e-5).expect("case C STL valid");
+    assert_eq!(rep_c.open_edges, 0);
+    assert_eq!(rep_c.non_manifold_edges, 0);
+    assert_eq!(rep_c.degenerate_faces, 0);
+    assert!(rep_c.consistent_orientation);
+    let vol_holed_expected = 6000.0 - vol_a_expected; // ~5748.67
+    assert!((rep_c.signed_volume - vol_holed_expected).abs() < 20.0);
+
+    // Case D: Holed plate 40x30x5 with hole R=4 at fine tol=0.05 mm (Target case)
+    let plate_d = plate_b.subtract(&hole_tool, SubtractOptions { tolerance: 0.05 }).expect("case D subtract");
+    let mesh_d = plate_d.triangulate(0.05).expect("case D triangulate");
+    let rep_d = mesh_d.validate_for_stl(1e-5).expect("case D STL valid");
+    assert_eq!(rep_d.open_edges, 0, "must have zero open edges at 0.05 mm");
+    assert_eq!(rep_d.non_manifold_edges, 0, "must have zero non-manifold edges at 0.05 mm");
+    assert_eq!(rep_d.degenerate_faces, 0, "must have zero degenerate faces");
+    assert!(rep_d.consistent_orientation, "must have consistent outward orientation");
+    assert!((rep_d.signed_volume - vol_holed_expected).abs() < 10.0, "signed volume must match analytical");
+
+    // Check maximum radial deviation on hole (<= 0.05 mm)
+    let mut max_rad_dev = 0.0f64;
+    let mut hole_vertex_count = 0;
+    for pos in &mesh_d.positions {
+        if pos.z >= -1e-4 && pos.z <= 5.0 + 1e-4 {
+            let r = ((pos.x - 20.0).powi(2) + (pos.y - 15.0).powi(2)).sqrt();
+            if (r - 4.0).abs() < 0.2 {
+                let dev = (r - 4.0).abs();
+                if dev > max_rad_dev {
+                    max_rad_dev = dev;
+                }
+                hole_vertex_count += 1;
+            }
+        }
+    }
+    assert!(hole_vertex_count >= 16, "must have vertices around hole, got {hole_vertex_count}");
+    assert!(max_rad_dev <= 0.05, "max radial deviation {max_rad_dev} exceeds tolerance 0.05 mm");
+
+    // Validate the binary STL export in memory (no files outside the repo).
+    let stl_bytes = mesh_d.to_stl_binary_bytes().expect("serialize STL");
+    assert!(stl_bytes.len() >= 84, "binary STL must contain a header and triangle count");
+    let stl_triangles = u32::from_le_bytes([stl_bytes[80], stl_bytes[81], stl_bytes[82], stl_bytes[83]]) as usize;
+    assert_eq!(stl_triangles, mesh_d.triangles.len(), "binary STL triangle count must match the mesh");
+    assert_eq!(stl_bytes.len(), 84 + 50 * stl_triangles, "binary STL length must match its triangle count");
+
+    // Case E: Off-center hole at (15, 10), radius 3, height 7 at tol=0.05 mm
+    let off_tool = BrepSolid::cylinder(Vec3::new(15.0, 10.0, -1.0), 3.0, 7.0, Vec3::Z).expect("off-center tool");
+    let plate_e = plate_b.subtract(&off_tool, SubtractOptions { tolerance: 0.05 }).expect("case E subtract");
+    let mesh_e = plate_e.triangulate(0.05).expect("case E triangulate");
+    let rep_e = mesh_e.validate_for_stl(1e-5).expect("case E STL valid");
+    assert_eq!(rep_e.open_edges, 0);
+    assert_eq!(rep_e.non_manifold_edges, 0);
+    assert_eq!(rep_e.degenerate_faces, 0);
+    assert!(rep_e.consistent_orientation);
+    let vol_e_expected = 6000.0 - pi * 9.0 * 5.0; // ~5858.63
+    assert!((rep_e.signed_volume - vol_e_expected).abs() < 10.0);
+
+    // Case F: Square plate 50x50x10 with two through holes (R=4 at (15, 25), R=5 at (35, 25)) at tol=0.05 mm
+    let square_profile = vec![
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(50.0, 0.0, 0.0),
+        Vec3::new(50.0, 50.0, 0.0),
+        Vec3::new(0.0, 50.0, 0.0),
+    ];
+    let plate_f_solid = BrepSolid::extrude(&square_profile, Vec3::new(0.0, 0.0, 10.0)).expect("case F extrude");
+    let tool_f1 = BrepSolid::cylinder(Vec3::new(15.0, 25.0, -1.0), 4.0, 12.0, Vec3::Z).expect("tool F1");
+    let tool_f2 = BrepSolid::cylinder(Vec3::new(35.0, 25.0, -1.0), 5.0, 12.0, Vec3::Z).expect("tool F2");
+    let plate_f = plate_f_solid
+        .subtract(&tool_f1, SubtractOptions { tolerance: 0.05 })
+        .expect("case F subtract 1")
+        .subtract(&tool_f2, SubtractOptions { tolerance: 0.05 })
+        .expect("case F subtract 2");
+    let mesh_f = plate_f.triangulate(0.05).expect("case F triangulate");
+    let rep_f = mesh_f.validate_for_stl(1e-5).expect("case F STL valid");
+    assert_eq!(rep_f.open_edges, 0);
+    assert_eq!(rep_f.non_manifold_edges, 0);
+    assert_eq!(rep_f.degenerate_faces, 0);
+    assert!(rep_f.consistent_orientation);
+    let vol_f_expected = 50.0 * 50.0 * 10.0 - (pi * 16.0 * 10.0) - (pi * 25.0 * 10.0); // 25000 - 502.65 - 785.40 = ~23711.95
+    assert!((rep_f.signed_volume - vol_f_expected).abs() < 30.0);
+
+    // Case G: Inclined prism and inclined through cylinder (non-canonical axis alignment)
+    let angle = std::f64::consts::FRAC_PI_4; // 45 deg tilt
+    let rot = |v: Vec3| Vec3::new(v.x, v.y * angle.cos() - v.z * angle.sin(), v.y * angle.sin() + v.z * angle.cos());
+    let inc_profile = vec![rot(Vec3::new(0.0, 0.0, 0.0)), rot(Vec3::new(40.0, 0.0, 0.0)), rot(Vec3::new(40.0, 30.0, 0.0)), rot(Vec3::new(0.0, 30.0, 0.0))];
+    let inc_dir = rot(Vec3::new(0.0, 0.0, 5.0));
+    let inc_solid = BrepSolid::extrude(&inc_profile, inc_dir).expect("inc extrude");
+    let inc_cyl_origin = rot(Vec3::new(20.0, 15.0, -1.0));
+    let inc_cyl_axis = rot(Vec3::Z).normalized();
+    let inc_tool = BrepSolid::cylinder(inc_cyl_origin, 4.0, 7.0, inc_cyl_axis).expect("inc cylinder");
+    let inc_holed = inc_solid.subtract(&inc_tool, SubtractOptions { tolerance: 0.05 }).expect("inc subtract");
+    let mesh_g = inc_holed.triangulate(0.05).expect("inc triangulate");
+    let rep_g = mesh_g.validate_for_stl(1e-5).expect("inc STL valid");
+    assert_eq!(rep_g.open_edges, 0);
+    assert_eq!(rep_g.non_manifold_edges, 0);
+    assert_eq!(rep_g.degenerate_faces, 0);
+    assert!(rep_g.consistent_orientation);
+    assert!((rep_g.signed_volume - vol_holed_expected).abs() < 15.0);
 }

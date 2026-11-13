@@ -257,18 +257,22 @@ fn case_b_holed_plate_through_hole_boolean_and_stl_limitation() {
     assert!((rep.signed_volume - expected_vol).abs() < 20.0, "vol={}", rep.signed_volume);
     let _ = fs::remove_file(&valid_stl);
 
-    // At fine boolean trim tolerance (0.05 mm), truck_meshalgo emits open/non-manifold seam edges:
-    // STLOUT MUST reject cleanly with an explicit error and NEVER write a broken STL file.
-    let fine_stl = temp_stl_path("case_b_fine_rejected");
-    let err = s
+    // At fine boolean trim tolerance (0.05 mm), meshing now succeeds with zero defect boundaries:
+    let fine_stl = temp_stl_path("case_b_fine_success");
+    let fine_res = s
         .execute(
             "stlout",
             &json!({ "handles": [res_h], "path": fine_stl.to_string_lossy(), "tolerance_mm": 0.05 }),
         )
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("STL mesh invalid") || err.contains("open edges") || err.contains("non-manifold"), "unexpected error: {err}");
-    assert!(!fine_stl.exists(), "invalid STL must not create file on disk");
+        .unwrap();
+    assert_eq!(fine_res["status"], "ok");
+    assert_eq!(fine_res["topology"]["open_edges"], 0);
+    assert_eq!(fine_res["topology"]["non_manifold_edges"], 0);
+    assert!(fine_res["triangles_count"].as_u64().unwrap() >= 700);
+    let rep_fine = parse_and_validate_binary_stl(&fs::read(&fine_stl).unwrap());
+    assert_eq!((rep_fine.open_edges, rep_fine.non_manifold_edges), (0, 0));
+    assert!((rep_fine.signed_volume - expected_vol).abs() < 10.0, "vol={}", rep_fine.signed_volume);
+    let _ = fs::remove_file(&fine_stl);
 }
 
 #[test]
