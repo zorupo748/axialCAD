@@ -166,6 +166,34 @@ Cada flujo se clasifica según los criterios establecidos:
 
 ---
 
+## 7. Modelado 3D básico y preparación para impresión (EXTRUDE, STLOUT, COPYBASE)
+
+### Clasificación
+- **Existe pero necesita mejora** (recorrido 3D básico y exportación STL de sólidos simples plenamente validados en slicer; la discretización de intersecciones con curvas a tolerancia fina de 0.05 mm permanece como limitación abierta).
+
+### Evidencia en CADcraft
+- **Archivos y funciones:**
+  - `crates/engine/src/cmd/solids.rs`: comando `EXTRUDE` con activación automática del modo de visualización Conceptual.
+  - `crates/engine/src/cmd/exchange.rs`: comando `STLOUT` con validación estricta de manifoldness de malla binaria STL.
+  - `crates/ui-egui/src/exchange.rs`: integración gráfica de diálogo nativo de guardar archivo con adición automática de extensión `.stl`.
+  - `crates/engine/src/cmd/edit.rs`, `crates/engine/src/cmd/clipboard.rs`: comando `COPYBASE` (`Ctrl+Shift+C`) con punto base 3D y conservación de recetas B-Rep de `Solid3d`.
+  - Tests automatizados: `crates/engine/tests/it/extrude_stl_mm.rs`, `crates/engine/src/cmd/clipboard_tests.rs`, `crates/ui-egui/src/clipboard.rs`.
+
+### Estado Validado
+- **Milímetros para dibujos nuevos y exportación física probada:** Sistema predeterminado en milímetros para plantillas y cotas, garantizando escala 1:1 en slicers.
+- **Placa simple desde interfaz hasta OrcaSlicer:** Flujo `RECTANG` → `EXTRUDE` completado e importado con éxito en OrcaSlicer con dimensiones nominales exactas (40 × 30 × 5 mm).
+- **Sombreado automático tras EXTRUDE:** Activación automática del estilo visual Conceptual tras completar la operación de extrusión.
+- **STLOUT con diálogo y extensión automática:** Apertura de selector de archivos nativo con anexado automático de extensión `.stl` y cabecera neutra (`axialCAD binary STL`).
+- **COPYBASE y copia de sólidos entre dibujos:** Copia relativa con punto base 3D (`Ctrl+Shift+C`), preservación de la receta B-Rep y volumen de `Solid3d`, e inserción en el mismo dibujo y entre dibujos distintos.
+
+### Limitaciones Abiertas
+- **El caso de placa perforada falla la validación a 0.05 mm:** El mallador genera aristas abiertas (discrepancias entre subdivisiones de caras adyacentes) en la costura cilíndrica a tolerancia fina, impidiendo superar la validación estricta de manifoldness de STL.
+- **Casos ensayados a 0.15 / 0.25 mm:** Aunque superan la validación geométrica y pueden exportarse, el agujero se muestra visiblemente poligonal en OrcaSlicer en comparación con modelos de referencia, por lo que no resuelven el objetivo de calidad fina.
+- **Postprocesado experimental:** El saneamiento geométrico posterior sobre `TriangleMesh` no produjo una solución válida al carecer de acceso a las curvas analíticas B-Rep.
+- **Corrección del mallador:** No existe todavía una corrección aprobada del mallador en la fase de discretización previa.
+
+---
+
 ## Resumen de Estado y Clasificación
 
 | Flujo | Clasificación Actualizada | Límite o Trabajo Pendiente |
@@ -176,3 +204,4 @@ Cada flujo se clasifica según los criterios establecidos:
 | **4. Selección y modificación** | **Existe pero necesita mejora** | Selección por lazo continuo (lasso) y menús contextuales hover en pinzamientos. |
 | **5. Guardar / cerrar / reabrir** | **Existe y funciona** | Flujo completo de comprobación de guardado, diálogos de cierre e invalidación de caché. |
 | **6. Trazado / PDF** | **Existe pero necesita mejora** | Espacio papel con múltiples viewports y publicación por lotes (`PUBLISH`). |
+| **7. Modelado 3D y STL** | **Existe pero necesita mejora** | Recorrido simple validado en slicer; mallado conforme a tolerancia fina (0.05 mm) en sólidos perforados pendiente de corrección en kernel. |

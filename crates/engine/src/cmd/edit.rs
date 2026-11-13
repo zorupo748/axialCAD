@@ -434,11 +434,14 @@ impl Interactive for MredoM {
     }
 }
 
-fn copy_to_clip(s: &mut Session, hs: &[Handle], base: Option<Vec2>) -> Result<usize> {
+fn copy_to_clip(s: &mut Session, hs: &[Handle], base: Option<Vec3>) -> Result<usize> {
     let d = s.doc()?;
     let ents: Vec<Entity> = hs.iter().filter_map(|h| d.entity(*h).map(|e| (**e).clone())).collect();
+    if ents.is_empty() {
+        return Ok(0);
+    }
     let b = ents.iter().fold(Bounds2::EMPTY, |acc, e| acc.union(&entity_bounds(d, e, 0)));
-    let base = base.unwrap_or(if b.min.is_finite() { b.min } else { Vec2::ZERO });
+    let base = base.unwrap_or_else(|| if b.min.is_finite() { b.min.to3(0.0) } else { Vec3::ZERO });
     let n = ents.len();
     clipboard::copy(s, ents, base)?;
     Ok(n)
@@ -452,7 +455,7 @@ fn run_copyclip(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn run_copybase(s: &mut Session, p: &Value) -> Result<Value> {
     let hs = targets(s, p)?;
-    let base = point_param(p, "base");
+    let base = point3_param(p, "base").or_else(|| point_param(p, "base").map(|p2| p2.to3(0.0)));
     let n = copy_to_clip(s, &hs, base)?;
     Ok(json!({ "copied": n }))
 }
@@ -471,25 +474,27 @@ fn run_cut(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// Paste the clipboard moved by `offset` (the clipboard brings the layers, styles and blocks its
 /// objects need).
-fn paste(s: &mut Session, offset: Vec2) -> Result<Vec<Handle>> {
-    clipboard::paste(s, &Mat3::translate(offset))
+fn paste(s: &mut Session, offset: Vec3) -> Result<Vec<Handle>> {
+    clipboard::paste(s, offset)
 }
 
 fn run_paste(s: &mut Session, p: &Value) -> Result<Value> {
     if s.clipboard.is_empty() {
         return Err(bad("pasteclip", "the clipboard is empty"));
     }
-    let off = match point_param(p, "at") {
+    let off = match point3_param(p, "at").or_else(|| point_param(p, "at").map(|p2| p2.to3(0.0))) {
         Some(at) => at - s.clipboard_base,
-        None => Vec2::ZERO,
+        None => Vec3::ZERO,
     };
     let r = paste(s, off)?;
     Ok(json!({ "handles": r.iter().map(|h| h.hex()).collect::<Vec<_>>() }))
 }
 
 fn run_pasteblock(s: &mut Session, p: &Value) -> Result<Value> {
-    let at = point_param(p, "at").unwrap_or(s.clipboard_base);
-    let h = clipboard::paste_block(s, at)?;
+    let at = point3_param(p, "at")
+        .or_else(|| point_param(p, "at").map(|p2| p2.to3(0.0)))
+        .unwrap_or(s.clipboard_base);
+    let h = clipboard::paste_block(s, at.xy())?;
     let block = match s.doc()?.entity(h).map(|e| &e.kind) {
         Some(cadcraft_doc::EntityKind::Insert(i)) => i.block.clone(),
         _ => String::new(),
@@ -498,7 +503,7 @@ fn run_pasteblock(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn run_pasteorig(s: &mut Session, _p: &Value) -> Result<Value> {
-    let r = paste(s, Vec2::ZERO)?;
+    let r = paste(s, Vec3::ZERO)?;
     Ok(json!({ "handles": r.iter().map(|h| h.hex()).collect::<Vec<_>>() }))
 }
 
@@ -586,7 +591,7 @@ impl Interactive for PasteM {
             return Ok(Step::Done);
         }
         if self.mode == PasteMode::Orig {
-            paste(s, Vec2::ZERO)?;
+            paste(s, Vec3::ZERO)?;
             return Ok(Step::Done);
         }
         Ok(Step::Continue)
@@ -600,11 +605,22 @@ impl Interactive for PasteM {
                 clipboard::paste_block(s, p)?;
                 Ok(Step::Done)
             }
-            Input::Point(p) => {
-                let base = s.clipboard_base;
-                paste(s, p - base)?;
+            Input::Point3(p3) if self.mode == PasteMode::Block => {
+                clipboard::paste_block(s, p3.xy())?;
                 Ok(Step::Done)
             }
+            Input::Point(p) => {
+                let target_wcs = s.ucs().to_world2(p);
+                let delta = target_wcs - s.clipboard_base;
+                paste(s, delta)?;
+                Ok(Step::Done)
+            }
+            Input::Point3(p3) => {
+                let delta = p3 - s.clipboard_base;
+                paste(s, delta)?;
+                Ok(Step::Done)
+            }
+            Input::Cancel => Ok(Step::Cancel),
             Input::Enter => Ok(Step::Done),
             _ => Ok(Step::Continue),
         }
@@ -613,10 +629,10 @@ impl Interactive for PasteM {
         if self.mode == PasteMode::Orig || s.clipboard.is_empty() {
             return None;
         }
-        Some(crate::prompt::Drag { handles: Vec::new(), matrix: Mat3::translate(c - s.clipboard_base), extra: Vec::new(), clipboard: true })
+        Some(crate::prompt::Drag { handles: Vec::new(), matrix: Mat3::translate(c - s.clipboard_base.xy()), extra: Vec::new(), clipboard: true })
     }
     fn preview(&self, s: &Session, c: Vec2) -> Vec<cadcraft_doc::EntityKind> {
-        let m = Mat3::translate(c - s.clipboard_base);
+        let m = Mat3::translate(c - s.clipboard_base.xy());
         s.clipboard
             .iter()
             .take(500)
@@ -652,13 +668,15 @@ impl Interactive for SelectM {
 /// COPYBASE: base point first, then "Select objects:" (skipped with a pickfirst selection).
 #[derive(Default)]
 struct CopyBaseM {
-    base: Option<Vec2>,
+    base: Option<Vec3>,
     sel: SelectPhase,
 }
 
 impl CopyBaseM {
     fn copy(&self, s: &mut Session, hs: &[Handle]) -> Result<Step> {
-        copy_to_clip(s, hs, self.base)?;
+        if !hs.is_empty() {
+            copy_to_clip(s, hs, self.base)?;
+        }
         Ok(Step::Done)
     }
 }
@@ -676,8 +694,15 @@ impl Interactive for CopyBaseM {
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
         if self.base.is_none() {
-            if let Input::Point(p) = i {
-                self.base = Some(p);
+            let p_wcs = match i {
+                Input::Point3(p3) => Some(p3),
+                Input::Point(p2) => Some(s.ucs().to_world2(p2)),
+                Input::Cancel => return Ok(Step::Cancel),
+                Input::Enter => return Ok(Step::Done),
+                _ => None,
+            };
+            if let Some(base_pt) = p_wcs {
+                self.base = Some(base_pt);
                 if self.sel.done {
                     let hs = self.sel.picked.clone();
                     return self.copy(s, &hs);
@@ -685,14 +710,17 @@ impl Interactive for CopyBaseM {
             }
             return Ok(Step::Continue);
         }
-        match self.sel.feed(s, &i)? {
-            SelOutcome::More => Ok(Step::Continue),
-            SelOutcome::Empty => Ok(Step::Done),
-            SelOutcome::Done(hs) => {
-                let step = self.copy(s, &hs)?;
-                s.set_selection(Vec::new());
-                Ok(step)
-            }
+        match i {
+            Input::Cancel => Ok(Step::Cancel),
+            _ => match self.sel.feed(s, &i)? {
+                SelOutcome::More => Ok(Step::Continue),
+                SelOutcome::Empty => Ok(Step::Done),
+                SelOutcome::Done(hs) => {
+                    let step = self.copy(s, &hs)?;
+                    s.set_selection(Vec::new());
+                    Ok(step)
+                }
+            },
         }
     }
 }

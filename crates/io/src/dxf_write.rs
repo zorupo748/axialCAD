@@ -1288,7 +1288,13 @@ fn entity(w: &mut W, d: &Drawing, e: &Entity, owner: &str, paper: bool, cx: &Ctx
 
             for (idx, face) in faces.iter().enumerate() {
                 w.s(0, "3DFACE");
-                common(w, e, owner, paper, "AcDbFace");
+                if idx == 0 {
+                    common(w, e, owner, paper, "AcDbFace");
+                } else {
+                    let sub_h = Handle::parse_hex(&w.h()).unwrap_or(e.handle);
+                    let part = Entity { handle: sub_h, common: e.common.clone(), kind: EntityKind::Point(cadcraft_doc::Point { p: Vec3::ZERO, angle: 0.0 }) };
+                    common(w, &part, owner, paper, "AcDbFace");
+                }
                 w.p(10, face.corners[0]);
                 w.p(11, face.corners[1]);
                 w.p(12, face.corners[2]);

@@ -507,4 +507,114 @@ mod tests {
         assert_eq!(format_angle(angle, 4, 0), "S 74d E");
         assert_eq!(format_angle(angle, 4, 6), "S 73d41'51.00\" E");
     }
+
+    #[test]
+    fn insunits_mm_conversions() {
+        assert!(insunits_info(0).is_none());
+        assert_eq!(insunits_info(4).map(|i| i.mm_per_unit), Some(1.0));
+        assert_eq!(insunits_info(5).map(|i| i.mm_per_unit), Some(10.0));
+        assert_eq!(insunits_info(6).map(|i| i.mm_per_unit), Some(1000.0));
+        assert_eq!(insunits_info(1).map(|i| i.mm_per_unit), Some(25.4));
+        assert!(insunits_info(18).is_none());
+        assert!(insunits_info(99).is_none());
+        assert_eq!(parse_insunits_choice("mm").map(|i| i.code), Some(4));
+        assert_eq!(parse_insunits_choice("centimeters").map(|i| i.mm_per_unit), Some(10.0));
+        assert_eq!(parse_insunits_choice("in").map(|i| i.mm_per_unit), Some(25.4));
+        assert!(parse_insunits_choice("unitless").is_none());
+        assert!(parse_insunits_choice("0").is_none());
+    }
+}
+
+/// Physical unit metadata for DXF `$INSUNITS` codes that have an exact engineering length in mm.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InsUnitInfo {
+    pub code: i64,
+    pub name: &'static str,
+    pub mm_per_unit: f64,
+}
+
+/// Human-readable `$INSUNITS` name (DXF header group code 70).
+pub fn insunits_name(code: i64) -> &'static str {
+    match code {
+        0 => "Unitless",
+        1 => "Inches",
+        2 => "Feet",
+        3 => "Miles",
+        4 => "Millimeters",
+        5 => "Centimeters",
+        6 => "Meters",
+        7 => "Kilometers",
+        8 => "Microinches",
+        9 => "Mils",
+        10 => "Yards",
+        11 => "Angstroms",
+        12 => "Nanometers",
+        13 => "Microns",
+        14 => "Decimeters",
+        15 => "Decameters",
+        16 => "Hectometers",
+        17 => "Gigameters",
+        18 => "Astronomical Units",
+        19 => "Light Years",
+        20 => "Parsecs",
+        21 => "US Survey Feet",
+        22 => "US Survey Inch",
+        23 => "US Survey Yard",
+        24 => "US Survey Mile",
+        _ => "Unknown",
+    }
+}
+
+/// Physical millimetres-per-drawing-unit factor for a known DXF `$INSUNITS` code.
+///
+/// Returns `None` for unitless (`0`), unknown codes, or astronomical units unsuitable for CAD/STL.
+pub fn insunits_info(code: i64) -> Option<InsUnitInfo> {
+    let mm_per_unit = match code {
+        1 => 25.4,
+        2 => 304.8,
+        3 => 1_609_344.0,
+        4 => 1.0,
+        5 => 10.0,
+        6 => 1000.0,
+        7 => 1_000_000.0,
+        8 => 25.4e-6,
+        9 => 0.0254,
+        10 => 914.4,
+        11 => 1e-7,
+        12 => 1e-6,
+        13 => 1e-3,
+        14 => 100.0,
+        15 => 10_000.0,
+        16 => 100_000.0,
+        17 => 1e12,
+        21 => 1_200_000.0 / 3937.0,
+        22 => 100_000.0 / 3937.0,
+        23 => 3_600_000.0 / 3937.0,
+        24 => 6_336_000_000.0 / 3937.0,
+        _ => return None,
+    };
+    Some(InsUnitInfo { code, name: insunits_name(code), mm_per_unit })
+}
+
+/// Parse an explicit unit name, abbreviation, or numeric `$INSUNITS` code for physical STL scaling.
+pub fn parse_insunits_choice(raw: &str) -> Option<InsUnitInfo> {
+    let s = raw.trim().to_ascii_lowercase();
+    if let Ok(code) = s.parse::<i64>() {
+        return insunits_info(code);
+    }
+    let code = match s.as_str() {
+        "in" | "inch" | "inches" | "pulgada" | "pulgadas" => 1,
+        "ft" | "foot" | "feet" | "pie" | "pies" => 2,
+        "mi" | "mile" | "miles" => 3,
+        "mm" | "millimeter" | "millimeters" | "millimetre" | "millimetres" | "milimetro" | "milimetros" => 4,
+        "cm" | "centimeter" | "centimeters" | "centimetre" | "centimetres" | "centimetro" | "centimetros" => 5,
+        "m" | "meter" | "meters" | "metre" | "metres" | "metro" | "metros" => 6,
+        "km" | "kilometer" | "kilometers" | "kilometre" | "kilometres" => 7,
+        "yd" | "yard" | "yards" => 10,
+        "nm" | "nanometer" | "nanometers" => 12,
+        "um" | "micron" | "microns" | "micrometer" | "micrometers" => 13,
+        "dm" | "decimeter" | "decimeters" | "decimetre" | "decimetres" => 14,
+        _ => return None,
+    };
+    insunits_info(code)
 }

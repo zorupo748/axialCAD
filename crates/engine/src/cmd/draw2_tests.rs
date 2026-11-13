@@ -937,6 +937,7 @@ fn spline_cv_json_and_command_line() {
 #[test]
 fn centermark_and_centerline() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let c = h(&s.execute("circle", &json!({"center": [0, 0], "radius": 2})).unwrap());
     let r = s.execute("centermark", &json!({"handle": c})).unwrap();
     assert_eq!(r["handles"].as_array().unwrap().len(), 2);

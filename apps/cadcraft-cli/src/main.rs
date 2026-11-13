@@ -486,7 +486,8 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
     if s.docs.is_empty() {
-        s.new_drawing(false);
+        let metric = s.settings.measureinit;
+        s.new_drawing(metric);
     }
     check_framed_output(framing, exp.as_deref())?;
     let before = model_views(&s);

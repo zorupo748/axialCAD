@@ -21,8 +21,8 @@ use super::file::{base64_decode, base64_encode, io};
 use super::*;
 use crate::{EngineError, Result, Session};
 
-/// Formats EXPORT writes (the io layer picks the writer from the extension).
-pub const EXPORT_FORMATS: &[&str] = &["dxf", "dwg", "svg", "png", "pdf"];
+/// Formats EXPORT writes (the io layer picks the writer from the extension, or STL for 3D solids).
+pub const EXPORT_FORMATS: &[&str] = &["dxf", "dwg", "svg", "png", "pdf", "stl"];
 /// Default and largest plot preview width, in pixels.
 const PREVIEW_PX: u64 = 1200;
 const MAX_PREVIEW_PX: u64 = 4096;
@@ -38,7 +38,7 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("export", "Export...", run_export)
             .menu(&["File", "Export..."])
             .alias(&["exp"])
-            .params("{path? (else returns base64 `data`), format?: dxf|dwg|svg|png|pdf (default: the path's extension)} → {format, bytes, path? | data}")
+            .params("{path? (else returns base64 `data`), format?: dxf|dwg|svg|png|pdf|stl (default: the path's extension), handles?: [solid handles] (for stl), unit?: mm|cm|m|in|ft, tolerance_mm?: f64} → {format, bytes, path? | data}")
             .noundo(),
         CommandSpec::new("preview", "Plot Preview", run_preview)
             .menu(&["File", "Plot Preview"])
@@ -72,7 +72,7 @@ fn extension(path: &str) -> String {
 }
 
 /// Write `bytes` to `path` through a temporary file, so a failed write keeps the old file.
-fn write_file(cmd: &str, path: &str, bytes: &[u8]) -> Result<()> {
+pub(super) fn write_file(cmd: &str, path: &str, bytes: &[u8]) -> Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         // Exclusively create a fresh temporary file and rename it into place so a planted
@@ -103,15 +103,42 @@ pub(super) fn deliver_file(cmd: &str, path: &str, bytes: &[u8], hook: Option<sup
 // ---------- EXPORT ----------
 
 fn run_export(s: &mut Session, p: &Value) -> Result<Value> {
-    let hooks = io().ok_or_else(|| bad("export", "file formats are not available in this build"))?;
     let path = str_param(p, "path");
     let format = match str_param(p, "format") {
         Some(f) => f.trim().trim_start_matches('.').to_ascii_lowercase(),
         None => path.map(extension).unwrap_or_default(),
     };
     if !EXPORT_FORMATS.contains(&format.as_str()) {
-        return Err(bad("export", "`format` must be dxf, dwg, svg, png or pdf (or give a `path` with one of those extensions)"));
+        return Err(bad("export", "`format` must be dxf, dwg, svg, png, pdf or stl (or give a `path` with one of those extensions)"));
     }
+    if format == "stl" {
+        let (bytes, meta) = super::solids::export_stl_for_export(s, p)?;
+        return match path {
+            Some(path) => {
+                write_file("export", path, &bytes)?;
+                super::solids::persist_stl_unit_if_requested(s, p)?;
+                let mut out = meta;
+                if let Some(m) = out.as_object_mut() {
+                    m.insert("path".into(), json!(path));
+                    m.insert("format".into(), json!("stl"));
+                    m.insert("bytes".into(), json!(bytes.len()));
+                    m.insert("message".into(), json!(format!("Exported STL in millimeters to {path}")));
+                }
+                Ok(out)
+            }
+            None => {
+                super::solids::persist_stl_unit_if_requested(s, p)?;
+                let mut out = meta;
+                if let Some(m) = out.as_object_mut() {
+                    m.insert("data".into(), json!(base64_encode(&bytes)));
+                    m.insert("format".into(), json!("stl"));
+                    m.insert("bytes".into(), json!(bytes.len()));
+                }
+                Ok(out)
+            }
+        };
+    }
+    let hooks = io().ok_or_else(|| bad("export", "file formats are not available in this build"))?;
     let doc = s.doc()?;
     if format == "dwg" {
         let version = super::file::effective_save_version(doc, "export.dwg");
@@ -716,6 +743,7 @@ mod tests {
     #[test]
     fn preview_draws_the_sheet_as_it_plots() {
         let mut s = session();
+        let _ = s.new_drawing(false);
         let r = s.execute("preview", &json!({ "width": 400 })).unwrap();
         assert_eq!((r["layout"].as_str(), r["width"].as_u64()), (Some("Model"), Some(400)));
         // Model space plots on ANSI A landscape in an imperial drawing.

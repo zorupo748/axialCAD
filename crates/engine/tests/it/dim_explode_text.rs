@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 /// text angle, the exploded MTEXT).
 fn explode_vertical(setup: &[(&str, Value)]) -> (f64, f64, MText) {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     for (cmd, p) in setup {
         s.execute(cmd, p).unwrap();
     }

@@ -90,6 +90,8 @@ pub fn parse_polar_text(text: &str, angles: &crate::units::AngleSettings) -> Opt
 pub enum Picker {
     /// A hatch pattern by name (see [`crate::pattern_choices`]); holds the current pattern.
     HatchPattern(String),
+    /// A save-file dialog for a path prompt; holds the suggested filename and default extension.
+    SaveFile { default_name: String, extension: String },
 }
 
 impl Prompt {

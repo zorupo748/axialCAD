@@ -24,6 +24,7 @@ fn near(a: Vec3, b: Vec3) -> bool {
 #[test]
 fn json_form_composes_the_frame() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let r = s
         .execute(
             "tolerance",

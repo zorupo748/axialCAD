@@ -43,9 +43,15 @@ fn linear(s: &mut Session, x2: f64) {
     s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [x2, 0], "at": [x2 / 2.0, 3] })).unwrap();
 }
 
+fn imperial() -> Session {
+    let mut s = Session::new();
+    let _ = s.new_drawing(false);
+    s
+}
+
 #[test]
 fn new_variables_are_style_overrides_and_read_back() {
-    let mut s = Session::new();
+    let mut s = imperial();
     for (name, v) in [
         ("DIMTOFL", json!(1)),
         ("DIMATFIT", json!(1)),
@@ -103,7 +109,7 @@ fn new_variables_are_style_overrides_and_read_back() {
 #[test]
 fn fit_moves_text_or_arrows_outside() {
     // 0.5 between the extension lines: the text "0.5000" doesn't fit, the arrows (2 × 0.18) do.
-    let mut s = Session::new();
+    let mut s = imperial();
     linear(&mut s, 0.5);
     let (_, g) = last_dim(&s);
     assert!(g.text_pos.x > 0.5, "best fit: text outside, {:?}", g.text_pos);
@@ -132,7 +138,7 @@ fn fit_moves_text_or_arrows_outside() {
     let (_, g) = last_dim(&s);
     assert!(g.fills.is_empty(), "outside arrows suppressed");
     // DIMATFIT 1 (arrows first): text that fits alone stays inside, the arrows go out.
-    let mut s = Session::new();
+    let mut s = imperial();
     set(&mut s, "DIMATFIT", json!(1));
     set(&mut s, "DIMDEC", json!(0));
     linear(&mut s, 0.5);
@@ -143,7 +149,7 @@ fn fit_moves_text_or_arrows_outside() {
 
 #[test]
 fn suppressed_halves_fixed_extension_lines_and_vertical_position() {
-    let mut s = Session::new();
+    let mut s = imperial();
     set(&mut s, "DIMTAD", json!(1));
     set(&mut s, "DIMSD1", json!(1));
     linear(&mut s, 10.0);
@@ -151,7 +157,7 @@ fn suppressed_halves_fixed_extension_lines_and_vertical_position() {
     assert!(!covers(&g, 3.0, 2.0) && covers(&g, 3.0, 8.0));
     assert_eq!(g.fills.len(), 1, "only the second arrowhead");
     // Fixed-length extension lines: 0.5 from the dimension line toward the origin.
-    let mut s = Session::new();
+    let mut s = imperial();
     set(&mut s, "DIMFXLON", json!(1));
     set(&mut s, "DIMFXL", json!(0.5));
     linear(&mut s, 10.0);
@@ -161,7 +167,7 @@ fn suppressed_halves_fixed_extension_lines_and_vertical_position() {
         assert!((lo - 2.5).abs() < 1e-9, "{l:?}");
     }
     // DIMTVP lifts centred text by text heights.
-    let mut s = Session::new();
+    let mut s = imperial();
     set(&mut s, "DIMTVP", json!(1.0));
     linear(&mut s, 10.0);
     let (_, g) = last_dim(&s);
@@ -172,7 +178,7 @@ fn suppressed_halves_fixed_extension_lines_and_vertical_position() {
 #[test]
 fn text_move_settings() {
     // DIMTMOVE 1: a leader joins text moved off the line; the line stays put.
-    let mut s = Session::new();
+    let mut s = imperial();
     set(&mut s, "DIMTMOVE", json!(1));
     linear(&mut s, 10.0);
     let h = s.doc().unwrap().model.last().unwrap().handle.hex();
@@ -181,7 +187,7 @@ fn text_move_settings() {
     assert!((dm.defpt.y - 3.0).abs() < 1e-9);
     assert!(dim_lines(&g).iter().any(|l| l.first().is_some_and(|p| p.dist(Vec2::new(5.0, 3.0)) < 1e-9) && l.last().is_some_and(|p| p.y > 7.0)));
     // DIMTMOVE 0: the line follows (DIMTAD 1 keeps it below the text).
-    let mut s = Session::new();
+    let mut s = imperial();
     set(&mut s, "DIMTAD", json!(1));
     linear(&mut s, 10.0);
     let h = s.doc().unwrap().model.last().unwrap().handle.hex();
@@ -198,7 +204,7 @@ fn text_move_settings() {
 
 #[test]
 fn tolerance_justification_angular_zeros_and_arc_symbol() {
-    let mut s = Session::new();
+    let mut s = imperial();
     set(&mut s, "DIMTOL", json!(1));
     set(&mut s, "DIMTP", json!(0.1));
     set(&mut s, "DIMTM", json!(0.2));
@@ -214,7 +220,7 @@ fn tolerance_justification_angular_zeros_and_arc_symbol() {
     assert!(low(&bottom) > low(&middle) + 1e-6);
 
     // DIMAZIN 2 drops trailing zeros of angles.
-    let mut s = Session::new();
+    let mut s = imperial();
     set(&mut s, "DIMADEC", json!(2));
     s.execute("dimangular", &json!({ "vertex": [0, 0], "p1": [10, 0], "p2": [0, 10], "at": [3, 3] })).unwrap();
     assert_eq!(last_dim(&s).1.value, "90.00°");
@@ -223,7 +229,7 @@ fn tolerance_justification_angular_zeros_and_arc_symbol() {
     assert_eq!(last_dim(&s).1.value, "90°");
 
     // DIMARCSYM: before the text, over it, or none.
-    let mut s = Session::new();
+    let mut s = imperial();
     s.execute("arc", &json!({ "center": [0, 0], "radius": 5, "start": 0, "end": 90 })).unwrap();
     let a = s.doc().unwrap().model.last().unwrap().handle.hex();
     s.execute("dimarc", &json!({ "handle": a, "at": [5, 5] })).unwrap();

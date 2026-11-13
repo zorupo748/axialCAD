@@ -5636,7 +5636,9 @@ mod hatch_pick_tests {
 
         #[test]
         fn oblique_mouse_tracking_resolves_the_real_z_axis() {
-            let mut app = CadApp::new(Session::new(), Services::default());
+            let mut sess = Session::new();
+            let _ = sess.new_drawing(false);
+            let mut app = CadApp::new(sess, Services::default());
             app.session.execute("view.swiso", &json!({})).unwrap();
             app.session.settings.osmode = 0;
             app.session.settings.orthomode = false;
@@ -6425,7 +6427,9 @@ mod hatch_pick_tests {
 
     #[test]
     fn canvas_front_view_auto_axis_matches_preview_click_and_keyboard_finish() {
-        let mut app = CadApp::new(Session::new(), Services::default());
+        let mut sess = Session::new();
+        let _ = sess.new_drawing(false);
+        let mut app = CadApp::new(sess, Services::default());
         app.session.execute("view.front", &json!({})).unwrap();
         app.session.settings.orthomode = true;
         app.session.settings.osmode = 0;
@@ -6736,7 +6740,9 @@ mod hatch_pick_tests {
 
     #[test]
     fn canvas_mouse_elevated_base_negative_z() {
-        let mut app = CadApp::new(Session::new(), Services::default());
+        let mut sess = Session::new();
+        let _ = sess.new_drawing(false);
+        let mut app = CadApp::new(sess, Services::default());
         app.session.execute("view.swiso", &json!({})).unwrap();
         app.session.settings.zlock = false;
         app.session.settings.orthomode = false;
@@ -7028,7 +7034,9 @@ mod hatch_pick_tests {
 
     #[test]
     fn test_osnap_priority_over_ortho_in_3d() {
-        let mut app = CadApp::new(Session::new(), Services::default());
+        let mut sess = Session::new();
+        let _ = sess.new_drawing(false);
+        let mut app = CadApp::new(sess, Services::default());
         app.session.execute("view.swiso", &json!({})).unwrap();
         app.session.settings.zlock = false;
         app.session.settings.orthomode = true;
@@ -7096,7 +7104,9 @@ mod hatch_pick_tests {
 
     #[test]
     fn test_2d_command_with_prompt_base_in_3d_view_keeps_snaps() {
-        let mut app = CadApp::new(Session::new(), Services::default());
+        let mut sess = Session::new();
+        let _ = sess.new_drawing(false);
+        let mut app = CadApp::new(sess, Services::default());
         app.session.execute("view.swiso", &json!({})).unwrap();
         app.session.settings.zlock = false;
         app.session.settings.orthomode = true;

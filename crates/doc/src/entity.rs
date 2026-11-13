@@ -1242,6 +1242,85 @@ impl EntityKind {
         }
     }
 
+    /// Translate the entity by a 3D displacement vector (dx, dy, dz).
+    ///
+    /// Preserves parametric solid recipes, 3D polylines, 3D faces, and 2D elevation.
+    pub fn translate_3d(&mut self, delta: Vec3) {
+        if delta.x == 0.0 && delta.y == 0.0 && delta.z == 0.0 {
+            return;
+        }
+        if let EntityKind::Solid3d(s) = self {
+            s.translate(delta);
+            return;
+        }
+        let m = Mat3::translate(delta.xy());
+        self.transform(&m);
+        if delta.z != 0.0 {
+            match self {
+                EntityKind::Line(l) => {
+                    l.a.z += delta.z;
+                    l.b.z += delta.z;
+                }
+                EntityKind::Point(p) => p.p.z += delta.z,
+                EntityKind::Circle(c) => c.center.z += delta.z,
+                EntityKind::Arc(a) => a.center.z += delta.z,
+                EntityKind::Ellipse(e) => e.center.z += delta.z,
+                EntityKind::LwPolyline(p) => p.elevation += delta.z,
+                EntityKind::Polyline3d(p) => {
+                    for pt in &mut p.points {
+                        pt.z += delta.z;
+                    }
+                }
+                EntityKind::Helix(h) => h.center.z += delta.z,
+                EntityKind::Ray(r) | EntityKind::XLine(r) => r.base.z += delta.z,
+                EntityKind::Text(t) => t.insert.z += delta.z,
+                EntityKind::AttDef(a) => a.text.insert.z += delta.z,
+                EntityKind::MText(t) => t.insert.z += delta.z,
+                EntityKind::Insert(i) => i.insert.z += delta.z,
+                EntityKind::Dimension(d) => {
+                    for p in [&mut d.defpt, &mut d.text_mid, &mut d.p13, &mut d.p14, &mut d.p15, &mut d.p16] {
+                        p.z += delta.z;
+                    }
+                }
+                EntityKind::MLine(ml) => {
+                    for v in &mut ml.vertices {
+                        v.p.z += delta.z;
+                    }
+                }
+                EntityKind::Leader(l) => {
+                    for v in &mut l.vertices {
+                        v.z += delta.z;
+                    }
+                }
+                EntityKind::MLeader(ml) => {
+                    for l in &mut ml.leaders {
+                        for v in l {
+                            v.z += delta.z;
+                        }
+                    }
+                    ml.landing.z += delta.z;
+                    if let Some(t) = &mut ml.text {
+                        t.insert.z += delta.z;
+                    }
+                }
+                EntityKind::Solid(so) | EntityKind::Trace(so) => {
+                    for c in &mut so.corners {
+                        c.z += delta.z;
+                    }
+                }
+                EntityKind::Face3d(f) => {
+                    for c in &mut f.corners {
+                        c.z += delta.z;
+                    }
+                }
+                EntityKind::Table(t) => t.insert.z += delta.z,
+                EntityKind::Tolerance(t) => t.insert.z += delta.z,
+                EntityKind::Image(i) => i.insert.z += delta.z,
+                _ => {}
+            }
+        }
+    }
+
     /// Apply a 2D affine transform (move/rotate/uniform scale/mirror). Non-uniform scale turns
     /// circles into ellipses only where the kind supports it; otherwise radii use the mean scale.
     pub fn transform(&mut self, m: &Mat3) {

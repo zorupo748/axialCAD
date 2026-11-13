@@ -251,6 +251,7 @@ fn dimstyle_edit_invalidates_only_matching_cached_dimensions_everywhere() {
 #[test]
 fn linear_dimension_follows_line_endpoint() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let l = line(&mut s, [0.0, 0.0], [10.0, 0.0]);
     let d = h(&s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [10, 0], "at": [5, -2] })).unwrap());
     let dm = dim(&s, d);
@@ -289,6 +290,7 @@ fn moving_the_object_carries_the_dimension() {
 #[test]
 fn moving_the_object_keeps_the_ordinate_datum() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let l = line(&mut s, [5.0, 0.0], [5.0, 5.0]);
     let d = h(&s.execute("dimordinate", &json!({ "feature": [5, 5], "leader": [5, 8] })).unwrap());
     s.execute("move", &json!({ "handles": [l.hex()], "from": [5, 5], "to": [8, 5] })).unwrap();
@@ -302,6 +304,7 @@ fn moving_the_object_keeps_the_ordinate_datum() {
 #[test]
 fn moving_the_line_keeps_a_free_continued_origin() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let l = line(&mut s, [0.0, 0.0], [10.0, 0.0]);
     s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [10, 0], "at": [5, -2] })).unwrap();
     s.execute("dimcontinue", &json!({ "points": [[25, 0]] })).unwrap();
@@ -338,6 +341,7 @@ fn interactive_dimlinear_select_object_is_associative() {
 #[test]
 fn radius_and_diameter_follow_circle() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     s.execute("circle", &json!({ "center": [0, 0], "radius": 2 })).unwrap();
     let c = s.doc().unwrap().model.last().unwrap().handle;
     let r = h(&s.execute("dimradius", &json!({ "handle": c.hex(), "at": [5, 0] })).unwrap());
@@ -486,6 +490,7 @@ fn dimstyle_rename_updates_block_dimensions() {
 #[test]
 fn dimension_overrides() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let d = h(&s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [10, 0], "at": [5, 2] })).unwrap());
     s.execute("dimoverride", &json!({ "handles": [d.hex()], "DIMDEC": 1, "DIMPOST": "<> mm" })).unwrap();
     let dm = dim(&s, d);
@@ -528,6 +533,7 @@ fn dimension_override_text_with_variables() {
 #[test]
 fn dimtedit_and_dimspace() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let a = h(&s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [10, 0], "at": [5, 1] })).unwrap());
     let b = h(&s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [6, 0], "at": [3, 1.3] })).unwrap());
     s.execute("dimtedit.left", &json!({ "handles": [a.hex()] })).unwrap();
@@ -720,6 +726,7 @@ fn mtext_rejects_nonpositive_height() {
 fn setvar_dim_variables_apply_to_new_dimensions() {
     // Issue #66: a DIM* variable set with SETVAR is a style override that new dimensions take on.
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let linear = |s: &mut Session, y: f64| h(&s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [100, 0], "at": [50, y] })).unwrap());
     let text_height = |s: &Session, hd: Handle| {
         let d = s.doc().unwrap();

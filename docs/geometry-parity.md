@@ -52,7 +52,7 @@ constraints 10%.
 | Spline editing: knot insertion, split, refine, rebuild, convert to polyline | SPLINEDIT, grips | knot insertion and splitting (`curves.rs:539-622`); refine/rebuild partial |
 | Helix | yes | **no** |
 | 3D polyline | yes | stored and drawn; no 3D operations |
-| Regions, 3D solids, surfaces, meshes (ACIS/B-rep, NURBS surfaces, subdivision) | yes | Regions exact; B-Rep 3D solids (`cadcraft-brep`: box, cylinder, extrusion, booleans `solid.union`/`subtract`/`intersect`, recipes, metrics, STL); surfaces and meshes in progress |
+| Regions, 3D solids, surfaces, meshes (ACIS/B-rep, NURBS surfaces, subdivision) | yes | Regions exact; B-Rep 3D solids (`cadcraft-brep`: box, cylinder, extrusion, booleans `solid.union`/`subtract`/`intersect`, recipes, metrics, STL, COPYBASE 3D); simple extruded solids validated in slicers; fine-tolerance (0.05 mm) meshing of perforated solids open |
 
 ## Intersections (≈ 40%)
 

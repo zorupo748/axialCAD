@@ -22,6 +22,7 @@ fn dims(s: &Session, r: &Value) -> Vec<Dimension> {
 /// Lines from x = 0 to 10, 10 to 30 and 30 to 60 on y = 0: dimension points 0, 10, 30, 60.
 fn session() -> (Session, Vec<String>) {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     for (a, b) in [(0, 10), (10, 30), (30, 60)] {
         s.execute("line", &json!({ "points": [[a, 0], [b, 0]] })).unwrap();
     }

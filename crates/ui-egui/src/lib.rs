@@ -991,6 +991,7 @@ impl CadApp {
         self.gpu_fault_tick(ctx);
         managers::plot_window_resume(self, ctx);
         hatchdlg::resume(self);
+        exchange::resume_save_picker(self);
         self.autosave_tick(ctx);
         menus::shortcuts(self, ctx);
         #[cfg(not(target_arch = "wasm32"))]

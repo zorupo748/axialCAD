@@ -531,7 +531,7 @@ impl Default for Settings {
             gridunit: Vec2::new(0.5, 0.5),
             gridmajor: 5,
             zoomfactor: 60,
-            measureinit: false,
+            measureinit: true,
             view_layer_snapshot: true,
             dynmode: true,
             dyndigrip: 31,
@@ -755,7 +755,7 @@ pub struct Session {
     /// Viewport size in pixels (from the UI; used for zoom and pick apertures).
     pub viewport_px: (f64, f64),
     pub clipboard: Vec<Entity>,
-    pub clipboard_base: Vec2,
+    pub clipboard_base: Vec3,
     pub pending_window: Option<PendingWindow>,
     /// A selection mode typed at "Select objects" (W, C, F, WP, CP) collecting its points.
     pub select_mode: Option<select::SelectMode>,
@@ -793,7 +793,8 @@ impl Default for Session {
 impl Session {
     pub fn new() -> Self {
         let mut s = Session::empty();
-        s.new_drawing(false);
+        let metric = s.settings.measureinit;
+        s.new_drawing(metric);
         s
     }
     /// Invalidate spatial 3D cursor tracking and transient dispatch flags.
@@ -834,7 +835,7 @@ impl Session {
             tracking: snap::tracking::Tracker::default(),
             viewport_px: (1200.0, 800.0),
             clipboard: Vec::new(),
-            clipboard_base: Vec2::ZERO,
+            clipboard_base: Vec3::ZERO,
             pending_window: None,
             select_mode: None,
             select_single: false,
@@ -1575,6 +1576,8 @@ impl Session {
                                 | "circle"
                                 | "rectang"
                                 | "text"
+                                | "copybase"
+                                | "pasteclip"
                         ) =>
                     {
                         Input::Point(p3.xy())

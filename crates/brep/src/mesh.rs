@@ -95,11 +95,38 @@ impl TriangleMesh {
         total
     }
 
+    /// Return a new mesh uniformly scaled by a strictly positive finite factor.
+    ///
+    /// Outward unit normals remain unchanged by uniform positive scaling.
+    pub fn scaled(&self, factor: f64) -> Result<Self, BrepError> {
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(BrepError::InvalidGeometry(format!("STL scale factor must be positive and finite, got {factor}")));
+        }
+        if (factor - 1.0).abs() <= 1e-12 {
+            return Ok(self.clone());
+        }
+        Ok(TriangleMesh {
+            positions: self.positions.iter().map(|p| *p * factor).collect(),
+            triangles: self.triangles.clone(),
+            normals: self.normals.clone(),
+        })
+    }
+
     /// Analyze topology and manifoldness by quantizing and unifying vertices within `merge_tol`.
+    ///
+    /// Note: checking closedness (`open_edges == 0`), manifoldness (`non_manifold_edges == 0`),
+    /// orientation consistency, degenerate faces, and positive signed volume does NOT guarantee
+    /// absence of geometric self-intersections.
     pub fn analyze_topology(&self, merge_tol: f64) -> TopologyReport {
+        if !self.is_finite() {
+            return TopologyReport { triangle_count: self.triangles.len(), all_finite: false, ..Default::default() };
+        }
         let tol = if merge_tol.is_finite() && merge_tol > 1e-12 { merge_tol } else { 1e-4 };
 
-        let quant = |p: Vec3| -> (i64, i64, i64) { ((p.x / tol).round() as i64, (p.y / tol).round() as i64, (p.z / tol).round() as i64) };
+        let quant = |p: Vec3| -> (i64, i64, i64) {
+            let q = |v: f64| -> i64 { (v / tol).round().clamp(i64::MIN as f64, i64::MAX as f64) as i64 };
+            (q(p.x), q(p.y), q(p.z))
+        };
 
         let mut vertex_lut: HashMap<(i64, i64, i64), usize> = HashMap::new();
         let mut unified_indices: Vec<[usize; 3]> = Vec::with_capacity(self.triangles.len());
@@ -119,7 +146,7 @@ impl TriangleMesh {
         let mut report = TopologyReport {
             triangle_count: self.triangles.len(),
             unique_vertex_count: vertex_lut.len(),
-            all_finite: self.is_finite(),
+            all_finite: true,
             signed_volume: self.signed_volume(),
             ..Default::default()
         };
@@ -128,9 +155,15 @@ impl TriangleMesh {
         let mut directed_edges: HashSet<(usize, usize)> = HashSet::new();
         let mut orientation_ok = true;
 
-        for idxs in &unified_indices {
+        for (tri_idx, idxs) in unified_indices.iter().enumerate() {
             let (i0, i1, i2) = (idxs[0], idxs[1], idxs[2]);
-            if i0 == i1 || i1 == i2 || i2 == i0 {
+            let zero_area = self.triangles.get(tri_idx).is_none_or(|t| {
+                let (Some(p0), Some(p1), Some(p2)) = (self.positions.get(t[0]), self.positions.get(t[1]), self.positions.get(t[2])) else {
+                    return true;
+                };
+                (*p1 - *p0).cross(*p2 - *p0).len() <= 1e-12
+            });
+            if i0 == i1 || i1 == i2 || i2 == i0 || zero_area {
                 report.degenerate_faces = report.degenerate_faces.saturating_add(1);
                 continue;
             }
@@ -159,10 +192,63 @@ impl TriangleMesh {
         report
     }
 
+    /// Validate that this mesh is suitable for binary STL printing export (closed, manifold,
+    /// consistently outward oriented, non-degenerate, positive volume, f32-representable).
+    ///
+    /// Note: this check does not prove the absence of geometric self-intersections.
+    pub fn validate_for_stl(&self, merge_tol: f64) -> Result<TopologyReport, BrepError> {
+        if self.triangles.is_empty() {
+            return Err(BrepError::InvalidGeometry("STL mesh contains no triangles".into()));
+        }
+        if !self.is_finite()
+            || self.positions.iter().any(|p| !(p.x as f32).is_finite() || !(p.y as f32).is_finite() || !(p.z as f32).is_finite())
+            || self.normals.iter().any(|n| !(n.x as f32).is_finite() || !(n.y as f32).is_finite() || !(n.z as f32).is_finite())
+        {
+            return Err(BrepError::InvalidGeometry("STL mesh contains non-finite coordinates or overflows 32-bit float range".into()));
+        }
+
+        let report = self.analyze_topology(merge_tol);
+        if report.degenerate_faces > 0 {
+            return Err(BrepError::InvalidGeometry(format!(
+                "STL validation failed: {} degenerate triangle(s) detected",
+                report.degenerate_faces
+            )));
+        }
+        if report.open_edges > 0 {
+            return Err(BrepError::InvalidGeometry(format!(
+                "STL validation failed: mesh is not closed ({} open boundary edge(s))",
+                report.open_edges
+            )));
+        }
+        if report.non_manifold_edges > 0 {
+            return Err(BrepError::InvalidGeometry(format!(
+                "STL validation failed: {} non-manifold edge(s) detected",
+                report.non_manifold_edges
+            )));
+        }
+        if !report.consistent_orientation {
+            return Err(BrepError::InvalidGeometry("STL validation failed: inconsistent triangle winding orientation".into()));
+        }
+        if report.signed_volume <= 1e-9 {
+            return Err(BrepError::InvalidGeometry(format!(
+                "STL validation failed: mesh has non-positive or inverted signed volume ({:.6})",
+                report.signed_volume
+            )));
+        }
+        Ok(report)
+    }
+
+    /// Serialize binary STL into a byte buffer.
+    pub fn to_stl_binary_bytes(&self) -> Result<Vec<u8>, BrepError> {
+        let mut buf = Vec::with_capacity(84usize.saturating_add(self.triangles.len().saturating_mul(50)));
+        self.write_stl_binary(&mut buf)?;
+        Ok(buf)
+    }
+
     /// Write binary STL format to a stream.
     pub fn write_stl_binary<W: Write>(&self, w: &mut W) -> Result<(), BrepError> {
         let mut header = [0u8; 80];
-        let title = b"CADCraft B-Rep Binary STL Export";
+        let title = b"axialCAD binary STL";
         header[..title.len()].copy_from_slice(title);
         w.write_all(&header).map_err(|e| BrepError::IoError(e.to_string()))?;
 

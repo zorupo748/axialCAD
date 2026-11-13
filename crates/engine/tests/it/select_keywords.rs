@@ -8,6 +8,7 @@ use serde_json::json;
 /// Three lines on the X axis: A 0–10, B 12–20, C 30–40.
 fn drawing() -> Session {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     for l in ["LINE 0,0 10,0", "LINE 12,0 20,0", "LINE 30,0 40,0"] {
         s.cmdline(l).unwrap();
         s.cmdline("").unwrap();

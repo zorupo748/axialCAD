@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use cadcraft_geom::Vec3;
 
 use crate::error::BrepError;
+use crate::mesh::TriangleMesh;
 use crate::recipe::{BooleanKind, EvaluateRecipe, FeatureOp, Recipe};
 use crate::snapshot::{BREP_FORMAT_VERSION, KERNEL_REVISION};
 use crate::solid::{BrepSolid, SubtractOptions};
@@ -65,6 +66,47 @@ fn test_extrusion_negative_direction_and_topology() {
     let topo = mesh.analyze_topology(1e-4);
     assert_eq!(topo.open_edges, 0, "must be a closed manifold solid");
     assert_eq!(topo.non_manifold_edges, 0, "must have zero non-manifold edges");
+    assert_eq!(topo.degenerate_faces, 0, "must have zero degenerate faces");
+    assert!(topo.consistent_orientation, "normal orientation must be consistent");
+    assert!(topo.signed_volume > 0.0, "outward normals must give positive signed volume, got {}", topo.signed_volume);
+}
+
+#[test]
+fn test_cw_and_inclined_extrusion_outward_normals_and_through_hole() {
+    // Clockwise base polygon extruded in +Z and -Z must still produce outward normals (+volume)
+    let cw = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 30.0, 0.0), Vec3::new(40.0, 30.0, 0.0), Vec3::new(40.0, 0.0, 0.0)];
+    let solid_pos = BrepSolid::extrude(&cw, Vec3::new(0.0, 0.0, 5.0)).expect("cw +Z extrude");
+    let rep_pos = solid_pos.triangulate(0.05).expect("triangulate").validate_for_stl(1e-5).expect("valid STL mesh");
+    assert!((rep_pos.signed_volume - 6000.0).abs() < 1e-2);
+
+    let solid_neg = BrepSolid::extrude(&cw, Vec3::new(0.0, 0.0, -5.0)).expect("cw -Z extrude");
+    let rep_neg = solid_neg.triangulate(0.05).expect("triangulate").validate_for_stl(1e-5).expect("valid STL mesh");
+    assert!((rep_neg.signed_volume - 6000.0).abs() < 1e-2);
+
+    // Inclined profile (tilted 30 degrees around X) extruded along its local normal
+    let angle = std::f64::consts::FRAC_PI_6;
+    let rot_x = |x: f64, y: f64| Vec3::new(x, y * angle.cos(), y * angle.sin());
+    let inclined = vec![rot_x(0.0, 0.0), rot_x(40.0, 0.0), rot_x(40.0, 30.0), rot_x(0.0, 30.0)];
+    let normal = Vec3::new(0.0, -angle.sin(), angle.cos()).normalized() * 5.0;
+    let solid_inc = BrepSolid::extrude(&inclined, normal).expect("inclined extrude");
+    let rep_inc = solid_inc.triangulate(0.05).expect("triangulate").validate_for_stl(1e-5).expect("inclined STL valid");
+    assert!((rep_inc.signed_volume - 6000.0).abs() < 1e-2);
+
+    // Standalone cylinder at tol=0.05
+    let cyl_only = BrepSolid::cylinder(Vec3::new(20.0, 15.0, 0.0), 4.0, 5.0, Vec3::Z).expect("cyl only");
+    let rep_cyl = cyl_only.triangulate(0.05).expect("triangulate cyl").validate_for_stl(1e-5).expect("standalone cylinder STL valid");
+    assert!((rep_cyl.signed_volume - std::f64::consts::PI * 16.0 * 5.0).abs() < 2.0);
+
+    // Extruded plate 40x30x5 with through-hole diameter 8mm (radius 4mm) at center (20, 15)
+    let hole_cyl = BrepSolid::cylinder(Vec3::new(20.0, 15.0, -1.0), 4.0, 7.0, Vec3::Z).expect("hole cyl");
+    let plate_hole = solid_pos.subtract(&hole_cyl, SubtractOptions::default()).expect("subtract hole");
+    let rep_coarse = plate_hole.triangulate(0.25).expect("triangulate").validate_for_stl(1e-5).expect("valid STL at tol=0.25");
+    let expected_vol = 40.0 * 30.0 * 5.0 - std::f64::consts::PI * 16.0 * 5.0;
+    assert!((rep_coarse.signed_volume - expected_vol).abs() < 20.0, "got {}", rep_coarse.signed_volume);
+
+    // Upstream truck_meshalgo produces open trim seam edges on boolean cylinder cuts at tol=0.05;
+    // validate_for_stl must reject rather than passing an unclosed STL mesh.
+    assert!(plate_hole.triangulate(0.05).expect("triangulate").validate_for_stl(1e-5).is_err());
 }
 
 #[test]
@@ -304,4 +346,67 @@ fn test_recipe_evaluation_reconstructs_solid() {
     assert!((bbox.max.y - 120.0).abs() < 1e-2);
     assert!((bbox.min.z - 30.0).abs() < 1e-2);
     assert!((bbox.max.z - 80.0).abs() < 1e-2);
+}
+
+#[test]
+fn test_binary_stl_header_and_layout_invariants() {
+    // Deterministic in-memory mesh fixture with fractional f64 values to check f32 conversion,
+    // explicit normals, signed vertex positions, and 2-triangle serialization.
+    let mesh = TriangleMesh {
+        positions: vec![
+            Vec3::new(-1.25, 2.5, 3.123456789),
+            Vec3::new(40.0, 0.0, -0.5),
+            Vec3::new(40.0, 30.0, 5.0),
+            Vec3::new(0.0, 30.0, 5.0),
+        ],
+        triangles: vec![[0, 1, 2], [0, 2, 3]],
+        normals: vec![Vec3::new(0.0, -0.5, 0.8660254037844386), Vec3::new(0.125, 0.25, 0.96024)],
+    };
+
+    // Independent binary STL reference encoding (never calls TriangleMesh::write_stl_binary).
+    let mut expected_header = [0u8; 80];
+    let title = b"axialCAD binary STL";
+    expected_header[..title.len()].copy_from_slice(title);
+
+    let mut expected_body = Vec::new();
+    expected_body.extend_from_slice(&(mesh.triangles.len() as u32).to_le_bytes());
+    for (idx, tri) in mesh.triangles.iter().enumerate() {
+        let n = mesh.normals[idx];
+        let p0 = mesh.positions[tri[0]];
+        let p1 = mesh.positions[tri[1]];
+        let p2 = mesh.positions[tri[2]];
+        for v in [n, p0, p1, p2] {
+            expected_body.extend_from_slice(&(v.x as f32).to_le_bytes());
+            expected_body.extend_from_slice(&(v.y as f32).to_le_bytes());
+            expected_body.extend_from_slice(&(v.z as f32).to_le_bytes());
+        }
+        expected_body.extend_from_slice(&0u16.to_le_bytes());
+    }
+
+    let actual = mesh.to_stl_binary_bytes().expect("serialize deterministic fixture");
+
+    // A. Exact 80-byte header with zero padding.
+    assert_eq!(&actual[..80], &expected_header[..]);
+    assert!(actual[title.len()..80].iter().all(|&b| b == 0));
+
+    // B. u32 little-endian triangle count.
+    let count_le = u32::from_le_bytes([actual[80], actual[81], actual[82], actual[83]]) as usize;
+    assert_eq!(count_le, mesh.triangles.len());
+
+    // C. Total byte size is 84 + 50 * triangles.
+    assert_eq!(actual.len(), 84 + 50 * mesh.triangles.len());
+
+    // D & E. Normals, vertices (after f32 conversion), attributes (=0), and body bytes from offset 80
+    // match the independent binary reference byte-for-byte.
+    assert_eq!(&actual[80..], &expected_body[..]);
+
+    // Also verify plate 40x30x5 mm B-Rep serialization layout (12 triangles, 684 bytes).
+    let rect = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(40.0, 0.0, 0.0), Vec3::new(40.0, 30.0, 0.0), Vec3::new(0.0, 30.0, 0.0)];
+    let plate = BrepSolid::extrude(&rect, Vec3::new(0.0, 0.0, 5.0)).expect("extrude plate");
+    let plate_mesh = plate.triangulate(0.05).expect("triangulate plate");
+    plate_mesh.validate_for_stl(1e-5).expect("plate mesh valid for STL");
+    let plate_bytes = plate_mesh.to_stl_binary_bytes().expect("serialize plate");
+    assert_eq!(&plate_bytes[..80], &expected_header[..]);
+    assert_eq!(u32::from_le_bytes([plate_bytes[80], plate_bytes[81], plate_bytes[82], plate_bytes[83]]), 12);
+    assert_eq!(plate_bytes.len(), 684);
 }

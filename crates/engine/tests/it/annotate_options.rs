@@ -88,6 +88,7 @@ fn dimangular_quadrant_locks_the_measured_angle() {
 #[test]
 fn dimarc_partial_measures_part_of_the_arc() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     s.script("arc c 0,0 -10,0 10,0\n").unwrap();
     assert!(matches!(last(&s), EntityKind::Arc(_)), "{:?}", last(&s));
     s.script("dimarc 0,-10 p 10,0 0,-10 5,-12\n").unwrap();
