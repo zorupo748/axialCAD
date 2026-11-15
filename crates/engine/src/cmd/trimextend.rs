@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use cadcraft_doc::{Drawing, EntityKind, Handle};
+use cadcraft_doc::{Drawing, Entity, EntityKind, Handle};
 use cadcraft_geom::{Bounds2, Line, Vec2, line_line};
 use serde_json::{Value, json};
 
@@ -348,7 +348,11 @@ impl Interactive for TrimM {
                     kw.push("eRase");
                 }
                 kw.push("Undo");
-                Prompt::new(msg, Accept::POINT).kw(&kw)
+                let mut p = Prompt::new(msg, Accept::POINT).kw(&kw);
+                if !self.extend {
+                    p.suppress_hover = true;
+                }
+                p
             }
             Stage::Edges(_) => Prompt::new("Select objects or", Accept::SELECT).default("select all"),
             Stage::Erase(_) => Prompt::new("Select objects to erase or", Accept::SELECT).default("exit"),
@@ -479,7 +483,16 @@ impl Interactive for TrimM {
                         self.stage = Stage::Crossing(Some(p));
                         return Ok(Step::Continue);
                     };
-                    let r = self.step(s, |m, s| apply(s, h, p, extending, m.edges(quick, implied), quick).map(|_| ()));
+                    let r = self.step(s, |m, s| {
+                        let new_hs = apply(s, h, p, extending, m.edges(quick, implied), quick)?;
+                        if let Some(ref mut es) = m.edges {
+                            if let Some(pos) = es.iter().position(|x| *x == h) {
+                                es.remove(pos);
+                                es.extend(new_hs);
+                            }
+                        }
+                        Ok(())
+                    });
                     if let Err(e) = r {
                         s.echo(e.to_string());
                     }
@@ -528,5 +541,26 @@ impl Interactive for TrimM {
             Stage::Crossing(Some(a)) => vec![lwpoly(rect_vertices(*a, c), true)],
             _ => Vec::new(),
         }
+    }
+    fn preview_objects(&self, s: &Session, c: Vec2) -> Vec<Entity> {
+        if matches!(self.stage, Stage::Pick) && !self.extend {
+            let ap = s.pixel_size() * s.settings.pickbox.max(1.0) * 1.5;
+            let space = s.space();
+            let Ok(d) = s.doc() else { return Vec::new() };
+            if let Some(h) = crate::select::pick(d, &space, c, ap) {
+                let quick = quick_mode(s);
+                let implied = edge_mode(s);
+                let edges = self.edges(quick, implied);
+                if let Ok(removed) = super::modify::trim_preview(s, h, c, edges) {
+                    let mut common = d.entity(h).map(|e| e.common.clone()).unwrap_or_else(|| s.current_common());
+                    common.visible = true;
+                    common.linetype = "DASHED".into();
+                    common.color = cadcraft_color::Color::True(cadcraft_color::Rgb(0xe8, 0xe8, 0xe8));
+                    common.lineweight = cadcraft_doc::Lineweight::Mm100(35);
+                    return removed.into_iter().map(|k| Entity { handle: Handle(0), common: common.clone(), kind: k }).collect();
+                }
+            }
+        }
+        Vec::new()
     }
 }

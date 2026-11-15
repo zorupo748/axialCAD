@@ -72,6 +72,10 @@ pub struct Prompt {
     /// the routine writes, so it cannot be read for the word "Select" (#1598).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub picks_one: bool,
+    /// Suppress generic whole-object hover highlight at this prompt (e.g. TRIM in pick mode,
+    /// where the command previews the specific fragment being removed).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub suppress_hover: bool,
 }
 
 /// Parse `@distance<angle` (relative polar), returning `(distance, angle in radians)`.

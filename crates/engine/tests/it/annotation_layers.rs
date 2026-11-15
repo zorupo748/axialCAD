@@ -1,8 +1,7 @@
-//! Automatic layer assignment for dimensions and hatches.
-
 use cadcraft_color::Color;
-use cadcraft_engine::Session;
+use cadcraft_engine::{Input, Session};
 use cadcraft_engine::doc::{EntityKind, Handle};
+use cadcraft_geom::Vec2;
 use serde_json::json;
 
 fn doc(s: &Session) -> cadcraft_engine::doc::Drawing {
@@ -305,6 +304,108 @@ fn clayer_and_cecolor_are_preserved_for_hatch() {
 }
 
 #[test]
+fn preview_dimension_anticipates_dimclayer_properties() {
+    let mut s = Session::new();
+    let _ = s.new_drawing(false);
+    s.execute("layer.new", &json!({ "name": "Contornos vistos", "current": true, "color": 3 })).unwrap();
+    s.execute("setvar", &json!({ "name": "CECOLOR", "value": 3 })).unwrap();
+    assert_eq!(s.doc().unwrap().header.str("CLAYER", ""), "Contornos vistos");
+
+    s.start("dimlinear").unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 0.0))).unwrap();
+    s.input(Input::Point(Vec2::new(10.0, 0.0))).unwrap();
+
+    let pv = s.preview(Vec2::new(5.0, 3.0));
+    assert_eq!(pv.len(), 1);
+    let e = &pv[0];
+    assert!(matches!(e.kind, EntityKind::Dimension(_)));
+    assert_eq!(e.common.layer, "01 Cotas 0.18");
+    assert_eq!(e.common.color, Color::Index(11));
+
+    assert_eq!(s.doc().unwrap().header.str("CLAYER", ""), "Contornos vistos");
+    assert_eq!(s.doc().unwrap().header.i64("CECOLOR", 256), 3);
+    assert!(s.doc().unwrap().layer("01 Cotas 0.18").is_none());
+    assert_eq!(s.doc().unwrap().model.len(), 0);
+}
+
+#[test]
+fn preview_dimension_respects_existing_dimclayer_properties() {
+    let mut s = Session::new();
+    let _ = s.new_drawing(false);
+    s.execute("layer.new", &json!({ "name": "Contornos vistos", "current": true })).unwrap();
+    s.execute("layer.new", &json!({ "name": "01 Cotas 0.18", "color": 4 })).unwrap();
+
+    s.start("dimlinear").unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 0.0))).unwrap();
+    s.input(Input::Point(Vec2::new(10.0, 0.0))).unwrap();
+
+    let pv = s.preview(Vec2::new(5.0, 3.0));
+    assert_eq!(pv.len(), 1);
+    let e = &pv[0];
+    assert_eq!(e.common.layer, "01 Cotas 0.18");
+    assert_eq!(e.common.color, Color::Index(4));
+}
+
+#[test]
+fn preview_dimension_rejects_locked_off_frozen_layer() {
+    let mut s = Session::new();
+    let _ = s.new_drawing(false);
+    s.execute("layer.new", &json!({ "name": "01 Cotas 0.18" })).unwrap();
+    s.execute("layer.current", &json!({ "name": "01 Cotas 0.18" })).unwrap();
+    s.execute("line", &json!({ "points": [[0, 0], [1, 0]] })).unwrap();
+    let lh = s.doc().unwrap().model.last().unwrap().handle;
+    s.execute("laylck", &json!({ "handles": [lh.hex()] })).unwrap();
+
+    s.start("dimlinear").unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 0.0))).unwrap();
+    s.input(Input::Point(Vec2::new(10.0, 0.0))).unwrap();
+
+    let pv = s.preview(Vec2::new(5.0, 3.0));
+    assert!(pv.is_empty(), "preview should be rejected for locked layer without fallback");
+}
+
+#[test]
+fn preview_hatch_anticipates_hatchclayer_properties() {
+    let mut s = Session::new();
+    let _ = s.new_drawing(false);
+    s.execute("layer.new", &json!({ "name": "Walls", "current": true, "color": 1 })).unwrap();
+    s.execute("circle", &json!({ "center": [0, 0], "radius": 5 })).unwrap();
+
+    s.start("hatch").unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 0.0))).unwrap();
+
+    let pv = s.preview(Vec2::ZERO);
+    assert_eq!(pv.len(), 1);
+    let e = &pv[0];
+    assert!(matches!(e.kind, EntityKind::Hatch(_)));
+    assert_eq!(e.common.layer, "01 Rayados 0.18");
+    assert_eq!(e.common.color, Color::Index(8));
+
+    assert_eq!(s.doc().unwrap().header.str("CLAYER", ""), "Walls");
+    assert!(s.doc().unwrap().layer("01 Rayados 0.18").is_none());
+}
+
+#[test]
+fn cancel_preview_leaves_no_persistent_changes() {
+    let mut s = Session::new();
+    let _ = s.new_drawing(false);
+    s.execute("layer.new", &json!({ "name": "Walls", "current": true })).unwrap();
+    let initial_layers = s.doc().unwrap().layers.len();
+    let initial_entities = s.doc().unwrap().model.len();
+
+    s.start("dimlinear").unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 0.0))).unwrap();
+    s.input(Input::Point(Vec2::new(10.0, 0.0))).unwrap();
+    let _ = s.preview(Vec2::new(5.0, 3.0));
+    s.cancel();
+
+    assert_eq!(s.doc().unwrap().layers.len(), initial_layers);
+    assert_eq!(s.doc().unwrap().model.len(), initial_entities);
+    assert_eq!(s.doc().unwrap().header.str("CLAYER", ""), "Walls");
+    assert!(s.doc().unwrap().layer("01 Cotas 0.18").is_none());
+}
+
+#[test]
 fn other_entity_types_use_clayer_not_annotation_layer() {
     let mut s = Session::new();
     let _ = s.new_drawing(false);
@@ -315,3 +416,25 @@ fn other_entity_types_use_clayer_not_annotation_layer() {
     let ch = s.doc().unwrap().model.last().unwrap().handle;
     assert_eq!(doc(&s).entity(ch).unwrap().common.layer, "0");
 }
+
+#[test]
+fn preview_hatchpick_anticipates_hatchclayer_properties() {
+    let mut s = Session::new();
+    let _ = s.new_drawing(false);
+    s.execute("layer.new", &json!({ "name": "Contornos vistos", "current": true, "color": 2 })).unwrap();
+    s.execute("circle", &json!({ "center": [0, 0], "radius": 5 })).unwrap();
+
+    // Start HATCHPICK in Points mode as the dialog does
+    s.start("hatchpick").unwrap();
+    s.input(Input::Keyword("Points".into())).unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 0.0))).unwrap();
+
+    let pv = s.preview(Vec2::ZERO);
+    assert_eq!(pv.len(), 1);
+    let e = &pv[0];
+    assert!(matches!(e.kind, EntityKind::Hatch(_)));
+    assert_eq!(e.common.layer, "01 Rayados 0.18");
+    assert_eq!(e.common.color, Color::Index(8));
+    assert_eq!(s.doc().unwrap().header.str("CLAYER", ""), "Contornos vistos");
+}
+

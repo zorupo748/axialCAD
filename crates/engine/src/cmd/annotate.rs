@@ -4,7 +4,7 @@
 //! DIMBREAK and DIMINSPECT in `annotate_dimedit.rs`.
 
 use cadcraft_color::Color;
-use cadcraft_doc::{AssocSnap, DimAssoc, DimKind, Dimension, EntityKind, Handle, MLeader, MText, Prim};
+use cadcraft_doc::{AssocSnap, DimAssoc, DimKind, Dimension, Entity, EntityKind, Handle, MLeader, MText, Prim};
 use cadcraft_geom::{Segment, Vec2, Vec3};
 use serde_json::{Value, json};
 
@@ -157,6 +157,18 @@ fn linear_kind(p1: Vec2, p2: Vec2, at: Vec2, rotation: Option<f64>, aligned: boo
     if aligned { DimKind::Aligned } else { DimKind::Linear { rotation: rotation.unwrap_or_else(|| auto_rotation(p1, p2, at)) } }
 }
 
+fn dim_layer_name(s: &Session) -> String {
+    s.doc().map(|d| d.header.str("DIMCLAYER", "01 Cotas 0.18")).unwrap_or_else(|_| "01 Cotas 0.18".into())
+}
+
+fn dim_preview_entity(s: &Session, kind: EntityKind) -> Vec<Entity> {
+    let layer = dim_layer_name(s);
+    match s.annotation_preview_common(&layer, Color::Index(11)) {
+        Ok(common) => vec![Entity { handle: Handle(0), common, kind }],
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Add a dimension. With DIMASSOC on, definition points that sit on object endpoints,
 /// vertices or centres are attached to them (associative dimensions).
 fn add_dim(s: &mut Session, k: EntityKind) -> Result<Handle> {
@@ -167,7 +179,7 @@ fn add_dim(s: &mut Session, k: EntityKind) -> Result<Handle> {
     {
         dm.assoc = crate::assoc::reassociate(s.doc()?, &s.space(), dm);
     }
-    let layer = s.doc().map(|d| d.header.str("DIMCLAYER", "01 Cotas 0.18")).unwrap_or_else(|_| "01 Cotas 0.18".into());
+    let layer = dim_layer_name(s);
     let h = s.add_entity_on_layer(k, &layer, Color::Index(11))?;
     s.last_dim = Some(h);
     Ok(h)
@@ -1097,10 +1109,15 @@ impl Interactive for LinearM {
             _ => Ok(Step::Continue),
         }
     }
-    fn preview(&self, s: &Session, c: Vec2) -> Vec<EntityKind> {
+    fn preview(&self, _s: &Session, c: Vec2) -> Vec<EntityKind> {
         match self.pts.as_slice() {
             [a] => vec![super::helpers::line(*a, c)],
-            [a, b] => vec![self.text.apply(dim(s, linear_kind(*a, *b, c, self.rotation, self.aligned), c, *a, *b, Vec2::ZERO, Vec2::ZERO, ""))],
+            _ => Vec::new(),
+        }
+    }
+    fn preview_objects(&self, s: &Session, c: Vec2) -> Vec<Entity> {
+        match self.pts.as_slice() {
+            [a, b] => dim_preview_entity(s, self.text.apply(dim(s, linear_kind(*a, *b, c, self.rotation, self.aligned), c, *a, *b, Vec2::ZERO, Vec2::ZERO, ""))),
             _ => Vec::new(),
         }
     }
@@ -1165,8 +1182,11 @@ impl Interactive for RadialM {
             _ => Ok(Step::Continue),
         }
     }
-    fn preview(&self, s: &Session, c: Vec2) -> Vec<EntityKind> {
-        self.target.map(|(ctr, r)| vec![self.kind(s, ctr, r, c)]).unwrap_or_default()
+    fn preview(&self, _s: &Session, _c: Vec2) -> Vec<EntityKind> {
+        Vec::new()
+    }
+    fn preview_objects(&self, s: &Session, c: Vec2) -> Vec<Entity> {
+        self.target.map(|(ctr, r)| dim_preview_entity(s, self.kind(s, ctr, r, c))).unwrap_or_default()
     }
 }
 
@@ -1319,9 +1339,12 @@ impl Interactive for AngularM {
             _ => Ok(Step::Continue),
         }
     }
-    fn preview(&self, s: &Session, c: Vec2) -> Vec<EntityKind> {
+    fn preview(&self, _s: &Session, _c: Vec2) -> Vec<EntityKind> {
+        Vec::new()
+    }
+    fn preview_objects(&self, s: &Session, c: Vec2) -> Vec<Entity> {
         self.geometry()
-            .map(|(v, a, b)| vec![self.text.apply(dim(s, DimKind::Angular3P, self.located(v, c), a, b, v, Vec2::ZERO, ""))])
+            .map(|(v, a, b)| dim_preview_entity(s, self.text.apply(dim(s, DimKind::Angular3P, self.located(v, c), a, b, v, Vec2::ZERO, ""))))
             .unwrap_or_default()
     }
 }
@@ -1413,12 +1436,15 @@ impl Interactive for ArcLenM {
             _ => Ok(Step::Continue),
         }
     }
-    fn preview(&self, s: &Session, c: Vec2) -> Vec<EntityKind> {
+    fn preview(&self, _s: &Session, _c: Vec2) -> Vec<EntityKind> {
+        Vec::new()
+    }
+    fn preview_objects(&self, s: &Session, c: Vec2) -> Vec<Entity> {
         if self.partial.is_some() {
             return Vec::new();
         }
         self.arc
-            .map(|g| vec![self.text.apply(dim(s, DimKind::ArcLength, c, g.start_point(), g.end_point(), g.center, Vec2::ZERO, ""))])
+            .map(|g| dim_preview_entity(s, self.text.apply(dim(s, DimKind::ArcLength, c, g.start_point(), g.end_point(), g.center, Vec2::ZERO, ""))))
             .unwrap_or_default()
     }
 }
@@ -1479,8 +1505,11 @@ impl Interactive for OrdinateM {
             _ => Ok(Step::Continue),
         }
     }
-    fn preview(&self, s: &Session, c: Vec2) -> Vec<EntityKind> {
-        self.feature.map(|f| vec![self.kind(s, f, c)]).unwrap_or_default()
+    fn preview(&self, _s: &Session, _c: Vec2) -> Vec<EntityKind> {
+        Vec::new()
+    }
+    fn preview_objects(&self, s: &Session, c: Vec2) -> Vec<Entity> {
+        self.feature.map(|f| dim_preview_entity(s, self.kind(s, f, c))).unwrap_or_default()
     }
 }
 
@@ -1531,8 +1560,11 @@ impl Interactive for ChainM {
             _ => Ok(Step::Continue),
         }
     }
-    fn preview(&self, s: &Session, c: Vec2) -> Vec<EntityKind> {
-        last_linear(s).map(|d| vec![chained(s, &d, c, self.baseline)]).unwrap_or_default()
+    fn preview(&self, _s: &Session, _c: Vec2) -> Vec<EntityKind> {
+        Vec::new()
+    }
+    fn preview_objects(&self, s: &Session, c: Vec2) -> Vec<Entity> {
+        last_linear(s).map(|d| dim_preview_entity(s, chained(s, &d, c, self.baseline))).unwrap_or_default()
     }
 }
 

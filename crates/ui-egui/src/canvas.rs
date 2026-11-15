@@ -3891,13 +3891,43 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             let list = rebuilt_preview(&st.doc, extra.iter(), scale);
             draw_list(&painter, &xf, &list, bg, false);
         }
-    } else if let (Some(c), true) = (app.canvas.cursor, app.session.prompting()) {
+    } else if let (Some(c), true) = (
+        app.canvas.cursor.or_else(|| {
+            app.session
+                .running
+                .as_ref()
+                .is_some_and(|r| matches!(r.id.as_str(), "hatch" | "hatch.user" | "hatch.diag45" | "gradient" | "hatchpick"))
+                .then_some(app.session.cursor)
+        }),
+        app.session.prompting(),
+    ) {
         let ents = app.session.preview(c);
         if !ents.is_empty()
             && let Ok(st) = app.session.state()
         {
-            let list = rebuilt_preview(&st.doc, ents.iter(), scale);
-            draw_list(&painter, &xf, &list, bg, false);
+            let is_trim_pick = app.session.current_prompt().is_some_and(|p| p.suppress_hover);
+            let (mut dashed, normal): (Vec<_>, Vec<_>) =
+                ents.iter().cloned().partition(|e| is_trim_pick && e.common.linetype.eq_ignore_ascii_case("DASHED"));
+            if !normal.is_empty() {
+                let list = rebuilt_preview(&st.doc, normal.iter(), scale);
+                draw_list(&painter, &xf, &list, bg, false);
+            }
+            if !dashed.is_empty() {
+                for e in &mut dashed {
+                    e.common.linetype = "Continuous".into();
+                }
+                let list = rebuilt_preview(&st.doc, dashed.iter(), scale);
+                let bg_col = color32(bg);
+                let fg_col = crate::theme::crosshair_color(bg_col);
+                for prim in &list.prims {
+                    let pts = list.points(prim);
+                    let screen_pts: Vec<Pos2> = pts.iter().map(|q| xf.to_screen(*q)).collect();
+                    if screen_pts.len() >= 2 {
+                        painter.add(Shape::line(screen_pts.clone(), Stroke::new(4.5, bg_col)));
+                        painter.extend(Shape::dashed_line(&screen_pts, Stroke::new(2.0, fg_col), 6.0, 4.0));
+                    }
+                }
+            }
             let ucs = app.session.ucs();
             for k in &ents {
                 match &k.kind {
@@ -3933,8 +3963,9 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 }
             }
         }
-    } else if app.ui.dialog.as_deref() == Some("hatch")
-        && let Some(hd) = &app.hatch_dlg
+    }
+    if let Some(hd) = &app.hatch_dlg
+        && (app.ui.dialog.as_deref() == Some("hatch") || hd.picking.is_some())
         && (!hd.points.is_empty() || !hd.handles.is_empty())
     {
         let p = crate::hatchdlg::preview_params(&hd.fill);
@@ -3942,11 +3973,18 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         if !kinds.is_empty()
             && let Ok(st) = app.session.state()
         {
-            let common = app.session.current_common();
-            let ents: Vec<cadcraft_doc::Entity> =
-                kinds.into_iter().map(|k| cadcraft_doc::Entity { handle: cadcraft_doc::Handle(0), common: common.clone(), kind: k }).collect();
-            let list = rebuilt_preview(&st.doc, ents.iter(), scale);
-            draw_list(&painter, &xf, &list, bg, false);
+            let common = if let Some(edit_common) = hd.edit.first().and_then(|h| st.doc.entity(*h)).map(|e| e.common.clone()) {
+                Some(edit_common)
+            } else {
+                let layer = st.doc.header.str("HATCHCLAYER", "01 Rayados 0.18");
+                app.session.annotation_preview_common(&layer, cadcraft_color::Color::Index(8)).ok()
+            };
+            if let Some(common) = common {
+                let ents: Vec<cadcraft_doc::Entity> =
+                    kinds.into_iter().map(|k| cadcraft_doc::Entity { handle: cadcraft_doc::Handle(0), common: common.clone(), kind: k }).collect();
+                let list = rebuilt_preview(&st.doc, ents.iter(), scale);
+                draw_list(&painter, &xf, &list, bg, false);
+            }
         }
     }
     // Viewport-space selection windows stay aligned with the visible rectangle in every camera.
@@ -4097,7 +4135,12 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             // Use the painted sheet even in MSPACE, where the editing transform follows a
             // model viewport. The whole cursor takes one colour from its centre.
             let ink = paper_rect.map_or(t.crosshair, |paper| crate::theme::crosshair_color(if paper.contains(hp) { t.paper } else { surround }));
-            draw_crosshair(app, &painter, rect, hp, selecting, ink);
+            let show_pickbox = app.session.picking_objects();
+            let show_crosshair = match app.session.current_prompt() {
+                Some(p) => !p.picks_objects(),
+                None => true,
+            };
+            draw_crosshair(app, &painter, rect, hp, show_crosshair, show_pickbox, ink);
             if app.canvas.cycle_badge && app.canvas.cycle.is_none() {
                 cycle_badge(&painter, hp);
             }
@@ -4436,23 +4479,25 @@ fn draw_virtual_nav_cursor(painter: &egui::Painter, p: Pos2, is_orbit: bool) {
     }
 }
 
-fn draw_crosshair(app: &CadApp, p: &egui::Painter, rect: Rect, at: Pos2, pickbox: bool, ink: Color32) {
+fn draw_crosshair(app: &CadApp, p: &egui::Painter, rect: Rect, at: Pos2, show_crosshair: bool, show_pickbox: bool, ink: Color32) {
     let st = Stroke::new(1.0, ink);
-    let len = (rect.height() * app.session.settings.cursorsize as f32 / 100.0).max(12.0);
-    let pb = if pickbox { pickbox_half(app.session.settings.pickbox) } else { None };
-    let gap = pb.unwrap_or(0.0);
-    // Along the isometric plane's axes in isometric drafting.
-    if app.session.settings.isodraft {
-        for a in cadcraft_engine::snap::iso::cursor_axes(&app.session.settings) {
-            let dir = vec2(a.cos() as f32, -(a.sin() as f32));
-            p.line_segment([at - dir * len, at - dir * gap], st);
-            p.line_segment([at + dir * gap, at + dir * len], st);
+    let pb = if show_pickbox { pickbox_half(app.session.settings.pickbox) } else { None };
+    if show_crosshair {
+        let len = (rect.height() * app.session.settings.cursorsize as f32 / 100.0).max(12.0);
+        let gap = pb.unwrap_or(0.0);
+        // Along the isometric plane's axes in isometric drafting.
+        if app.session.settings.isodraft {
+            for a in cadcraft_engine::snap::iso::cursor_axes(&app.session.settings) {
+                let dir = vec2(a.cos() as f32, -(a.sin() as f32));
+                p.line_segment([at - dir * len, at - dir * gap], st);
+                p.line_segment([at + dir * gap, at + dir * len], st);
+            }
+        } else {
+            p.line_segment([pos2(at.x - len, at.y), pos2(at.x - gap, at.y)], st);
+            p.line_segment([pos2(at.x + gap, at.y), pos2(at.x + len, at.y)], st);
+            p.line_segment([pos2(at.x, at.y - len), pos2(at.x, at.y - gap)], st);
+            p.line_segment([pos2(at.x, at.y + gap), pos2(at.x, at.y + len)], st);
         }
-    } else {
-        p.line_segment([pos2(at.x - len, at.y), pos2(at.x - gap, at.y)], st);
-        p.line_segment([pos2(at.x + gap, at.y), pos2(at.x + len, at.y)], st);
-        p.line_segment([pos2(at.x, at.y - len), pos2(at.x, at.y - gap)], st);
-        p.line_segment([pos2(at.x, at.y + gap), pos2(at.x, at.y + len)], st);
     }
     if let Some(pb) = pb {
         p.rect_stroke(Rect::from_center_size(at, vec2(pb * 2.0, pb * 2.0)), 0.0, st, egui::StrokeKind::Middle);
@@ -5298,6 +5343,23 @@ pub(crate) mod tests {
             let a_old_y = rect.center().y - qy_old * (scale as f32);
             assert!(((a_old_y - b.y) - 33.33333).abs() < 0.1, "Old uncorrected formula moved only 33.33 px");
         }
+    }
+
+    #[test]
+    fn crosshair_modes_selection_vs_point_input() {
+        let app = CadApp::new(cadcraft_engine::Session::default(), crate::Services::default());
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
+        let painter = egui::Painter::new(ctx, egui::LayerId::background(), rect);
+
+        // Selection mode: show_crosshair = false, show_pickbox = true
+        draw_crosshair(&app, &painter, rect, pos2(400.0, 300.0), false, true, Color32::WHITE);
+
+        // Point input mode: show_crosshair = true, show_pickbox = false
+        draw_crosshair(&app, &painter, rect, pos2(400.0, 300.0), true, false, Color32::WHITE);
+
+        // Idle mode with pickfirst: show_crosshair = true, show_pickbox = true
+        draw_crosshair(&app, &painter, rect, pos2(400.0, 300.0), true, true, Color32::WHITE);
     }
 }
 

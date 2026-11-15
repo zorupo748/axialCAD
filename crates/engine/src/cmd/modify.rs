@@ -907,14 +907,19 @@ fn prim_to_segments(p: &Prim) -> Vec<Segment> {
     }
 }
 
-/// Trim `h` at the piece containing `pick`. Returns the handles that replace it.
-pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Result<Vec<Handle>> {
+#[derive(Clone, Debug)]
+pub(crate) struct TrimPieces {
+    pub kept: Vec<EntityKind>,
+    pub removed: Vec<EntityKind>,
+}
+
+pub(crate) fn trim_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges) -> Result<TrimPieces> {
     if super::curves::is_locked(s, h) {
         return Err(EngineError::Other("The object is on a locked layer.".into()));
     }
     let e = s.doc()?.entity(h).map(|e| (**e).clone()).ok_or_else(|| EngineError::Other("no such object".into()))?;
     let cut = edge_segments(s, edges, h)?;
-    let pieces: Vec<EntityKind> = match &e.kind {
+    match &e.kind {
         EntityKind::Line(l) => {
             let ln = Line::new(l.a.xy(), l.b.xy());
             let mut ts: Vec<f64> = cut
@@ -924,20 +929,36 @@ pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Resu
                 .filter(|t| *t > 1e-9 && *t < 1.0 - 1e-9)
                 .collect();
             ts.sort_by(f64::total_cmp);
-            let tp = ln.param_of(pick).clamp(0.0, 1.0);
-            let lo = ts.iter().copied().filter(|t| *t < tp).fold(0.0, f64::max);
-            let hi = ts.iter().copied().filter(|t| *t > tp).fold(1.0, f64::min);
-            if lo == 0.0 && hi == 1.0 {
+            ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if ts.is_empty() {
                 return Err(EngineError::Other("Object does not intersect a cutting edge.".into()));
             }
-            let mut v = Vec::new();
+            let tp = ln.param_of(pick).clamp(0.0, 1.0);
+            let mut cuts = Vec::with_capacity(ts.len() + 2);
+            cuts.push(0.0);
+            cuts.extend(&ts);
+            cuts.push(1.0);
+            let mut lo = cuts[0];
+            let mut hi = cuts[1];
+            for w in cuts.windows(2) {
+                if tp >= w[0] - 1e-9 && tp <= w[1] + 1e-9 {
+                    lo = w[0];
+                    hi = w[1];
+                    break;
+                }
+            }
+            if (hi - lo).abs() < 1e-9 {
+                return Err(EngineError::Other("No piece to trim at pick point.".into()));
+            }
+            let mut kept = Vec::new();
             if lo > 0.0 {
-                v.push(line(ln.a, ln.at(lo)));
+                kept.push(line(ln.a, ln.at(lo)));
             }
             if hi < 1.0 {
-                v.push(line(ln.at(hi), ln.b));
+                kept.push(line(ln.at(hi), ln.b));
             }
-            v
+            let removed = vec![line(ln.at(lo), ln.at(hi))];
+            Ok(TrimPieces { kept, removed })
         }
         EntityKind::Arc(a) => {
             let ga = Arc::new(a.center.xy(), a.radius, a.start, a.end);
@@ -947,20 +968,37 @@ pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Resu
             let mut ts: Vec<f64> =
                 cut.iter().flat_map(|c| intersect_ext(&seg, c, false)).map(param).filter(|t| *t > 1e-9 && *t < sweep - 1e-9).collect();
             ts.sort_by(f64::total_cmp);
-            let tp = param(pick).min(sweep);
-            let lo = ts.iter().copied().filter(|t| *t < tp).fold(0.0, f64::max);
-            let hi = ts.iter().copied().filter(|t| *t > tp).fold(sweep, f64::min);
-            if lo == 0.0 && hi == sweep {
+            ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if ts.is_empty() {
                 return Err(EngineError::Other("Object does not intersect a cutting edge.".into()));
             }
-            let mut v = Vec::new();
+            let p_on_arc = ga.closest(pick);
+            let tp = param(p_on_arc).min(sweep);
+            let mut cuts = Vec::with_capacity(ts.len() + 2);
+            cuts.push(0.0);
+            cuts.extend(&ts);
+            cuts.push(sweep);
+            let mut lo = cuts[0];
+            let mut hi = cuts[1];
+            for w in cuts.windows(2) {
+                if tp >= w[0] - 1e-9 && tp <= w[1] + 1e-9 {
+                    lo = w[0];
+                    hi = w[1];
+                    break;
+                }
+            }
+            if (hi - lo).abs() < 1e-9 {
+                return Err(EngineError::Other("No piece to trim at pick point.".into()));
+            }
+            let mut kept = Vec::new();
             if lo > 0.0 {
-                v.push(arc(&Arc::new(ga.center, ga.radius, ga.start, ga.start + lo)));
+                kept.push(arc(&Arc::new(ga.center, ga.radius, ga.start, ga.start + lo)));
             }
             if hi < sweep {
-                v.push(arc(&Arc::new(ga.center, ga.radius, ga.start + hi, ga.end)));
+                kept.push(arc(&Arc::new(ga.center, ga.radius, ga.start + hi, ga.end)));
             }
-            v
+            let removed = vec![arc(&Arc::new(ga.center, ga.radius, ga.start + lo, ga.start + hi))];
+            Ok(TrimPieces { kept, removed })
         }
         EntityKind::Circle(c) => {
             let full = Segment::Arc { arc: Arc { center: c.center.xy(), radius: c.radius, start: 0.0, end: TAU - 1e-12 }, ccw: true };
@@ -973,25 +1011,35 @@ pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Resu
             let ap = c.center.xy().angle_to(pick);
             // The removed arc runs between the two intersections around the pick.
             let n = angs.len();
-            let mut keep = None;
+            let mut kept = None;
+            let mut removed = None;
             for i in 0..n {
                 let a0 = angs[i];
                 let a1 = angs[(i + 1) % n];
                 if angle_in_sweep(ap, a0, a1) {
-                    keep = Some(arc(&Arc::new(c.center.xy(), c.radius, a1, a0)));
+                    kept = Some(arc(&Arc::new(c.center.xy(), c.radius, a1, a0)));
+                    removed = Some(arc(&Arc::new(c.center.xy(), c.radius, a0, a1)));
                 }
             }
-            keep.into_iter().collect()
+            let kept = kept.into_iter().collect();
+            let removed = removed.into_iter().collect();
+            Ok(TrimPieces { kept, removed })
         }
-        EntityKind::LwPolyline(p) => trim_polyline(p, &cut, pick)?,
-        k => super::modify2::trim_other(k, &cut, pick)?,
-    };
+        EntityKind::LwPolyline(p) => trim_polyline(p, &cut, pick),
+        k => super::modify2::trim_other(k, &cut, pick),
+    }
+}
+
+/// Trim `h` at the piece containing `pick`. Returns the handles that replace it.
+pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Result<Vec<Handle>> {
+    let pieces = trim_geometry(s, h, pick, edges)?;
+    let e = s.doc()?.entity(h).map(|e| (**e).clone()).ok_or_else(|| EngineError::Other("no such object".into()))?;
     let common = e.common.clone();
     let space = s.space();
     let d = s.doc_mut()?;
     d.remove_entity(h);
     let mut out = Vec::new();
-    for k in pieces {
+    for k in pieces.kept {
         let nh = d.new_handle();
         if let Some(st) = d.space_mut(&space) {
             st.push(Entity { handle: nh, common: common.clone(), kind: k });
@@ -999,6 +1047,12 @@ pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Resu
         }
     }
     Ok(out)
+}
+
+/// The piece of `h` that would be removed by a trim at `pick`.
+pub(crate) fn trim_preview(s: &Session, h: Handle, pick: Vec2, edges: Edges) -> Result<Vec<EntityKind>> {
+    let pieces = trim_geometry(s, h, pick, edges)?;
+    Ok(pieces.removed)
 }
 
 /// Sub-polyline between length parameters `a` and `b` (open polylines).
@@ -1033,7 +1087,7 @@ fn sub_polyline(segs: &[Segment], a: f64, b: f64) -> Vec<PolyVertex> {
     out
 }
 
-fn trim_polyline(p: &cadcraft_doc::LwPolyline, cut: &[Segment], pick: Vec2) -> Result<Vec<EntityKind>> {
+fn trim_polyline(p: &cadcraft_doc::LwPolyline, cut: &[Segment], pick: Vec2) -> Result<TrimPieces> {
     let pl = Polyline { vertices: p.vertices.clone(), closed: p.closed };
     let segs = pl.segments();
     let total: f64 = segs.iter().map(Segment::len).sum();
@@ -1061,31 +1115,39 @@ fn trim_polyline(p: &cadcraft_doc::LwPolyline, cut: &[Segment], pick: Vec2) -> R
     let lo = ts.iter().copied().filter(|t| *t < tp).fold(f64::NEG_INFINITY, f64::max);
     let hi = ts.iter().copied().filter(|t| *t > tp).fold(f64::INFINITY, f64::min);
     let mk = |vs: Vec<PolyVertex>| lwpoly(vs, false);
-    let mut out = Vec::new();
+    let mut kept = Vec::new();
+    let mut removed = Vec::new();
     if p.closed {
         // Keep the complementary run from hi around to lo.
         // The pick lies before the first cut or after the last: the piece wraps past the start
         // vertex, so the run to keep is the stretch between the first and the last cut.
-        let (lo, hi) = (
+        let (lo_f, hi_f) = (
             if lo.is_finite() { lo } else { ts.last().copied().unwrap_or(0.0) - total },
             if hi.is_finite() { hi } else { ts.first().copied().unwrap_or(total) + total },
         );
         let doubled: Vec<Segment> = segs.iter().chain(segs.iter()).copied().collect();
-        let (a, mut b) = if hi > total { (hi - total, lo) } else { (hi, lo + total) };
+        let (a, mut b) = if hi_f > total { (hi_f - total, lo_f) } else { (hi_f, lo_f + total) };
         // A single cut leaves the whole outline, opened there.
         if b <= a + 1e-9 {
             b += total;
         }
-        out.push(mk(sub_polyline(&doubled, a, b)));
+        kept.push(mk(sub_polyline(&doubled, a, b)));
+        let (ra, rb) = if lo_f < 0.0 { (lo_f + total, hi_f + total) } else { (lo_f, hi_f) };
+        removed.push(mk(sub_polyline(&doubled, ra, rb)));
     } else {
         if lo.is_finite() {
-            out.push(mk(sub_polyline(&segs, 0.0, lo)));
+            kept.push(mk(sub_polyline(&segs, 0.0, lo)));
         }
         if hi.is_finite() {
-            out.push(mk(sub_polyline(&segs, hi, total)));
+            kept.push(mk(sub_polyline(&segs, hi, total)));
         }
+        let r_lo = if lo.is_finite() { lo } else { 0.0 };
+        let r_hi = if hi.is_finite() { hi } else { total };
+        removed.push(mk(sub_polyline(&segs, r_lo, r_hi)));
     }
-    Ok(out.into_iter().filter(|k| matches!(k, EntityKind::LwPolyline(l) if l.vertices.len() >= 2)).collect())
+    let kept = kept.into_iter().filter(|k| matches!(k, EntityKind::LwPolyline(l) if l.vertices.len() >= 2)).collect();
+    let removed = removed.into_iter().filter(|k| matches!(k, EntityKind::LwPolyline(l) if l.vertices.len() >= 2)).collect();
+    Ok(TrimPieces { kept, removed })
 }
 
 fn param_on(s: &Segment, p: Vec2) -> f64 {

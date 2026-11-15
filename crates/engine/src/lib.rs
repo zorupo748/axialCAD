@@ -1169,6 +1169,56 @@ impl Session {
         Ok(h)
     }
 
+    /// Check whether `layer_name` is valid for an annotation entity (dimension or hatch).
+    /// If the layer already exists, checks that it is not locked, off, or frozen.
+    pub fn check_annotation_layer(&self, layer_name: &str) -> Result<()> {
+        let d = self.doc()?;
+        if let Some(layer) = d.layer(layer_name) {
+            if layer.locked || !layer.on || layer.frozen {
+                return Err(EngineError::Other(format!("layer '{layer_name}' is locked, off or frozen")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Common properties for previewing an entity on an annotation layer (DIMCLAYER / HATCHCLAYER).
+    ///
+    /// Validates that the layer is not locked, off, or frozen.
+    /// Resolves ByLayer properties against the target layer if it exists, or against the default
+    /// creation properties (`default_color`, Continuous, Default lineweight) if the layer does not exist yet.
+    /// Does not modify the document, CLAYER, or CECOLOR.
+    pub fn annotation_preview_common(&self, layer_name: &str, default_color: Color) -> Result<Common> {
+        self.check_annotation_layer(layer_name)?;
+        let d = self.doc()?;
+        let mut common = self.current_common();
+        common.layer = layer_name.to_string();
+        common.extrusion = cadcraft_geom::Vec3::Z;
+
+        let (layer_color, ltype, lweight, trans) = if let Some(layer) = d.layer(layer_name) {
+            (layer.color, layer.linetype.clone(), layer.lineweight, cadcraft_doc::Transparency::Percent(layer.transparency))
+        } else {
+            (default_color, "Continuous".into(), cadcraft_doc::Lineweight::Default, cadcraft_doc::Transparency::Percent(0))
+        };
+
+        if let Some(rgb) = d.header.get("CECOLOR_RGB").and_then(|v| v.as_i64()) {
+            common.color = cadcraft_color::Color::True(cadcraft_color::Rgb::from_u32(rgb as u32));
+        } else {
+            common.color = layer_color;
+        }
+
+        if common.linetype.eq_ignore_ascii_case("bylayer") {
+            common.linetype = ltype;
+        }
+        if common.lineweight == cadcraft_doc::Lineweight::ByLayer {
+            common.lineweight = lweight;
+        }
+        if common.transparency == cadcraft_doc::Transparency::ByLayer {
+            common.transparency = trans;
+        }
+
+        Ok(common)
+    }
+
     /// Add an entity on the annotation layer for dimensions or hatches.
     ///
     /// Resolves the target layer from `layer_name` (a `DIMCLAYER`/`HATCHCLAYER` sysvar value),
@@ -1176,21 +1226,16 @@ impl Session {
     /// frozen. The entity is created with ByLayer color so it takes the layer's colour.
     /// Does not touch CLAYER.
     pub fn add_entity_on_layer(&mut self, kind: EntityKind, layer_name: &str, default_color: Color) -> Result<Handle> {
-        // Resolve/create the target layer (needs mutable doc access).
+        self.check_annotation_layer(layer_name)?;
         let resolved = {
             let d = self.doc_mut()?;
-            if let Some(layer) = d.layer(layer_name) {
-                if layer.locked || !layer.on || layer.frozen {
-                    return Err(EngineError::Other(format!("layer '{layer_name}' is locked, off or frozen")));
-                }
-                layer_name.to_string()
-            } else {
+            if d.layer(layer_name).is_none() {
                 d.ensure_layer(layer_name);
                 if let Some(layer) = d.layer_mut(layer_name) {
                     layer.color = default_color;
                 }
-                layer_name.to_string()
             }
+            layer_name.to_string()
         };
 
         let mut common = self.current_common();
@@ -1834,6 +1879,9 @@ impl Session {
     /// objects ([`Self::picking_objects`]) and the bit for a command asking for them (2) or for
     /// no command (1) is on.
     pub fn previews_selection(&self) -> bool {
+        if self.current_prompt().is_some_and(|p| p.suppress_hover) {
+            return false;
+        }
         let bit = if self.current_prompt().is_some() { 2 } else { 1 };
         self.picking_objects() && self.settings.selectionpreview & bit != 0
     }

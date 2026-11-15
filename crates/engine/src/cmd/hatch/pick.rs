@@ -2,7 +2,8 @@
 //! origin, or the hatches to edit), kept in the session for the dialog to take. It never changes
 //! the drawing.
 
-use cadcraft_doc::{EntityKind, Handle, HatchLoop};
+use cadcraft_color::Color;
+use cadcraft_doc::{Entity, EntityKind, Handle, HatchLoop};
 use cadcraft_geom::Vec2;
 use serde_json::{Value, json};
 
@@ -208,7 +209,10 @@ impl Interactive for HatchPickM {
             _ => Ok(Step::Continue),
         }
     }
-    fn preview(&self, s: &Session, _c: Vec2) -> Vec<EntityKind> {
+    fn preview(&self, _s: &Session, _c: Vec2) -> Vec<EntityKind> {
+        Vec::new()
+    }
+    fn preview_objects(&self, s: &Session, _c: Vec2) -> Vec<Entity> {
         let loops: Vec<HatchLoop> = self
             .picks
             .iter()
@@ -219,8 +223,14 @@ impl Interactive for HatchPickM {
         if loops.is_empty() {
             return Vec::new();
         }
+        let layer = s.doc().map(|d| d.header.str("HATCHCLAYER", "01 Rayados 0.18")).unwrap_or_else(|_| "01 Rayados 0.18".into());
+        let common = match s.annotation_preview_common(&layer, Color::Index(8)) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
         let p = s.hatch_preview_params.as_ref().unwrap_or(&Value::Null);
         let gradient = p.get("gradient").is_some_and(|g| !g.is_null()) || p.get("name").is_some_and(|n| !n.is_null());
-        vec![HatchSettings::from(s, p, gradient).hatch(loops)]
+        let kind = HatchSettings::from(s, p, gradient).hatch(loops);
+        vec![Entity { handle: Handle(0), common, kind }]
     }
 }
