@@ -3,6 +3,7 @@
 //! DIMREASSOCIATE / DIMDISASSOCIATE, DIMTEDIT, DIMSPACE; DIMEDIT, DIMJOGGED, DIMJOGLINE,
 //! DIMBREAK and DIMINSPECT in `annotate_dimedit.rs`.
 
+use cadcraft_color::Color;
 use cadcraft_doc::{AssocSnap, DimAssoc, DimKind, Dimension, EntityKind, Handle, MLeader, MText, Prim};
 use cadcraft_geom::{Segment, Vec2, Vec3};
 use serde_json::{Value, json};
@@ -166,7 +167,8 @@ fn add_dim(s: &mut Session, k: EntityKind) -> Result<Handle> {
     {
         dm.assoc = crate::assoc::reassociate(s.doc()?, &s.space(), dm);
     }
-    let h = s.add_entity(k)?;
+    let layer = s.doc().map(|d| d.header.str("DIMCLAYER", "01 Cotas 0.18")).unwrap_or_else(|_| "01 Cotas 0.18".into());
+    let h = s.add_entity_on_layer(k, &layer, Color::Index(11))?;
     s.last_dim = Some(h);
     Ok(h)
 }

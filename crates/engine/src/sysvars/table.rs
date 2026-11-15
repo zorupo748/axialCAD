@@ -51,6 +51,12 @@ const HEADER: &[(&str, Kind, Def)] = &[
     ("CMLSCALE", Kind::AnyReal, Def::Units(1.0, 20.0)),
     ("CPLOTSTYLE", Kind::ReadOnlyStr, Def::Str("ByLayer")),
     ("DIMASSOC", Kind::Choice(&[0, 1, 2]), Def::Int(2)),
+    // Layer new dimensions are created on (default: "01 Cotas 0.18"). ByLayer color; layer
+    // created with ACI 11 if missing. Locked/off/frozen layers reject dimension creation.
+    ("DIMCLAYER", Kind::Name, Def::Str("01 Cotas 0.18")),
+    // Layer new hatches are created on (default: "01 Rayados 0.18"). ByLayer color; layer
+    // created with ACI 8 if missing. Locked/off/frozen layers reject hatch creation.
+    ("HATCHCLAYER", Kind::Name, Def::Str("01 Rayados 0.18")),
     ("DONUTID", Kind::Real { min: 0.0, strict: false }, Def::Real(0.5)),
     ("DONUTOD", Kind::Real { min: 0.0, strict: true }, Def::Real(1.0)),
     ("EDGEMODE", Kind::Choice(&[0, 1]), Def::Int(0)),

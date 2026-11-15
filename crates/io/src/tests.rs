@@ -2074,6 +2074,22 @@ fn autocad_header_dim_variables_are_not_overrides() {
 }
 
 #[test]
+fn dimclayer_hatchclayer_roundtrip_dxf() {
+    let mut d = Drawing::new_imperial();
+    d.header.set_str("DIMCLAYER", "01 Cotas 0.18");
+    d.header.set_str("HATCHCLAYER", "01 Rayados 0.18");
+    let back = roundtrip(&d);
+    assert_eq!(back.header.str("DIMCLAYER", ""), "01 Cotas 0.18");
+    assert_eq!(back.header.str("HATCHCLAYER", ""), "01 Rayados 0.18");
+    // Custom values also survive.
+    d.header.set_str("DIMCLAYER", "MyCotasLayer");
+    d.header.set_str("HATCHCLAYER", "MyRayadosLayer");
+    let back = roundtrip(&d);
+    assert_eq!(back.header.str("DIMCLAYER", ""), "MyCotasLayer");
+    assert_eq!(back.header.str("HATCHCLAYER", ""), "MyRayadosLayer");
+}
+
+#[test]
 fn mirrored_insert_extrusion_maps_to_negative_x_scale() {
     // A block reference mirrored in AutoCAD is stored with extrusion (0,0,-1); its insertion point,
     // scale and rotation are in that OCS, where x runs the other way: OCS (-10,5) is WCS (10,5).

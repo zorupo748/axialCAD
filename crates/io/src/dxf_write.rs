@@ -275,6 +275,8 @@ const HEADER_VARS: &[(&str, i32)] = &[
     ("CELTSCALE", 40),
     ("DIMSCALE", 40),
     ("DIMSTYLE", 2),
+    ("DIMCLAYER", 2),
+    ("HATCHCLAYER", 2),
     ("LUNITS", 70),
     ("LUPREC", 70),
     ("AUNITS", 70),

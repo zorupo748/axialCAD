@@ -37,6 +37,7 @@ pub mod units;
 
 use std::sync::Arc;
 
+use cadcraft_color::Color;
 use cadcraft_doc::{Common, Drawing, Entity, EntityKind, Handle, Space};
 use cadcraft_geom::{Bounds2, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
@@ -1165,6 +1166,47 @@ impl Session {
     pub fn add_entity_direct(&mut self, ent: cadcraft_doc::Entity) -> Result<Handle> {
         let space = self.space();
         let h = self.doc_mut()?.add(&space, ent.common, ent.kind)?;
+        Ok(h)
+    }
+
+    /// Add an entity on the annotation layer for dimensions or hatches.
+    ///
+    /// Resolves the target layer from `layer_name` (a `DIMCLAYER`/`HATCHCLAYER` sysvar value),
+    /// creating it with `default_color` if missing. Rejects if the layer is locked, off or
+    /// frozen. The entity is created with ByLayer color so it takes the layer's colour.
+    /// Does not touch CLAYER.
+    pub fn add_entity_on_layer(&mut self, kind: EntityKind, layer_name: &str, default_color: Color) -> Result<Handle> {
+        // Resolve/create the target layer (needs mutable doc access).
+        let resolved = {
+            let d = self.doc_mut()?;
+            if let Some(layer) = d.layer(layer_name) {
+                if layer.locked || !layer.on || layer.frozen {
+                    return Err(EngineError::Other(format!("layer '{layer_name}' is locked, off or frozen")));
+                }
+                layer_name.to_string()
+            } else {
+                d.ensure_layer(layer_name);
+                if let Some(layer) = d.layer_mut(layer_name) {
+                    layer.color = default_color;
+                }
+                layer_name.to_string()
+            }
+        };
+
+        let mut common = self.current_common();
+        common.layer = resolved;
+        common.color = Color::ByLayer;
+        let space = self.space();
+        let true_color = self.doc()?.header.get("CECOLOR_RGB").and_then(|v| v.as_i64());
+        if let Some(rgb) = true_color {
+            common.color = cadcraft_color::Color::True(cadcraft_color::Rgb::from_u32(rgb as u32));
+        }
+        common.extrusion = cadcraft_geom::Vec3::Z;
+        let d = self.doc()?;
+        if d.annotative_by_style(&kind) {
+            common.anno_scales = vec![d.current_anno_scale()];
+        }
+        let h = self.doc_mut()?.add(&space, common, kind)?;
         Ok(h)
     }
 

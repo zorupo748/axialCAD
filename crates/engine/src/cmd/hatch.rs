@@ -510,8 +510,9 @@ fn add_hatches(s: &mut Session, st: &HatchSettings, groups: Vec<Vec<HatchLoop>>)
         vec![all]
     };
     let mut out = Vec::new();
+    let layer = s.doc().map(|d| d.header.str("HATCHCLAYER", "01 Rayados 0.18")).unwrap_or_else(|_| "01 Rayados 0.18".into());
     for loops in groups.into_iter().filter(|g| !g.is_empty()) {
-        let h = s.add_entity(st.hatch(loops))?;
+        let h = s.add_entity_on_layer(st.hatch(loops), &layer, Color::Index(8))?;
         // Hatches go under other objects (HPDRAWORDER = behind boundary).
         let space = s.space();
         if let Some(store) = s.doc_mut()?.space_mut(&space) {
