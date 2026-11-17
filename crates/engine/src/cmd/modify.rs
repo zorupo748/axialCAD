@@ -27,9 +27,13 @@ pub(crate) fn edge_mode(s: &Session) -> bool {
 pub(crate) fn proj_mode(s: &Session) -> i64 {
     s.doc().map(|d| d.header.i64("PROJMODE", 1)).unwrap_or(1)
 }
+pub(crate) fn no_intersection(msg: impl Into<String>) -> EngineError {
+    EngineError::NoIntersection(msg.into())
+}
+
 /// Whether a trim error says the object meets no cutting edge (a Quick-mode trim then erases it).
 pub(crate) fn misses_edges(e: &EngineError) -> bool {
-    e.to_string().contains("intersect")
+    matches!(e, EngineError::NoIntersection(_))
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -949,7 +953,7 @@ pub(crate) fn trim_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges) ->
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
-                return Err(EngineError::Other("Object does not intersect a cutting edge.".into()));
+                return Err(no_intersection("Object does not intersect a cutting edge."));
             }
             let tp = ln.param_of(pick).clamp(0.0, 1.0);
             let mut cuts = Vec::with_capacity(ts.len() + 2);
@@ -988,7 +992,7 @@ pub(crate) fn trim_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges) ->
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
-                return Err(EngineError::Other("Object does not intersect a cutting edge.".into()));
+                return Err(no_intersection("Object does not intersect a cutting edge."));
             }
             let p_on_arc = ga.closest(pick);
             let tp = param(p_on_arc).min(sweep);
@@ -1024,7 +1028,7 @@ pub(crate) fn trim_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges) ->
             angs.sort_by(f64::total_cmp);
             angs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if angs.len() < 2 {
-                return Err(EngineError::Other("Circle must intersect cutting edges at two or more points.".into()));
+                return Err(no_intersection("Circle must intersect cutting edges at two or more points."));
             }
             let ap = c.center.xy().angle_to(pick);
             // The removed arc runs between the two intersections around the pick.
@@ -1134,7 +1138,7 @@ fn trim_polyline(p: &cadcraft_doc::LwPolyline, cut: &[Segment], pick: Vec2) -> R
     ts.retain(|t| *t > 1e-9 && *t < total - 1e-9);
     ts.sort_by(f64::total_cmp);
     if ts.is_empty() {
-        return Err(EngineError::Other("Object does not intersect a cutting edge.".into()));
+        return Err(no_intersection("Object does not intersect a cutting edge."));
     }
     let lo = ts.iter().copied().filter(|t| *t < tp).fold(f64::NEG_INFINITY, f64::max);
     let hi = ts.iter().copied().filter(|t| *t > tp).fold(f64::INFINITY, f64::min);

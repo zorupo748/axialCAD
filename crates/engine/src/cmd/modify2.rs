@@ -1933,7 +1933,7 @@ fn ellipse_samples(ge: &Ellipse) -> Vec<f64> {
 
 /// Trim objects that modify.rs does not handle itself (ellipses and splines).
 pub(crate) fn trim_other(k: &EntityKind, cut: &[Segment], pick: Vec2) -> Result<super::modify::TrimPieces> {
-    let none = || other("Object does not intersect a cutting edge.");
+    let none = || super::modify::no_intersection("Object does not intersect a cutting edge.");
     match k {
         EntityKind::Ellipse(e) => {
             let ge = ellipse_of(e);
@@ -1945,7 +1945,7 @@ pub(crate) fn trim_other(k: &EntityKind, cut: &[Segment], pick: Vec2) -> Result<
                 ps.sort_by(f64::total_cmp);
                 ps.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
                 if ps.len() < 2 {
-                    return Err(other("Ellipse must intersect cutting edges at two or more points."));
+                    return Err(super::modify::no_intersection("Ellipse must intersect cutting edges at two or more points."));
                 }
                 let tp = full.param_of(pick);
                 let n = ps.len();

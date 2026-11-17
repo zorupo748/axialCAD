@@ -855,3 +855,121 @@ fn fallback_closed_polyline_selects_closest_to_first_corner_a() {
     }
 }
 
+#[test]
+fn standard_mode_crossing_cutter_tracking_and_undo() {
+    let mut s = Session::new();
+    s.cmdline("LINE 0,0 100,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 30,-10 30,10").unwrap();
+    s.cmdline("").unwrap();
+    s.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 0);
+
+    // In Standard mode, select both L1 (50,0) and C1 (30,5) as cutting edges.
+    // Then inside the same TRIM session:
+    // 1. Crossing window C 25,5 35,15 trims top half of C1.
+    // 2. Pick L1 at 10,0. It should be trimmed at x=30 by C1's surviving piece.
+    s.script("TRIM 50,0 30,5\n\nC 25,5 35,15\n10,0\n\n").unwrap();
+    assert_eq!(lines(&s), &[((30.0, -10.0), (30.0, 0.0)), ((30.0, 0.0), (100.0, 0.0))]);
+}
+
+#[test]
+fn standard_mode_fence_cutter_tracking_and_internal_undo() {
+    let mut s = Session::new();
+    s.cmdline("LINE 0,0 100,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 30,-10 30,10").unwrap();
+    s.cmdline("").unwrap();
+    s.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 0);
+
+    // Test 1: Fence trims top half of cutter C1, then L1 is trimmed at x=30 by surviving piece
+    s.script("TRIM 50,0 30,5\n\nF 25,5 35,5\n\n10,0\n\n").unwrap();
+    assert_eq!(lines(&s), &[((30.0, -10.0), (30.0, 0.0)), ((30.0, 0.0), (100.0, 0.0))]);
+
+    // Test 2: Internal Undo inside TRIM restores original cutter C1 handle in edges
+    let mut s2 = Session::new();
+    s2.cmdline("LINE 0,0 100,0").unwrap();
+    s2.cmdline("").unwrap();
+    s2.cmdline("LINE 30,-10 30,10").unwrap();
+    s2.cmdline("").unwrap();
+    s2.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 0);
+
+    // Pick trim top half of C1 (30,5), then internal Undo 'U', then trim L1 (10,0) at restored C1
+    s2.script("TRIM 50,0 30,5\n\n30,5\nU\n10,0\n\n").unwrap();
+    assert_eq!(lines(&s2), &[((30.0, -10.0), (30.0, 10.0)), ((30.0, 0.0), (100.0, 0.0))]);
+}
+
+#[test]
+fn json_edges_validation_handles_all_cases() {
+    let s = ladder();
+    let d = s.doc().unwrap();
+    let mut it = d.model.iter();
+    let edge1 = it.next().unwrap().handle;
+    let edge2 = it.next().unwrap().handle;
+
+    // Case 1: Parameter omitted -> Ok (defaults to all objects)
+    let mut s1 = ladder();
+    let r1 = s1.execute("trim", &json!({ "crossing": [[5, -1], [5, 3]], "mode": "standard" }));
+    assert!(r1.is_ok(), "omitted edges parameter is valid");
+
+    // Case 2: null -> Ok (treated as omitted)
+    let mut s2 = ladder();
+    let r2 = s2.execute("trim", &json!({ "edges": null, "crossing": [[5, -1], [5, 3]], "mode": "standard" }));
+    assert!(r2.is_ok(), "null edges parameter is valid");
+
+    // Case 3: Empty array [] -> Ok (explicitly 0 edges, in standard mode does not cut)
+    let mut s3 = ladder();
+    let r3 = s3.execute("trim", &json!({ "edges": [], "crossing": [[5, -1], [5, 3]], "mode": "standard" }));
+    assert!(r3.is_err(), "empty edges array means no cutting edges, so crossing finds no objects cut");
+    assert_eq!(lines(&s3).len(), 4, "drawing is untouched when edges is empty");
+
+    // Case 4: Non-array value (string, number, bool, object) -> Err (does NOT silently widen to all objects)
+    let mut s4 = ladder();
+    assert!(s4.execute("trim", &json!({ "edges": "not_an_array", "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert!(s4.execute("trim", &json!({ "edges": 42, "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert!(s4.execute("trim", &json!({ "edges": true, "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert!(s4.execute("trim", &json!({ "edges": {}, "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert_eq!(lines(&s4).len(), 4, "drawing untouched after invalid edges types");
+
+    // Case 5: Elements that are not strings (numbers, booleans, nulls, objects) -> Err
+    let mut s5 = ladder();
+    assert!(s5.execute("trim", &json!({ "edges": [42], "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert!(s5.execute("trim", &json!({ "edges": [true], "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert!(s5.execute("trim", &json!({ "edges": [null], "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert!(s5.execute("trim", &json!({ "edges": [{ "handle": "1" }], "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert_eq!(lines(&s5).len(), 4, "drawing untouched after non-string elements");
+
+    // Case 6: Handles with invalid format -> Err
+    let mut s6 = ladder();
+    assert!(s6.execute("trim", &json!({ "edges": ["not_a_hex_!@#"], "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert!(s6.execute("trim", &json!({ "edges": [""], "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert_eq!(lines(&s6).len(), 4, "drawing untouched after invalid hex handle");
+
+    // Case 7: Handles with valid format but nonexistent in drawing -> Err
+    let mut s7 = ladder();
+    assert!(s7.execute("trim", &json!({ "edges": ["DEADBEEF"], "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert_eq!(lines(&s7).len(), 4, "drawing untouched after nonexistent handle");
+
+    // Case 8: Mixed array of valid and invalid / nonexistent handles -> Err (does not partially accept valid ones)
+    let mut s8 = ladder();
+    assert!(s8.execute("trim", &json!({ "edges": [edge1.hex(), "invalid_hex"], "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert!(s8.execute("trim", &json!({ "edges": [edge1.hex(), "DEADBEEF"], "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert!(s8.execute("trim", &json!({ "edges": [edge1.hex(), 999], "crossing": [[5, -1], [5, 3]] })).is_err());
+    assert_eq!(lines(&s8).len(), 4, "drawing untouched after mixed array");
+
+    // Valid array with existing handles -> Ok
+    let mut s9 = ladder();
+    let r9 = s9.execute("trim", &json!({ "edges": [edge1.hex(), edge2.hex()], "crossing": [[5, -1], [5, 3]], "mode": "standard" }));
+    assert!(r9.is_ok(), "valid edges array executes successfully");
+}
+
+#[test]
+fn typed_no_intersection_distinguishes_no_cuts_from_invalid_data() {
+    let mut s = ladder();
+    s.cmdline("LINE 20,20 25,20").unwrap();
+    s.cmdline("").unwrap();
+    // In Quick mode, line with no intersection gets erased cleanly via NoIntersection
+    s.script("TRIM 5,0 22,20\n\n").unwrap();
+    // The uncut line 20,20 to 25,20 was erased
+    assert!(!lines(&s).contains(&((20.0, 20.0), (25.0, 20.0))), "uncut line was erased in Quick mode");
+    assert_eq!(lines(&s).len(), 5, "2 edges + 1 intact line + 2 pieces of cut line = 5");
+}

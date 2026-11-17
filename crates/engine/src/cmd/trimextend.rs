@@ -33,8 +33,8 @@ fn apply(s: &mut Session, h: Handle, at: Vec2, extending: bool, edges: Edges, qu
 }
 
 /// Trim (or extend) every object the fence `pts` crosses, at each crossing (extend: at the first).
-/// Returns how many trims or extends were made.
-fn fence(s: &mut Session, pts: &[Vec2], extending: bool, edges: Edges, quick: bool) -> Result<usize> {
+/// Returns how many trims or extends were made and which handles were replaced.
+fn fence(s: &mut Session, pts: &[Vec2], extending: bool, edges: Edges, quick: bool) -> Result<(usize, Vec<(Handle, Vec<Handle>)>)> {
     let space = s.space();
     let d = s.doc()?;
     let fb = Bounds2::from_points(pts.iter().copied());
@@ -64,7 +64,7 @@ fn fence(s: &mut Session, pts: &[Vec2], extending: bool, edges: Edges, quick: bo
 
 /// Trim (or extend) every object a crossing window from `a` to `b` touches, picked at its point
 /// in the window nearest the first corner `a`.
-fn crossing(s: &mut Session, a: Vec2, b: Vec2, extending: bool, edges: Edges, quick: bool) -> Result<usize> {
+fn crossing(s: &mut Session, a: Vec2, b: Vec2, extending: bool, edges: Edges, quick: bool) -> Result<(usize, Vec<(Handle, Vec<Handle>)>)> {
     let space = s.space();
     let d = s.doc()?;
     let bx = Bounds2::new(a, b);
@@ -111,12 +111,15 @@ fn crossing(s: &mut Session, a: Vec2, b: Vec2, extending: bool, edges: Edges, qu
         return Err(EngineError::Other("No objects found.".into()));
     }
     let mut n = 0;
+    let mut replacements: Vec<(Handle, Vec<Handle>)> = Vec::with_capacity(plan.len());
     for (h, kept) in plan {
         let Some(e) = s.doc()?.entity(h).map(|e| (**e).clone()) else { continue };
         let common = e.common.clone();
         let d = s.doc_mut()?;
         d.remove_entity(h);
         let new_entities: Vec<Entity> = kept.into_iter().map(|k| Entity { handle: d.new_handle(), common: common.clone(), kind: k }).collect();
+        let new_handles: Vec<Handle> = new_entities.iter().map(|ent| ent.handle).collect();
+        replacements.push((h, new_handles));
         if let Some(st) = d.space_mut(&space) {
             for ent in new_entities {
                 st.push(ent);
@@ -124,16 +127,18 @@ fn crossing(s: &mut Session, a: Vec2, b: Vec2, extending: bool, edges: Edges, qu
         }
         n += 1;
     }
-    Ok(n)
+    Ok((n, replacements))
 }
 
 /// Trim (or extend) each object at its pick points. A trim replaces the object with pieces, so
 /// later picks go to the piece within `tol` of the point (none: that part is already gone).
-fn run_picks(s: &mut Session, work: Vec<(Handle, Vec<Vec2>)>, extending: bool, edges: Edges, quick: bool, tol: f64) -> Result<usize> {
+fn run_picks(s: &mut Session, work: Vec<(Handle, Vec<Vec2>)>, extending: bool, edges: Edges, quick: bool, tol: f64) -> Result<(usize, Vec<(Handle, Vec<Handle>)>)> {
     let mut n = 0;
     let mut last_err = None;
+    let mut replacements: Vec<(Handle, Vec<Handle>)> = Vec::new();
     for (h, picks) in work {
         let mut live = vec![h];
+        let mut changed = false;
         for x in picks {
             let target = {
                 let d = s.doc()?;
@@ -149,6 +154,7 @@ fn run_picks(s: &mut Session, work: Vec<(Handle, Vec<Vec2>)>, extending: bool, e
                     live.retain(|l| *l != t);
                     live.extend(new);
                     n += 1;
+                    changed = true;
                 }
                 Err(e) => last_err = Some(e),
             }
@@ -156,11 +162,14 @@ fn run_picks(s: &mut Session, work: Vec<(Handle, Vec<Vec2>)>, extending: bool, e
                 break;
             }
         }
+        if changed {
+            replacements.push((h, live));
+        }
     }
     match (n, last_err) {
         (0, Some(e)) => Err(e),
         (0, None) => Err(EngineError::Other("No objects found.".into())),
-        _ => Ok(n),
+        _ => Ok((n, replacements)),
     }
 }
 
@@ -178,10 +187,36 @@ fn edge_mode_param(cmd: &str, p: &Value) -> Result<bool> {
     }
 }
 
+fn parse_edges_param(cmd: &str, s: &Session, p: &Value) -> Result<Option<Vec<Handle>>> {
+    let Some(v) = p.get("edges") else {
+        return Ok(None);
+    };
+    if v.is_null() {
+        return Ok(None);
+    }
+    let Some(arr) = v.as_array() else {
+        return Err(bad(cmd, format!("`edges` must be an array of object handles, got {v}")));
+    };
+    let doc = s.doc()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let Some(s) = item.as_str() else {
+            return Err(bad(cmd, format!("`edges`: {item} is not a string handle")));
+        };
+        let h = Handle::parse_hex(s).ok_or_else(|| {
+            bad(cmd, format!("`edges`: \"{s}\" is not a valid hex object handle"))
+        })?;
+        if doc.entity(h).is_none() {
+            return Err(bad(cmd, format!("`edges`: no object with handle {}", h.hex())));
+        }
+        out.push(h);
+    }
+    Ok(Some(out))
+}
+
 fn run(s: &mut Session, p: &Value, extending: bool) -> Result<Value> {
     let cmd = if extending { "extend" } else { "trim" };
-    let only: Option<Vec<Handle>> =
-        p.get("edges").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().and_then(Handle::parse_hex)).collect());
+    let only = parse_edges_param(cmd, s, p)?;
     let edges = Edges { only: only.as_deref(), implied: edge_mode_param(cmd, p)? };
     let quick = match p.get("mode") {
         None | Some(Value::Null) => false,
@@ -196,13 +231,13 @@ fn run(s: &mut Session, p: &Value, extending: bool) -> Result<Value> {
         let pts = points_param(p, "fence")
             .filter(|v| (2..=MAX_FENCE).contains(&v.len()))
             .ok_or_else(|| bad(cmd, "`fence` needs two or more points [[x,y], ...]"))?;
-        let n = fence(s, &pts, extending, edges, quick)?;
+        let (n, _) = fence(s, &pts, extending, edges, quick)?;
         return Ok(json!({ key: n }));
     }
     if p.get("crossing").is_some_and(|v| !v.is_null()) {
         let c = points_param(p, "crossing").filter(|v| v.len() == 2).ok_or_else(|| bad(cmd, "`crossing` needs two corners [[x,y], [x,y]]"))?;
         let (Some(a), Some(b)) = (c.first(), c.get(1)) else { return Err(bad(cmd, "`crossing` needs two corners")) };
-        let n = crossing(s, *a, *b, extending, edges, quick)?;
+        let (n, _) = crossing(s, *a, *b, extending, edges, quick)?;
         return Ok(json!({ key: n }));
     }
     let h = super::targets(s, p)?.first().copied().ok_or_else(|| bad(cmd, "`handle` is required"))?;
@@ -243,8 +278,8 @@ pub(crate) struct TrimM {
     /// Cutting/boundary edges; `None`: all objects.
     edges: Option<Vec<Handle>>,
     stage: Stage,
-    /// The drawing before each trim, extend or erase, for Undo.
-    undo: Vec<Arc<Drawing>>,
+    /// The drawing and active cutting edges before each trim, extend or erase, for Undo.
+    undo: Vec<(Arc<Drawing>, Option<Vec<Handle>>)>,
 }
 
 impl TrimM {
@@ -259,12 +294,21 @@ impl TrimM {
         s.set_selection(Vec::new());
         self.stage = Stage::Edges(Vec::new());
     }
+    fn update_edge_handles(&mut self, old_h: Handle, new_hs: &[Handle]) {
+        if let Some(ref mut es) = self.edges {
+            if let Some(pos) = es.iter().position(|x| *x == old_h) {
+                es.remove(pos);
+                es.extend(new_hs.iter().copied());
+            }
+        }
+    }
     /// Run `f` as one undoable step of the command; a step that changed nothing records none.
     fn step(&mut self, s: &mut Session, f: impl FnOnce(&mut Self, &mut Session) -> Result<()>) -> Result<()> {
-        let before = s.state()?.doc.clone();
+        let before_doc = s.state()?.doc.clone();
+        let before_edges = self.edges.clone();
         let r = f(self, s);
-        if !Arc::ptr_eq(&before, &s.state()?.doc) {
-            self.undo.push(before);
+        if !Arc::ptr_eq(&before_doc, &s.state()?.doc) {
+            self.undo.push((before_doc, before_edges));
         }
         r
     }
@@ -429,12 +473,13 @@ impl Interactive for TrimM {
                     }
                     Input::Enter => {
                         s.set_selection(Vec::new());
-                        self.step(s, |_, s| {
+                        self.step(s, |m, s| {
                             let d = s.doc_mut()?;
                             for h in &picked {
                                 let locked = d.entity(*h).and_then(|e| d.layer(&e.common.layer)).is_some_and(|l| l.locked);
                                 if !locked {
                                     d.remove_entity(*h);
+                                    m.update_edge_handles(*h, &[]);
                                 }
                             }
                             Ok(())
@@ -458,7 +503,13 @@ impl Interactive for TrimM {
                     Input::Enter => {
                         self.stage = Stage::Pick;
                         if pts.len() >= 2 {
-                            let r = self.step(s, |m, s| fence(s, &pts, extending, m.edges(quick, implied), quick).map(|_| ()));
+                            let r = self.step(s, |m, s| {
+                                let (_n, reps) = fence(s, &pts, extending, m.edges(quick, implied), quick)?;
+                                for (old_h, new_hs) in reps {
+                                    m.update_edge_handles(old_h, &new_hs);
+                                }
+                                Ok(())
+                            });
                             if let Err(e) = r {
                                 s.echo(e.to_string());
                             }
@@ -473,7 +524,13 @@ impl Interactive for TrimM {
                     (None, Input::Point(p)) => self.stage = Stage::Crossing(Some(p)),
                     (Some(a), Input::Point(b)) => {
                         self.stage = Stage::Pick;
-                        let r = self.step(s, |m, s| crossing(s, a, b, extending, m.edges(quick, implied), quick).map(|_| ()));
+                        let r = self.step(s, |m, s| {
+                            let (_n, reps) = crossing(s, a, b, extending, m.edges(quick, implied), quick)?;
+                            for (old_h, new_hs) in reps {
+                                m.update_edge_handles(old_h, &new_hs);
+                            }
+                            Ok(())
+                        });
                         if let Err(e) = r {
                             s.echo(e.to_string());
                         }
@@ -494,12 +551,7 @@ impl Interactive for TrimM {
                     };
                     let r = self.step(s, |m, s| {
                         let new_hs = apply(s, h, p, extending, m.edges(quick, implied), quick)?;
-                        if let Some(ref mut es) = m.edges {
-                            if let Some(pos) = es.iter().position(|x| *x == h) {
-                                es.remove(pos);
-                                es.extend(new_hs);
-                            }
-                        }
+                        m.update_edge_handles(h, &new_hs);
                         Ok(())
                     });
                     if let Err(e) = r {
@@ -521,11 +573,12 @@ impl Interactive for TrimM {
                             self.stage = Stage::Erase(Vec::new());
                         }
                         "Undo" => match self.undo.pop() {
-                            Some(doc) => {
+                            Some((doc, edges)) => {
                                 // Settings changed meanwhile stay.
                                 let header = s.doc()?.header.clone();
                                 s.state_mut()?.doc = doc;
                                 s.doc_mut()?.header = header;
+                                self.edges = edges;
                             }
                             None => s.echo("Nothing to undo."),
                         },

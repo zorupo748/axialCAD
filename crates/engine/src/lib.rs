@@ -61,6 +61,8 @@ pub enum EngineError {
     #[error("no active document")]
     NoDocument,
     #[error("{0}")]
+    NoIntersection(String),
+    #[error("{0}")]
     Other(String),
     /// A command panicked; the guard kept the drawing as it was (a bug: please report it).
     #[error("internal error in `{0}` (the drawing was kept as it was): {1}")]
