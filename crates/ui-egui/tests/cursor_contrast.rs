@@ -343,6 +343,8 @@ fn trim_hover_line_between_two_limits_restores_and_confirms() {
     c.app.session.cmdline("").unwrap();
 
     c.app.cmdline("TRIM");
+    // Use Standard mode for this test (non-intersecting entities show no preview)
+    c.app.session.execute("setvar", &serde_json::json!({ "name": "TRIMEXTENDMODE", "value": 0 })).unwrap();
     let mid_span = c.screen(Vec2::new(100.0, 100.0));
     let left_cut_x = c.screen(Vec2::new(80.0, 100.0)).x;
     let right_cut_x = c.screen(Vec2::new(120.0, 100.0)).x;
@@ -561,6 +563,337 @@ fn trim_successive_cuts_on_line_ui() {
     let d2 = count_dashes(&s2);
     println!("Line d2: {d2}");
     assert!(d2 >= 2);
+}
+
+
+#[test]
+fn trim_quick_hover_shows_full_erase_preview_when_no_interior_cuts() {
+    let mut c = Canvas::new(false);
+    // Circle radius 10 at (0,0) + horizontal diameter
+    c.app.session.cmdline("CIRCLE 0,0 10").unwrap();
+    c.app.session.cmdline("LINE -10,0 10,0").unwrap();
+    c.app.session.cmdline("").unwrap();
+    
+    // Ensure Quick mode (default)
+    assert!(c.app.session.doc().unwrap().header.i64("TRIMEXTENDMODE", 1) != 0);
+    
+    let dashed_lt = cadcraft_engine::doc::library::standard_linetypes()
+        .into_iter()
+        .find(|l| l.name == "DASHED")
+        .unwrap();
+    c.app.session.doc_mut().unwrap().linetypes.push(dashed_lt);
+
+    c.app.cmdline("TRIM");
+
+    let count_dashes = |shapes: &[egui::epaint::ClippedShape]| -> usize {
+        let mut count = 0;
+        fn walk(s: &egui::epaint::Shape, count: &mut usize) {
+            match s {
+                egui::epaint::Shape::LineSegment { stroke, .. } if (stroke.width - 2.0).abs() < 0.01 && stroke.color == LIGHT_INK => {
+                    *count += 1;
+                }
+                egui::epaint::Shape::Path(p) if (p.stroke.width - 2.0).abs() < 0.01 && p.stroke.color == egui::epaint::ColorMode::Solid(LIGHT_INK) => {
+                    *count += 1;
+                }
+                egui::epaint::Shape::Vec(vs) => vs.iter().for_each(|x| walk(x, count)),
+                _ => {}
+            }
+        }
+        for cs in shapes {
+            walk(&cs.shape, &mut count);
+        }
+        count
+    };
+
+    // 1. Trim upper semicircle (pick at (0, 10) - north pole)
+    let p_top = c.screen(Vec2::new(0.0, 10.0));
+    let shapes_top = c.paint(p_top);
+    let dashes_top = count_dashes(&shapes_top);
+    assert!(dashes_top >= 2, "upper semicircle should show preview");
+
+    // Click to trim upper semicircle
+    let input_top = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_top),
+            egui::Event::PointerButton { pos: p_top, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_top, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let _ = c.ctx.run_ui(input_top, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+
+    // 2. Verify upper semicircle removed, lower arc remains + cutting line
+    let ents_after_first = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after_first.len(), 2, "should have cutting line + lower arc");
+    
+    // 3. Hover over lower semicircle (pick at (0, -10) - south pole)
+    // This arc has NO interior cuts (cutting line at endpoints only)
+    // In Quick mode, hover should preview FULL ERASE of this arc
+    let p_bot = c.screen(Vec2::new(0.0, -10.0));
+    let shapes_bot = c.paint(p_bot);
+    let dashes_bot = count_dashes(&shapes_bot);
+    assert!(dashes_bot >= 2, "lower semicircle should show FULL ERASE preview in Quick mode, got {dashes_bot}");
+
+    // 4. Verify hover does NOT modify document
+    let ents_during_hover = c.app.session.doc().unwrap().model.iter().count();
+    assert_eq!(ents_during_hover, 2, "hover must not modify document");
+
+    // 5. Click to erase lower semicircle
+    let input_bot = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_bot),
+            egui::Event::PointerButton { pos: p_bot, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_bot, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let _ = c.ctx.run_ui(input_bot, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+
+    // 6. Verify lower arc erased, only cutting line remains
+    let ents_final = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_final.len(), 1, "only cutting line should remain");
+    match &ents_final[0].kind {
+        cadcraft_doc::EntityKind::Line(_) => {},
+        k => panic!("expected Line, got {:?}", k),
+    }
+}
+
+#[test]
+fn trim_quick_internal_undo_restores_arc_and_preview() {
+    let mut c = Canvas::new(false);
+    // Circle radius 10 at (0,0) + horizontal diameter
+    c.app.session.cmdline("CIRCLE 0,0 10").unwrap();
+    c.app.session.cmdline("LINE -10,0 10,0").unwrap();
+    c.app.session.cmdline("").unwrap();
+    
+    // Ensure Quick mode (default)
+    assert!(c.app.session.doc().unwrap().header.i64("TRIMEXTENDMODE", 1) != 0);
+    
+    let dashed_lt = cadcraft_engine::doc::library::standard_linetypes()
+        .into_iter()
+        .find(|l| l.name == "DASHED")
+        .unwrap();
+    c.app.session.doc_mut().unwrap().linetypes.push(dashed_lt);
+
+    c.app.cmdline("TRIM");
+
+    let count_dashes = |shapes: &[egui::epaint::ClippedShape]| -> usize {
+        let mut count = 0;
+        fn walk(s: &egui::epaint::Shape, count: &mut usize) {
+            match s {
+                egui::epaint::Shape::LineSegment { stroke, .. } if (stroke.width - 2.0).abs() < 0.01 && stroke.color == LIGHT_INK => {
+                    *count += 1;
+                }
+                egui::epaint::Shape::Path(p) if (p.stroke.width - 2.0).abs() < 0.01 && p.stroke.color == egui::epaint::ColorMode::Solid(LIGHT_INK) => {
+                    *count += 1;
+                }
+                egui::epaint::Shape::Vec(vs) => vs.iter().for_each(|x| walk(x, count)),
+                _ => {}
+            }
+        }
+        for cs in shapes {
+            walk(&cs.shape, &mut count);
+        }
+        count
+    };
+
+    // 1. Trim upper semicircle (pick at (0, 10) - north pole)
+    let p_top = c.screen(Vec2::new(0.0, 10.0));
+    let shapes_top = c.paint(p_top);
+    let dashes_top = count_dashes(&shapes_top);
+    assert!(dashes_top >= 2, "upper semicircle should show preview");
+
+    let input_top = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_top),
+            egui::Event::PointerButton { pos: p_top, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_top, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let _ = c.ctx.run_ui(input_top, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+
+    // 2. Verify upper semicircle removed, lower arc remains + cutting line
+    let ents_after_first = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after_first.len(), 2, "should have cutting line + lower arc");
+
+    // 3. Trim lower semicircle (pick at (0, -10) - south pole)
+    // This arc has NO interior cuts (cutting line at endpoints only)
+    // In Quick mode, this triggers full-erase fallback
+    let p_bot = c.screen(Vec2::new(0.0, -10.0));
+    let shapes_bot_before = c.paint(p_bot);
+    let dashes_bot_before = count_dashes(&shapes_bot_before);
+    assert!(dashes_bot_before >= 2, "lower semicircle should show FULL ERASE preview in Quick mode");
+
+    let input_bot = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_bot),
+            egui::Event::PointerButton { pos: p_bot, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_bot, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let _ = c.ctx.run_ui(input_bot, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+
+    // 4. Verify lower arc erased, only cutting line remains (TRIM still active)
+    let ents_after_second = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after_second.len(), 1, "only cutting line should remain after second trim");
+    match &ents_after_second[0].kind {
+        cadcraft_doc::EntityKind::Line(_) => {},
+        k => panic!("expected Line, got {:?}", k),
+    }
+
+    // 5. INTERNAL UNDO within TRIM: send "Undo" keyword directly to session
+    // This uses TRIM's local undo stack (self.undo), not global Session undo
+    c.app.session.input(cadcraft_engine::Input::Keyword("Undo".into())).unwrap();
+
+    // 6. Verify internal UNDO restored the lower arc (TRIM still active)
+    let ents_after_internal_undo = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after_internal_undo.len(), 2, "internal UNDO should restore lower arc + cutting line");
+    
+    let mut has_line = false;
+    let mut has_arc = false;
+    for e in &ents_after_internal_undo {
+        match &e.kind {
+            cadcraft_doc::EntityKind::Line(_) => has_line = true,
+            cadcraft_doc::EntityKind::Arc(_) => has_arc = true,
+            _ => {}
+        }
+    }
+    assert!(has_line && has_arc, "internal UNDO should restore both line and arc");
+
+    // 7. Hover over restored lower arc: should show FULL ERASE preview again
+    let shapes_bot_after_undo = c.paint(p_bot);
+    let dashes_bot_after_undo = count_dashes(&shapes_bot_after_undo);
+    assert!(dashes_bot_after_undo >= 2, "hover after internal UNDO should show FULL ERASE preview again");
+
+    // 8. Verify hover does NOT modify document
+    let ents_during_hover = c.app.session.doc().unwrap().model.iter().count();
+    assert_eq!(ents_during_hover, 2, "hover must not modify document");
+
+    // TRIM still active - no global UNDO/REDO tested here
+}
+
+#[test]
+fn trim_quick_global_undo_redo_after_finish() {
+    let mut c = Canvas::new(false);
+    // Circle radius 10 at (0,0) + horizontal diameter
+    c.app.session.cmdline("CIRCLE 0,0 10").unwrap();
+    c.app.session.cmdline("LINE -10,0 10,0").unwrap();
+    c.app.session.cmdline("").unwrap();
+    
+    // Ensure Quick mode (default)
+    assert!(c.app.session.doc().unwrap().header.i64("TRIMEXTENDMODE", 1) != 0);
+    
+    let dashed_lt = cadcraft_engine::doc::library::standard_linetypes()
+        .into_iter()
+        .find(|l| l.name == "DASHED")
+        .unwrap();
+    c.app.session.doc_mut().unwrap().linetypes.push(dashed_lt);
+
+    c.app.cmdline("TRIM");
+
+    // 1. Trim upper semicircle (pick at (0, 10) - north pole)
+    let p_top = c.screen(Vec2::new(0.0, 10.0));
+    let input_top = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_top),
+            egui::Event::PointerButton { pos: p_top, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_top, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut output = c.ctx.run_ui(input_top, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+    output.textures_delta.clear();
+
+    // 2. Trim lower semicircle (pick at (0, -10) - south pole)
+    let p_bot = c.screen(Vec2::new(0.0, -10.0));
+    let input_bot = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_bot),
+            egui::Event::PointerButton { pos: p_bot, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_bot, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut output = c.ctx.run_ui(input_bot, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+    output.textures_delta.clear();
+
+    // 3. FINISH TRIM: press Enter to exit TRIM command (Step::Done)
+    // This registers the entire TRIM session as one global undoable block
+    c.app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+    // 4. Verify TRIM finished: only cutting line remains
+    let ents_after_finish = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after_finish.len(), 1, "after TRIM finish, only cutting line should remain");
+    match &ents_after_finish[0].kind {
+        cadcraft_doc::EntityKind::Line(_) => {},
+        k => panic!("expected Line, got {:?}", k),
+    }
+
+    // 5. Verify TRIM command is no longer active (command line idle)
+    // No interactive command should be running
+
+    // 6. GLOBAL UNDO: execute("undo") - should undo the entire TRIM block (both trims)
+    c.app.session.execute("undo", &serde_json::json!({ "count": 1 })).unwrap();
+
+    let ents_after_global_undo = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    // Global UNDO of TRIM block should restore state BEFORE the entire TRIM command
+    // That means: full circle + cutting line = 2 entities
+    assert_eq!(ents_after_global_undo.len(), 2, "global UNDO should restore full circle + cutting line");
+    
+    let mut has_circle = false;
+    let mut has_line = false;
+    for e in &ents_after_global_undo {
+        match &e.kind {
+            cadcraft_doc::EntityKind::Circle(_) => has_circle = true,
+            cadcraft_doc::EntityKind::Line(_) => has_line = true,
+            _ => {}
+        }
+    }
+    assert!(has_circle && has_line, "global UNDO should restore full circle + cutting line");
+
+    // 7. GLOBAL REDO: execute("redo") - should re-apply entire TRIM block
+    c.app.session.execute("redo", &serde_json::json!({ "count": 1 })).unwrap();
+    
+    let ents_after_global_redo = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after_global_redo.len(), 1, "global REDO should re-apply TRIM block, only cutting line remains");
+    match &ents_after_global_redo[0].kind {
+        cadcraft_doc::EntityKind::Line(_) => {},
+        k => panic!("expected Line after global REDO, got {:?}", k),
+    }
+
+    // 8. Verify line is the original cutting line (conserved throughout)
+    match &ents_after_global_redo[0].kind {
+        cadcraft_doc::EntityKind::Line(l) => {
+            assert!((l.a.x - (-10.0)).abs() < 1e-4 && (l.b.x - 10.0).abs() < 1e-4, "cutting line geometry conserved");
+        },
+        _ => panic!("expected cutting line"),
+    }
 }
 
 

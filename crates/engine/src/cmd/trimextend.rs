@@ -9,31 +9,12 @@ use cadcraft_geom::{Bounds2, Line, Vec2, line_line};
 use serde_json::{Value, json};
 
 use super::helpers::{line, lwpoly, rect_vertices};
-use super::modify::{Edges, extend, trim};
+use super::modify::{Edges, extend, trim, quick_mode, misses_edges, edge_mode, proj_mode, trim_window_entity};
 use super::{bad, point_param, points_param};
 use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Session, Step};
 
 /// Most fence points the JSON form takes.
 const MAX_FENCE: usize = 10_000;
-
-/// TRIMEXTENDMODE: 1 (default) Quick, 0 Standard.
-fn quick_mode(s: &Session) -> bool {
-    s.doc().map(|d| d.header.i64("TRIMEXTENDMODE", 1) != 0).unwrap_or(true)
-}
-/// EDGEMODE: 1 extends cutting and boundary edges virtually (Standard mode).
-fn edge_mode(s: &Session) -> bool {
-    s.doc().map(|d| d.header.i64("EDGEMODE", 0) != 0).unwrap_or(false)
-}
-/// PROJMODE: 0 None, 1 UCS (default), 2 View. Drawings are 2D (every object lies in the XY
-/// plane), so the three give the same result; the setting is kept for scripts and the DWG.
-fn proj_mode(s: &Session) -> i64 {
-    s.doc().map(|d| d.header.i64("PROJMODE", 1)).unwrap_or(1)
-}
-
-/// Whether a trim error says the object meets no cutting edge (a Quick-mode trim then erases it).
-fn misses_edges(e: &EngineError) -> bool {
-    e.to_string().contains("intersect")
-}
 
 /// Trim or extend `h` at `at`. A Quick-mode (`quick`) trim of an object no cutting edge crosses
 /// erases it. Returns the handles that replace `h` (none when it was erased).
@@ -88,34 +69,62 @@ fn crossing(s: &mut Session, a: Vec2, b: Vec2, extending: bool, edges: Edges, qu
     let d = s.doc()?;
     let bx = Bounds2::new(a, b);
     let tol = crate::select::window_tol(&bx);
-    let sides = [
-        Line::new(bx.min, Vec2::new(bx.max.x, bx.min.y)),
-        Line::new(Vec2::new(bx.max.x, bx.min.y), bx.max),
-        Line::new(bx.max, Vec2::new(bx.min.x, bx.max.y)),
-        Line::new(Vec2::new(bx.min.x, bx.max.y), bx.min),
-    ];
-    let inside = |p: Vec2| bx.expand(tol).contains(p);
-    let mut work: Vec<(Handle, Vec<Vec2>)> = Vec::new();
-    for h in crate::select::select_window(d, &space, bx, true) {
-        let Some(e) = d.entity(h) else { continue };
-        let mut best: Option<Vec2> = None;
-        for pl in crate::select::hit_polylines(d, e, tol) {
-            for w in pl.windows(2) {
-                let (Some(p), Some(q)) = (w.first(), w.get(1)) else { continue };
-                let seg = Line::new(*p, *q);
-                let cands = [*p, *q, seg.closest(a)].into_iter().chain(sides.iter().filter_map(|sd| line_line(sd, &seg)));
-                for c in cands.filter(|c| inside(*c)) {
-                    if best.is_none_or(|b| c.dist(a) < b.dist(a)) {
-                        best = Some(c);
+    if extending {
+        let sides = [
+            Line::new(bx.min, Vec2::new(bx.max.x, bx.min.y)),
+            Line::new(Vec2::new(bx.max.x, bx.min.y), bx.max),
+            Line::new(bx.max, Vec2::new(bx.min.x, bx.max.y)),
+            Line::new(Vec2::new(bx.min.x, bx.max.y), bx.min),
+        ];
+        let inside = |p: Vec2| bx.expand(tol).contains(p);
+        let mut work: Vec<(Handle, Vec<Vec2>)> = Vec::new();
+        for h in crate::select::select_window(d, &space, bx, true) {
+            let Some(e) = d.entity(h) else { continue };
+            let mut best: Option<Vec2> = None;
+            for pl in crate::select::hit_polylines(d, e, tol) {
+                for w in pl.windows(2) {
+                    let (Some(p), Some(q)) = (w.first(), w.get(1)) else { continue };
+                    let seg = Line::new(*p, *q);
+                    let cands = [*p, *q, seg.closest(a)].into_iter().chain(sides.iter().filter_map(|sd| line_line(sd, &seg)));
+                    for c in cands.filter(|c| inside(*c)) {
+                        if best.is_none_or(|b| c.dist(a) < b.dist(a)) {
+                            best = Some(c);
+                        }
                     }
                 }
             }
+            if let Some(p) = best {
+                work.push((h, vec![p]));
+            }
         }
-        if let Some(p) = best {
-            work.push((h, vec![p]));
+        return run_picks(s, work, extending, edges, quick, tol);
+    }
+
+    let targets = crate::select::select_window(d, &space, bx, true);
+    let mut plan: Vec<(Handle, Vec<EntityKind>)> = Vec::new();
+    for h in targets {
+        if let Some(kept) = trim_window_entity(s, h, a, bx, edges, quick)? {
+            plan.push((h, kept));
         }
     }
-    run_picks(s, work, extending, edges, quick, tol)
+    if plan.is_empty() {
+        return Err(EngineError::Other("No objects found.".into()));
+    }
+    let mut n = 0;
+    for (h, kept) in plan {
+        let Some(e) = s.doc()?.entity(h).map(|e| (**e).clone()) else { continue };
+        let common = e.common.clone();
+        let d = s.doc_mut()?;
+        d.remove_entity(h);
+        let new_entities: Vec<Entity> = kept.into_iter().map(|k| Entity { handle: d.new_handle(), common: common.clone(), kind: k }).collect();
+        if let Some(st) = d.space_mut(&space) {
+            for ent in new_entities {
+                st.push(ent);
+            }
+        }
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// Trim (or extend) each object at its pick points. A trim replaces the object with pieces, so

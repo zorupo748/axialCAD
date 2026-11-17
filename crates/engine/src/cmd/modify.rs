@@ -3,16 +3,34 @@
 
 use cadcraft_doc::{Entity, EntityKind, Handle, Prim};
 use cadcraft_geom::{
-    Arc, Circle, Line, Mat3, PolyVertex, Polyline, Segment, TAU, Vec2, angle_in_sweep, ccw_sweep, intersect_ext, line_line_infinite, norm_angle,
+    Arc, Bounds2, Circle, Line, Mat3, PolyVertex, Polyline, Segment, TAU, Vec2, angle_in_sweep, ccw_sweep, intersect_ext, line_line, line_line_infinite, norm_angle,
 };
 use serde_json::{Value, json};
 
 use super::helpers::*;
 use super::machines::{SelOutcome, SelectPhase, number};
 use super::trimextend::{self, TrimM};
-use super::*;
+use super::{bad, point_param, points_param, targets, point_req, bool_or, f64_or, f64_req, str_param, CommandSpec};
 use crate::select::{SelectKind, SelectMode};
 use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Session, Step};
+
+/// TRIMEXTENDMODE: 1 (default) Quick, 0 Standard.
+pub(crate) fn quick_mode(s: &Session) -> bool {
+    s.doc().map(|d| d.header.i64("TRIMEXTENDMODE", 1) != 0).unwrap_or(true)
+}
+/// EDGEMODE: 1 extends cutting and boundary edges virtually (Standard mode).
+pub(crate) fn edge_mode(s: &Session) -> bool {
+    s.doc().map(|d| d.header.i64("EDGEMODE", 0) != 0).unwrap_or(false)
+}
+/// PROJMODE: 0 None, 1 UCS (default), 2 View. Drawings are 2D (every object lies in the XY
+/// plane), so the three give the same result; the setting is kept for scripts and the DWG.
+pub(crate) fn proj_mode(s: &Session) -> i64 {
+    s.doc().map(|d| d.header.i64("PROJMODE", 1)).unwrap_or(1)
+}
+/// Whether a trim error says the object meets no cutting edge (a Quick-mode trim then erases it).
+pub(crate) fn misses_edges(e: &EngineError) -> bool {
+    e.to_string().contains("intersect")
+}
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -1051,8 +1069,14 @@ pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Resu
 
 /// The piece of `h` that would be removed by a trim at `pick`.
 pub(crate) fn trim_preview(s: &Session, h: Handle, pick: Vec2, edges: Edges) -> Result<Vec<EntityKind>> {
-    let pieces = trim_geometry(s, h, pick, edges)?;
-    Ok(pieces.removed)
+    match trim_geometry(s, h, pick, edges) {
+        Ok(pieces) => Ok(pieces.removed),
+        Err(e) if quick_mode(s) && misses_edges(&e) => {
+            // Quick-mode fallback: preview the entire entity being erased.
+            s.doc()?.entity(h).map(|e| vec![e.kind.clone()]).ok_or(e)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Sub-polyline between length parameters `a` and `b` (open polylines).
@@ -1160,6 +1184,260 @@ fn param_on(s: &Segment, p: Vec2) -> f64 {
         }
     }
 }
+
+fn line_in_bounds(l: &Line, bx: &Bounds2, sides: &[Line; 4], tol: f64) -> bool {
+    let expanded = bx.expand(tol);
+    if expanded.contains(l.at(0.5)) {
+        return true;
+    }
+    if bx.contains(l.a) || bx.contains(l.b) {
+        return true;
+    }
+    sides.iter().any(|sd| line_line(sd, l).is_some())
+}
+
+fn arc_in_bounds(ga: &Arc, bx: &Bounds2, sides: &[Line; 4], tol: f64) -> bool {
+    let expanded = bx.expand(tol);
+    if expanded.contains(ga.mid_point()) {
+        return true;
+    }
+    if bx.contains(ga.start_point()) || bx.contains(ga.end_point()) {
+        return true;
+    }
+    let seg = Segment::Arc { arc: *ga, ccw: true };
+    sides.iter().any(|sd| !intersect_ext(&seg, &Segment::Line(*sd), false).is_empty())
+}
+
+fn polyline_in_bounds(pl: &Polyline, bx: &Bounds2, sides: &[Line; 4], tol: f64) -> bool {
+    for seg in pl.segments() {
+        match seg {
+            Segment::Line(l) => {
+                if line_in_bounds(&l, bx, sides, tol) {
+                    return true;
+                }
+            }
+            Segment::Arc { arc, .. } => {
+                if arc_in_bounds(&arc, bx, sides, tol) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, edges: Edges, quick: bool) -> Result<Option<Vec<EntityKind>>> {
+    if super::curves::is_locked(s, h) {
+        return Ok(None);
+    }
+    let e = s.doc()?.entity(h).map(|e| (**e).clone()).ok_or_else(|| EngineError::Other("no such object".into()))?;
+    if !s.doc()?.is_visible(&e) {
+        return Ok(None);
+    }
+    let tol = crate::select::window_tol(&bx);
+    let sides = [
+        Line::new(bx.min, Vec2::new(bx.max.x, bx.min.y)),
+        Line::new(Vec2::new(bx.max.x, bx.min.y), bx.max),
+        Line::new(bx.max, Vec2::new(bx.min.x, bx.max.y)),
+        Line::new(Vec2::new(bx.min.x, bx.max.y), bx.min),
+    ];
+    let cut = edge_segments(s, edges, h)?;
+    match &e.kind {
+        EntityKind::Line(l) => {
+            let ln = Line::new(l.a.xy(), l.b.xy());
+            let mut ts: Vec<f64> = cut
+                .iter()
+                .flat_map(|c| intersect_ext(&Segment::Line(ln), c, false))
+                .map(|x| ln.param_of(x))
+                .filter(|t| *t > 1e-9 && *t < 1.0 - 1e-9)
+                .collect();
+            ts.sort_by(f64::total_cmp);
+            ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if ts.is_empty() {
+                if quick && line_in_bounds(&ln, &bx, &sides, tol) {
+                    return Ok(Some(Vec::new()));
+                }
+                return Ok(None);
+            }
+            let mut cuts = Vec::with_capacity(ts.len() + 2);
+            cuts.push(0.0);
+            cuts.extend(&ts);
+            cuts.push(1.0);
+            let mut kept = Vec::new();
+            let total_intervals = cuts.len() - 1;
+            for w in cuts.windows(2) {
+                let (Some(&t0), Some(&t1)) = (w.first(), w.get(1)) else { continue };
+                let sub = Line::new(ln.at(t0), ln.at(t1));
+                if !line_in_bounds(&sub, &bx, &sides, tol) {
+                    kept.push(line(sub.a, sub.b));
+                }
+            }
+            if kept.len() < total_intervals {
+                Ok(Some(kept))
+            } else {
+                Ok(None)
+            }
+        }
+        EntityKind::Arc(a_arc) => {
+            let ga = Arc::new(a_arc.center.xy(), a_arc.radius, a_arc.start, a_arc.end);
+            let seg = Segment::Arc { arc: ga, ccw: true };
+            let sweep = ga.sweep();
+            let param = |p: Vec2| norm_angle(ga.center.angle_to(p) - ga.start);
+            let mut ts: Vec<f64> =
+                cut.iter().flat_map(|c| intersect_ext(&seg, c, false)).map(param).filter(|t| *t > 1e-9 && *t < sweep - 1e-9).collect();
+            ts.sort_by(f64::total_cmp);
+            ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if ts.is_empty() {
+                if quick && arc_in_bounds(&ga, &bx, &sides, tol) {
+                    return Ok(Some(Vec::new()));
+                }
+                return Ok(None);
+            }
+            let mut cuts = Vec::with_capacity(ts.len() + 2);
+            cuts.push(0.0);
+            cuts.extend(&ts);
+            cuts.push(sweep);
+            let mut kept = Vec::new();
+            let total_intervals = cuts.len() - 1;
+            for w in cuts.windows(2) {
+                let (Some(&t0), Some(&t1)) = (w.first(), w.get(1)) else { continue };
+                let sub_arc = Arc::new(ga.center, ga.radius, ga.start + t0, ga.start + t1);
+                if !arc_in_bounds(&sub_arc, &bx, &sides, tol) {
+                    kept.push(arc(&sub_arc));
+                }
+            }
+            if kept.len() < total_intervals {
+                Ok(Some(kept))
+            } else {
+                Ok(None)
+            }
+        }
+        EntityKind::Circle(c) => {
+            let full = Segment::Arc { arc: Arc { center: c.center.xy(), radius: c.radius, start: 0.0, end: TAU - 1e-12 }, ccw: true };
+            let mut angs: Vec<f64> = cut.iter().flat_map(|x| intersect_ext(&full, x, false)).map(|p| c.center.xy().angle_to(p)).collect();
+            angs.sort_by(f64::total_cmp);
+            angs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if angs.len() < 2 {
+                let full_arc = Arc::new(c.center.xy(), c.radius, 0.0, TAU - 1e-12);
+                if quick && arc_in_bounds(&full_arc, &bx, &sides, tol) {
+                    return Ok(Some(Vec::new()));
+                }
+                return Ok(None);
+            }
+            let n = angs.len();
+            let mut kept = Vec::new();
+            for i in 0..n {
+                let a0 = angs[i];
+                let a1 = angs[(i + 1) % n];
+                let sub_arc = Arc::new(c.center.xy(), c.radius, a0, a1);
+                if !arc_in_bounds(&sub_arc, &bx, &sides, tol) {
+                    kept.push(arc(&sub_arc));
+                }
+            }
+            if kept.len() < n {
+                Ok(Some(kept))
+            } else {
+                Ok(None)
+            }
+        }
+        EntityKind::LwPolyline(p) => {
+            let pl = Polyline { vertices: p.vertices.clone(), closed: p.closed };
+            let segs = pl.segments();
+            let total: f64 = segs.iter().map(Segment::len).sum();
+            let mut ts: Vec<f64> = Vec::new();
+            let mut acc = 0.0;
+            for s in &segs {
+                let len = s.len();
+                for x in cut.iter().flat_map(|c| intersect_ext(s, c, false)) {
+                    ts.push(acc + param_on(s, x) * len);
+                }
+                acc += len;
+            }
+            ts.retain(|t| *t > 1e-9 && *t < total - 1e-9);
+            ts.sort_by(f64::total_cmp);
+            ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if ts.is_empty() {
+                if quick && polyline_in_bounds(&pl, &bx, &sides, tol) {
+                    return Ok(Some(Vec::new()));
+                }
+                return Ok(None);
+            }
+            if !p.closed {
+                let mut cuts = Vec::with_capacity(ts.len() + 2);
+                cuts.push(0.0);
+                cuts.extend(&ts);
+                cuts.push(total);
+                let mut kept = Vec::new();
+                let total_intervals = cuts.len() - 1;
+                for w in cuts.windows(2) {
+                    let (Some(&t0), Some(&t1)) = (w.first(), w.get(1)) else { continue };
+                    let sub_vs = sub_polyline(&segs, t0, t1);
+                    if sub_vs.len() >= 2 {
+                        let sub_pl = Polyline { vertices: sub_vs.clone(), closed: false };
+                        if !polyline_in_bounds(&sub_pl, &bx, &sides, tol) {
+                            kept.push(lwpoly(sub_vs, false));
+                        }
+                    }
+                }
+                if kept.len() < total_intervals {
+                    Ok(Some(kept))
+                } else {
+                    Ok(None)
+                }
+            } else {
+                let inside = |p: Vec2| bx.expand(tol).contains(p);
+                let mut best: Option<Vec2> = None;
+                for pl_hit in crate::select::hit_polylines(s.doc()?, &e, tol) {
+                    for w in pl_hit.windows(2) {
+                        let (Some(p), Some(q)) = (w.first(), w.get(1)) else { continue };
+                        let seg = Line::new(*p, *q);
+                        let cands = [*p, *q, seg.closest(a)].into_iter().chain(sides.iter().filter_map(|sd| line_line(sd, &seg)));
+                        for c in cands.filter(|c| inside(*c)) {
+                            if best.is_none_or(|b| c.dist(a) < b.dist(a)) {
+                                best = Some(c);
+                            }
+                        }
+                    }
+                }
+                if let Some(pick) = best {
+                    match trim_geometry(s, h, pick, edges) {
+                        Ok(pieces) => Ok(Some(pieces.kept)),
+                        Err(err) if quick && misses_edges(&err) => Ok(Some(Vec::new())),
+                        _ => Ok(None),
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        _ => {
+            let inside = |p: Vec2| bx.expand(tol).contains(p);
+            let mut best: Option<Vec2> = None;
+            for pl_hit in crate::select::hit_polylines(s.doc()?, &e, tol) {
+                for w in pl_hit.windows(2) {
+                    let (Some(p), Some(q)) = (w.first(), w.get(1)) else { continue };
+                    let seg = Line::new(*p, *q);
+                    let cands = [*p, *q, seg.closest(a)].into_iter().chain(sides.iter().filter_map(|sd| line_line(sd, &seg)));
+                    for c in cands.filter(|c| inside(*c)) {
+                        if best.is_none_or(|b| c.dist(a) < b.dist(a)) {
+                            best = Some(c);
+                        }
+                    }
+                }
+            }
+            if let Some(pick) = best {
+                match trim_geometry(s, h, pick, edges) {
+                    Ok(pieces) => Ok(Some(pieces.kept)),
+                    Err(err) if quick && misses_edges(&err) => Ok(Some(Vec::new())),
+                    _ => Ok(None),
+                }
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
 
 /// Extend the end of `h` nearest `pick` to the nearest boundary edge.
 pub(crate) fn extend(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Result<()> {

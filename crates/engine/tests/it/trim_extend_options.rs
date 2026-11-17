@@ -307,9 +307,10 @@ fn trim_preview_uncut_object_shows_no_fictitious_removal() {
 
     s.cmdline("TRIM").unwrap();
 
-    // Hover over uncut circle - nothing can be trimmed so preview must be empty
+    // Quick mode (default): uncut object shows full-erase preview (fallback)
     let p = s.preview(cadcraft_geom::Vec2::new(100.0, 105.0));
-    assert!(p.is_empty(), "uncut object must not display fictitious removal preview");
+    assert_eq!(p.len(), 1, "Quick mode: uncut object shows full-erase preview");
+    assert!(matches!(p[0].kind, EntityKind::Circle(_)));
 }
 
 #[test]
@@ -472,9 +473,10 @@ fn trim_sequential_successive_cuts_circle_to_arc() {
     let arc3 = doc3.model.iter().find(|e| matches!(e.kind, EntityKind::Arc(_))).expect("third replacement Arc must exist");
     assert_ne!(arc3.handle, arc2_handle);
 
-    // Hovering on the remaining uncuttable piece must NOT produce a fictitious preview!
+    // Quick mode fallback: remaining uncuttable piece shows full-erase preview
     let p_none = s.preview(cadcraft_geom::Vec2::new(-10.0, 0.0));
-    assert!(p_none.is_empty(), "a piece with no valid cuts remaining must not display fictitious removal preview");
+    assert_eq!(p_none.len(), 1, "Quick mode: piece with no interior cuts shows full-erase preview");
+    assert!(matches!(p_none[0].kind, EntityKind::Arc(_)));
 }
 
 #[test]
@@ -511,5 +513,345 @@ fn trim_sequential_successive_cuts_standard_mode() {
     // Third preview on remaining geometry
     let p3 = s.preview(cadcraft_geom::Vec2::new(0.0, -10.0));
     assert_eq!(p3.len(), 1);
+}
+
+#[test]
+fn crossing_window_trims_all_interior_intervals_in_one_pass() {
+    // H: horizontal line 0,0 to 100,0
+    // C1: vertical at x=25 (-10 to 10)
+    // C2: vertical at x=50 (-10 to 10)
+    // C3: vertical at x=75 (-10 to 10)
+    // Crossing window: a=(70,-10) to b=(30,10)  (right->left = crossing)
+    // Quick mode: all objects are cutting edges
+    let mut s = Session::new();
+    s.cmdline("LINE 0,0 100,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 25,-10 25,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 50,-10 50,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 75,-10 75,10").unwrap();
+    s.cmdline("").unwrap();
+
+    // Quick mode explicitly
+    s.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 1);
+
+    let result = s.execute("trim", &json!({
+        "crossing": [[70.0, -10.0], [30.0, 10.0]],
+        "mode": "quick"
+    })).unwrap();
+
+    assert_eq!(result["trimmed"], 2, "expected 2 entities trimmed in one pass");
+
+    // Verify exact geometry using the lines() helper (rounded to 1e-6, sorted lexicographically)
+    let expected = vec![
+        // H pieces: 0-25 and 75-100 (both kept)
+        ((0.0, 0.0), (25.0, 0.0)),
+        // C1 intact at x=25
+        ((25.0, -10.0), (25.0, 10.0)),
+        // C3 intact at x=75
+        ((75.0, -10.0), (75.0, 10.0)),
+        // H pieces: 75-100 (kept)
+        ((75.0, 0.0), (100.0, 0.0)),
+        // C2 eliminated (selected by crossing window, trimmed completely in Quick)
+    ];
+    assert_eq!(lines(&s), expected, "geometry after one crossing pass in Quick mode");
+}
+
+#[test]
+fn crossing_window_trims_multiple_interior_intervals_additional_cutters() {
+    let mut s = Session::new();
+    s.cmdline("LINE 0,0 120,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 20,-10 20,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 40,-10 40,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 60,-10 60,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 80,-10 80,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 100,-10 100,10").unwrap();
+    s.cmdline("").unwrap();
+
+    s.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 1);
+
+    let result = s.execute("trim", &json!({
+        "crossing": [[90.0, -10.0], [30.0, 10.0]],
+        "mode": "quick"
+    })).unwrap();
+
+    // H trimmed (1) + C1, C2, C3 eliminated (3) = 4
+    assert_eq!(result["trimmed"], 4, "expected 4 entities trimmed/erased in one pass");
+
+    let expected = vec![
+        ((0.0, 0.0), (20.0, 0.0)),
+        ((20.0, -10.0), (20.0, 10.0)),
+        ((100.0, -10.0), (100.0, 10.0)),
+        ((100.0, 0.0), (120.0, 0.0)),
+    ];
+    assert_eq!(lines(&s), expected, "geometry after multi-interval crossing pass");
+}
+
+#[test]
+fn crossing_window_trims_independent_of_creation_order() {
+    // Reverse creation order: C3, C2, C1, then H
+    let mut s = Session::new();
+    s.cmdline("LINE 75,-10 75,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 50,-10 50,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 25,-10 25,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 0,0 100,0").unwrap();
+    s.cmdline("").unwrap();
+
+    s.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 1);
+
+    let result = s.execute("trim", &json!({
+        "crossing": [[70.0, -10.0], [30.0, 10.0]],
+        "mode": "quick"
+    })).unwrap();
+
+    assert_eq!(result["trimmed"], 2);
+
+    let expected = vec![
+        ((0.0, 0.0), (25.0, 0.0)),
+        ((25.0, -10.0), (25.0, 10.0)),
+        ((75.0, -10.0), (75.0, 10.0)),
+        ((75.0, 0.0), (100.0, 0.0)),
+    ];
+    assert_eq!(lines(&s), expected, "geometry identical regardless of creation order");
+}
+
+#[test]
+fn crossing_window_standard_mode_with_explicit_edges() {
+    let mut s = Session::new();
+    s.cmdline("LINE 0,0 100,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 25,-10 25,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 50,-10 50,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 75,-10 75,10").unwrap();
+    s.cmdline("").unwrap();
+
+    let d = s.doc().unwrap();
+    let h_c1 = d.model.iter().find(|e| matches!(&e.kind, EntityKind::Line(l) if (l.a.x - 25.0).abs() < 1e-6)).unwrap().handle;
+    let h_c3 = d.model.iter().find(|e| matches!(&e.kind, EntityKind::Line(l) if (l.a.x - 75.0).abs() < 1e-6)).unwrap().handle;
+
+    // Standard mode: only C1 and C3 are cutting edges. C2 is NOT a cutting edge.
+    let result = s.execute("trim", &json!({
+        "crossing": [[70.0, -10.0], [30.0, 10.0]],
+        "mode": "standard",
+        "edges": [h_c1.hex(), h_c3.hex()]
+    })).unwrap();
+
+    // H is trimmed between C1 and C3 (kept 0-25 and 75-100).
+    // C2 is not cut by C1/C3, so in standard mode it is untouched.
+    assert_eq!(result["trimmed"], 1);
+
+    let expected = vec![
+        ((0.0, 0.0), (25.0, 0.0)),
+        ((25.0, -10.0), (25.0, 10.0)),
+        ((50.0, -10.0), (50.0, 10.0)),
+        ((75.0, -10.0), (75.0, 10.0)),
+        ((75.0, 0.0), (100.0, 0.0)),
+    ];
+    assert_eq!(lines(&s), expected, "standard mode preserves uncut C2 and trims H across chosen edges");
+}
+
+#[test]
+fn crossing_window_trim_internal_and_global_undo() {
+    let mut s = Session::new();
+    s.cmdline("LINE 0,0 100,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 25,-10 25,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 50,-10 50,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 75,-10 75,10").unwrap();
+    s.cmdline("").unwrap();
+
+    let initial_lines = lines(&s);
+
+    // Interactive TRIM with crossing window, then internal Undo 'U'
+    s.script("TRIM C 70,-10 30,10\nU\n\n").unwrap();
+    assert_eq!(lines(&s), initial_lines, "internal Undo inside TRIM restores initial geometry");
+
+    // Interactive TRIM with crossing window confirmed
+    s.script("TRIM C 70,-10 30,10\n\n").unwrap();
+    assert_eq!(lines(&s).len(), 4, "trimmed geometry has 4 lines");
+
+    // Global session undo
+    s.undo().unwrap();
+    assert_eq!(lines(&s), initial_lines, "global session undo restores initial geometry");
+}
+
+#[test]
+fn crossing_window_trims_circle_multiple_intervals() {
+    let mut s = Session::new();
+    s.cmdline("CIRCLE 0,0 10").unwrap();
+    s.cmdline("LINE 0,-15 0,15").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE -15,0 15,0").unwrap();
+    s.cmdline("").unwrap();
+
+    let d = s.doc().unwrap();
+    let h_v = d.model.iter().find(|e| matches!(&e.kind, EntityKind::Line(l) if (l.a.x).abs() < 1e-6)).unwrap().handle;
+    let h_h = d.model.iter().find(|e| matches!(&e.kind, EntityKind::Line(l) if (l.a.y).abs() < 1e-6)).unwrap().handle;
+
+    // Standard mode with L1 and L2 as explicit cutting edges
+    // Window covers top half: y in [2, 12], x in [-12, 12]
+    // Removes Quadrant 1 (0 -> pi/2) and Quadrant 2 (pi/2 -> pi)
+    let result = s.execute("trim", &json!({
+        "crossing": [[12.0, 12.0], [-12.0, 2.0]],
+        "mode": "standard",
+        "edges": [h_v.hex(), h_h.hex()]
+    })).unwrap();
+
+    assert_eq!(result["trimmed"], 2, "circle and vertical line trimmed in pass 1");
+
+    // The circle should be replaced by the surviving bottom semicircle (pi -> 2pi)
+    let mut arcs_pass1: Vec<(f64, f64)> = s.doc().unwrap().model.iter().filter_map(|e| {
+        if let EntityKind::Arc(a) = &e.kind {
+            Some((r(a.start), r(a.end)))
+        } else {
+            None
+        }
+    }).collect();
+    arcs_pass1.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    // Surviving arcs cover quadrants 3 and 4 (pi -> 1.5pi and 1.5pi -> 2pi)
+    assert_eq!(arcs_pass1.len(), 2, "expected 2 surviving quadrant arcs");
+    assert!((arcs_pass1[0].0 - std::f64::consts::PI).abs() < 1e-3);
+    assert!((arcs_pass1[0].1 - 1.5 * std::f64::consts::PI).abs() < 1e-3);
+    assert!((arcs_pass1[1].0 - 1.5 * std::f64::consts::PI).abs() < 1e-3);
+    assert!((arcs_pass1[1].1 - std::f64::consts::TAU).abs() < 1e-3 || arcs_pass1[1].1.abs() < 1e-3);
+
+    // Pass 2: repeat the exact same crossing window without undo
+    let res2 = s.execute("trim", &json!({
+        "crossing": [[12.0, 12.0], [-12.0, 2.0]],
+        "mode": "standard",
+        "edges": [h_v.hex(), h_h.hex()]
+    }));
+    assert!(res2.is_err(), "pass 2 finds no objects to trim in window");
+
+    // Geometry after pass 2 must be identical to pass 1
+    let mut arcs_pass2: Vec<(f64, f64)> = s.doc().unwrap().model.iter().filter_map(|e| {
+        if let EntityKind::Arc(a) = &e.kind {
+            Some((r(a.start), r(a.end)))
+        } else {
+            None
+        }
+    }).collect();
+    arcs_pass2.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(arcs_pass1, arcs_pass2, "no change after second pass");
+}
+
+#[test]
+fn crossing_window_trims_polyline_multiple_intervals() {
+    let mut s = Session::new();
+    s.cmdline("PLINE 0,0 50,0 100,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 25,-10 25,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 50,-10 50,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 75,-10 75,10").unwrap();
+    s.cmdline("").unwrap();
+
+    s.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 1);
+
+    // Pass 1: crossing window 70,-10 to 30,10
+    let result = s.execute("trim", &json!({
+        "crossing": [[70.0, -10.0], [30.0, 10.0]],
+        "mode": "quick"
+    })).unwrap();
+
+    // Polyline trimmed + C2 erased = 2
+    assert_eq!(result["trimmed"], 2, "expected 2 entities trimmed/erased in pass 1");
+
+    // Verify polyline geometry: surviving pieces must be 0->25 and 75->100
+    let mut polylines_pass1: Vec<Vec<(f64, f64)>> = s.doc().unwrap().model.iter().filter_map(|e| {
+        if let EntityKind::LwPolyline(p) = &e.kind {
+            Some(p.vertices.iter().map(|v| (r(v.p.x), r(v.p.y))).collect())
+        } else {
+            None
+        }
+    }).collect();
+    polylines_pass1.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let expected_polylines = vec![
+        vec![(0.0, 0.0), (25.0, 0.0)],
+        vec![(75.0, 0.0), (100.0, 0.0)],
+    ];
+    assert_eq!(polylines_pass1, expected_polylines, "polyline intervals 25-50 and 50-75 removed");
+
+    // Pass 2: repeat the exact same crossing window without undo
+    let res2 = s.execute("trim", &json!({
+        "crossing": [[70.0, -10.0], [30.0, 10.0]],
+        "mode": "quick"
+    }));
+    assert!(res2.is_err(), "pass 2 finds no objects to trim in window");
+
+    let mut polylines_pass2: Vec<Vec<(f64, f64)>> = s.doc().unwrap().model.iter().filter_map(|e| {
+        if let EntityKind::LwPolyline(p) = &e.kind {
+            Some(p.vertices.iter().map(|v| (r(v.p.x), r(v.p.y))).collect())
+        } else {
+            None
+        }
+    }).collect();
+    polylines_pass2.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(polylines_pass1, polylines_pass2, "no change after second pass");
+}
+
+#[test]
+fn fallback_closed_polyline_selects_closest_to_first_corner_a() {
+    // Closed square 0,0 to 20,20 cut at x=10 into left (x<=10) and right (x>=10) pieces.
+    // When corner 'a' is on the left side (x=1), the pick nearest 'a' trims the left piece and keeps the right piece.
+    let mut s1 = Session::new();
+    s1.cmdline("PLINE 0,0 20,0 20,20 0,20 C").unwrap();
+    s1.cmdline("LINE 10,-5 10,25").unwrap();
+    s1.cmdline("").unwrap();
+    s1.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 1);
+
+    // a = (-5.0, 15.0), b = (25.0, 5.0). Window spans x in [-5, 25], y in [5, 15].
+    // Center is (10.0, 10.0). Corner 'a' is on left (dist 5 to left side x=0 vs dist 25 to right side x=20).
+    s1.execute("trim", &json!({
+        "crossing": [[-5.0, 15.0], [25.0, 5.0]],
+        "mode": "quick"
+    })).unwrap();
+
+    let plines1: Vec<_> = s1.doc().unwrap().model.iter().filter_map(|e| {
+        if let EntityKind::LwPolyline(p) = &e.kind { Some(p.clone()) } else { None }
+    }).collect();
+    assert_eq!(plines1.len(), 1);
+    // Kept piece must be the right piece (all vertices have x >= 10)
+    for v in &plines1[0].vertices {
+        assert!(v.p.x >= 10.0 - 1e-6, "expected kept piece to be right piece with x >= 10, got x={}", v.p.x);
+    }
+
+    // Now symmetric case: when corner 'a' is on the right side (x=25), the pick nearest 'a' trims the right piece and keeps the left piece.
+    let mut s2 = Session::new();
+    s2.cmdline("PLINE 0,0 20,0 20,20 0,20 C").unwrap();
+    s2.cmdline("LINE 10,-5 10,25").unwrap();
+    s2.cmdline("").unwrap();
+    s2.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 1);
+
+    // a = (25.0, 15.0), b = (-5.0, 5.0). Exact same window box, but corner 'a' is on the right.
+    s2.execute("trim", &json!({
+        "crossing": [[25.0, 15.0], [-5.0, 5.0]],
+        "mode": "quick"
+    })).unwrap();
+
+    let plines2: Vec<_> = s2.doc().unwrap().model.iter().filter_map(|e| {
+        if let EntityKind::LwPolyline(p) = &e.kind { Some(p.clone()) } else { None }
+    }).collect();
+    assert_eq!(plines2.len(), 1);
+    // Kept piece must be the left piece (all vertices have x <= 10)
+    for v in &plines2[0].vertices {
+        assert!(v.p.x <= 10.0 + 1e-6, "expected kept piece to be left piece with x <= 10, got x={}", v.p.x);
+    }
 }
 
