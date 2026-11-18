@@ -112,9 +112,9 @@ fn crossing_window_trims_what_it_touches() {
     s.script("TRIM C 4,-1 6,1\n\n").unwrap();
     assert!(s.running.is_none(), "{}", s.prompt_text());
     assert_eq!(lines(&s), with_edges(&[((-5.0, 0.0), (0.0, 0.0)), ((-5.0, 2.0), (15.0, 2.0)), ((10.0, 0.0), (15.0, 0.0))]));
-    // A pick in empty space opens a crossing window too.
+    // A pick in empty space opens a window; dragging left (6,-4 to 4,1) makes it a crossing window.
     let mut s = ladder();
-    s.script("TRIM 4,-4 6,1\n\n").unwrap();
+    s.script("TRIM 6,-4 4,1\n\n").unwrap();
     assert_eq!(lines(&s), with_edges(&[((-5.0, 0.0), (0.0, 0.0)), ((-5.0, 2.0), (15.0, 2.0)), ((10.0, 0.0), (15.0, 0.0))]));
 }
 
@@ -973,3 +973,144 @@ fn typed_no_intersection_distinguishes_no_cuts_from_invalid_data() {
     assert!(!lines(&s).contains(&((20.0, 20.0), (25.0, 20.0))), "uncut line was erased in Quick mode");
     assert_eq!(lines(&s).len(), 5, "2 edges + 1 intact line + 2 pieces of cut line = 5");
 }
+
+#[test]
+fn window_vs_crossing_same_box_opposite_drag_directions() {
+    // Ladder geometry: V1 at x=0, V2 at x=10, H1 at y=0 (-5 to 15), H2 at y=2 (-5 to 15).
+    // Test box: x in [4, 6], y in [-15, 15] touches both H1 and H2 across [0, 10], but corners at y=-15 are far outside any entity pickbox.
+    // Case 1: Drag left (Crossing) -> Trims H1 (y=0) and H2 (y=2) between 0 and 10!
+    let mut s_left = ladder();
+    s_left.script("TRIM 6,-15 4,15\n\n").unwrap();
+    assert_eq!(lines(&s_left), with_edges(&[
+        ((-5.0, 0.0), (0.0, 0.0)),
+        ((-5.0, 2.0), (0.0, 2.0)),
+        ((10.0, 0.0), (15.0, 0.0)),
+        ((10.0, 2.0), (15.0, 2.0)),
+    ]));
+
+    // Case 2: Drag right (Window) -> Segments of H1 and H2 are NOT fully contained (0 and 10 outside) -> NOTHING trimmed!
+    let mut s_right = ladder();
+    let res = s_right.script("TRIM 4,-15 6,15\n\n");
+    assert!(res.is_ok());
+    // All 4 initial lines remain intact
+    assert_eq!(lines(&s_right).len(), 4, "window selection does not trim partially entered segment");
+}
+
+#[test]
+fn window_trims_fully_contained_interior_segment_of_long_entity() {
+    let mut s = Session::new();
+    // Long line H from 0,0 to 100,0
+    s.cmdline("LINE 0,0 100,0").unwrap();
+    s.cmdline("").unwrap();
+    // Cutters at x=25, x=50, x=75
+    s.cmdline("LINE 25,-10 25,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 50,-10 50,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 75,-10 75,10").unwrap();
+    s.cmdline("").unwrap();
+
+    // Box from (20, -15) to (55, 15):
+    // Window from 20 to 55 (drag right: x_end > x_start)
+    // T1 (0..25): ends at 0 outside -> not trimmed
+    // T2 (25..50): both ends 25 and 50 are inside [20, 55] -> FULLY CONTAINED -> trimmed!
+    // T3 (50..75): ends at 75 outside -> not trimmed
+    // V1 (25,-10..25,10) is fully inside [20, 55] x [-15, 15] -> trimmed/erased!
+    // V2 (50,-10..50,10) is fully inside -> trimmed/erased!
+    s.execute("trim", &json!({
+        "window": [[20.0, -15.0], [55.0, 15.0]],
+        "mode": "quick"
+    })).unwrap();
+
+    let remaining = lines(&s);
+    // H now has kept T1 (0..25) and T3+T4 (50..100) or T3 (50..75) and T4 (75..100)
+    // V3 (75,-10..75,10) survives intact
+    assert!(remaining.contains(&((75.0, -10.0), (75.0, 10.0))), "V3 remains");
+    assert!(remaining.contains(&((0.0, 0.0), (25.0, 0.0))), "T1 remains");
+    assert!(!remaining.contains(&((25.0, 0.0), (50.0, 0.0))), "T2 (25..50) was trimmed because it was fully contained");
+}
+
+#[test]
+fn window_curve_bounds_strictly_checked_not_just_three_points() {
+    let mut s = Session::new();
+    // Semicircle from (-10, 0) to (10, 0) passing through (0, 10), radius 10, center (0, 0).
+    // Start (-10, 0), End (10, 0), Midpoint (0, 10).
+    // We create cutter at y=0
+    s.cmdline("ARC -10,0 0,10 10,0").unwrap();
+    s.cmdline("LINE -15,0 15,0").unwrap();
+    s.cmdline("").unwrap();
+
+    // Box that contains start (-10, 0), end (10, 0), and midpoint (0, 10),
+    // but cuts off the top-left shoulder of the arc!
+    // For example, an asymmetric box with y max = 12, but x in [-11, 11] covers the full box.
+    // What if the box has y max = 8? Then midpoint (0, 10) is outside.
+    // What if the arc is an elliptical or partial curve whose quadrant extrema exceed the box?
+    // Arc from (-10, 0) to (10, 0): bounds are x in [-10, 10], y in [0, 10].
+    // If box is x in [-12, 12], y in [-2, 8]:
+    // Endpoints (-10, 0) and (10, 0) are inside.
+    // If an arc from angle 0.1 to 3.0 has start and end inside, and mid-angle inside, but apex at pi/2 (y=10) outside:
+    // Arc center (0, 0), radius 10, from angle 10 deg to 170 deg.
+    // Start: (9.84, 1.74), End: (-9.84, 1.74), Mid (90 deg): (0, 10).
+    // Box: x in [-15, 15], y in [0, 9].
+    // Here start and end are at y=1.74 (inside [0, 9]). Apex is at y=10 (OUTSIDE [0, 9]).
+    // Window mode MUST NOT trim this arc because it protrudes beyond y=9!
+    let a1 = 10.0_f64.to_radians();
+    let a2 = 170.0_f64.to_radians();
+    let p_start = cadcraft_geom::Vec2::polar(cadcraft_geom::Vec2::ZERO, 10.0, a1);
+    let p_mid = cadcraft_geom::Vec2::polar(cadcraft_geom::Vec2::ZERO, 10.0, 90.0_f64.to_radians());
+    let p_end = cadcraft_geom::Vec2::polar(cadcraft_geom::Vec2::ZERO, 10.0, a2);
+
+    let mut s_curve = Session::new();
+    s_curve.cmdline(&format!("ARC {},{} {},{} {},{}", p_start.x, p_start.y, p_mid.x, p_mid.y, p_end.x, p_end.y)).unwrap();
+    // Window selection from (-15, 0) to (15, 9) (drag right: window mode)
+    let res = s_curve.execute("trim", &json!({
+        "window": [[-15.0, 0.0], [15.0, 9.0]],
+        "mode": "quick"
+    }));
+    assert!(res.is_err(), "arc protruding beyond y=9 is not contained in window, must not be trimmed");
+}
+
+#[test]
+fn quick_fallback_partial_vs_fully_contained() {
+    let mut s = Session::new();
+    // Uncut line from (0, 0) to (20, 0)
+    s.cmdline("LINE 0,0 20,0").unwrap();
+    s.cmdline("").unwrap();
+
+    // 1. Window partially covering line (5 to 15) -> NOT erased
+    let r1 = s.execute("trim", &json!({
+        "window": [[5.0, -5.0], [15.0, 5.0]],
+        "mode": "quick"
+    }));
+    assert!(r1.is_err());
+    assert_eq!(lines(&s).len(), 1, "partially covered uncut line is not erased in window mode");
+
+    // 2. Crossing partially covering line (5 to 15) -> ERASED
+    let r2 = s.execute("trim", &json!({
+        "crossing": [[15.0, 5.0], [5.0, -5.0]],
+        "mode": "quick"
+    }));
+    assert!(r2.is_ok());
+    assert_eq!(lines(&s).len(), 0, "partially covered uncut line is erased in crossing mode");
+
+    // 3. Window fully covering line (-5 to 25) -> ERASED
+    let mut s3 = Session::new();
+    s3.cmdline("LINE 0,0 20,0").unwrap();
+    s3.cmdline("").unwrap();
+    let r3 = s3.execute("trim", &json!({
+        "window": [[-5.0, -5.0], [25.0, 5.0]],
+        "mode": "quick"
+    }));
+    assert!(r3.is_ok());
+    assert_eq!(lines(&s3).len(), 0, "fully covered uncut line is erased in window mode");
+}
+
+#[test]
+fn explicit_crossing_keyword_forces_crossing_regardless_of_drag_direction() {
+    let mut s = ladder();
+    // Using explicit 'Crossing' keyword, then dragging to the RIGHT (4,-1 to 6,1)
+    s.script("TRIM C 4,-1 6,1\n\n").unwrap();
+    assert_eq!(lines(&s), with_edges(&[((-5.0, 0.0), (0.0, 0.0)), ((-5.0, 2.0), (15.0, 2.0)), ((10.0, 0.0), (15.0, 0.0))]),
+        "explicit Crossing keyword forces crossing trim even when dragging to the right");
+}
+

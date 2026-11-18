@@ -4002,12 +4002,12 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             painter.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Middle);
         }
     }
-    // Legacy engine selection windows used by typed point-collection modes.
-    if let (Some(pw), Some(c)) = (app.session.pending_window, raw_world) {
+    // Legacy engine selection windows used by typed point-collection modes and TRIM/EXTEND.
+    if let (Some(pw), Some(c)) = (app.session.pending_window, raw_world.or(app.canvas.cursor)) {
         let a = xf.to_screen(pw.corner);
         let b = xf.to_screen(c);
         let r = Rect::from_two_pos(a, b);
-        let crossing = c.x < pw.corner.x;
+        let crossing = pw.force_crossing || c.x < pw.corner.x;
         if let Some(fill) = selection_area_fill(&app.session.settings, crossing) {
             painter.rect_filled(r, 0.0, fill);
         }
@@ -5245,7 +5245,7 @@ pub(crate) mod tests {
         assert!(arch(c.len()) != arch(c.x) && arch(c.len()) != arch(c.y), "{c:?}");
         assert!(text.contains(&arch(c.len())), "no {} in:\n{text}", arch(c.len()));
         // Without the value boxes (a window corner pending) the tooltip shows the distance too.
-        app.session.pending_window = Some(cadcraft_engine::PendingWindow { corner: Vec2::ZERO, during_command: true });
+        app.session.pending_window = Some(cadcraft_engine::PendingWindow { corner: Vec2::ZERO, during_command: true, force_crossing: false });
         let text = painted_text(&mut app, &ctx, at);
         assert!(text.contains(&format!("   {}  <", arch(c.len()))), "no {} in:\n{text}", arch(c.len()));
     }

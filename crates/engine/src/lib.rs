@@ -601,6 +601,7 @@ pub struct Running {
 pub struct PendingWindow {
     pub corner: Vec2,
     pub during_command: bool,
+    pub force_crossing: bool,
 }
 
 /// Options and values the interactive commands remember for the rest of the session, offered as
@@ -1544,14 +1545,14 @@ impl Session {
             Input::Point(p) => {
                 let ap = self.pixel_size() * self.settings.pickbox.max(1.0) * 1.5;
                 if let Some(pw) = self.pending_window.take() {
-                    let crossing = p.x < pw.corner.x;
+                    let crossing = pw.force_crossing || p.x < pw.corner.x;
                     let hs = select::select_window(self.doc()?, &space, Bounds2::new(pw.corner, p), crossing);
                     return Ok(Some(Input::Pick(cmd::groups::expand(self, hs))));
                 }
                 match select::pick(self.doc()?, &space, p, ap) {
                     Some(h) => Ok(Some(Input::Pick(cmd::groups::expand(self, vec![h])))),
                     None => {
-                        self.pending_window = Some(PendingWindow { corner: p, during_command: true });
+                        self.pending_window = Some(PendingWindow { corner: p, during_command: true, force_crossing: false });
                         Ok(None)
                     }
                 }
@@ -1560,14 +1561,14 @@ impl Session {
                 let p2 = p.xy();
                 let ap = self.pixel_size() * self.settings.pickbox.max(1.0) * 1.5;
                 if let Some(pw) = self.pending_window.take() {
-                    let crossing = p2.x < pw.corner.x;
+                    let crossing = pw.force_crossing || p2.x < pw.corner.x;
                     let hs = select::select_window(self.doc()?, &space, Bounds2::new(pw.corner, p2), crossing);
                     return Ok(Some(Input::Pick(cmd::groups::expand(self, hs))));
                 }
                 match select::pick(self.doc()?, &space, p2, ap) {
                     Some(h) => Ok(Some(Input::Pick(cmd::groups::expand(self, vec![h])))),
                     None => {
-                        self.pending_window = Some(PendingWindow { corner: p2, during_command: true });
+                        self.pending_window = Some(PendingWindow { corner: p2, during_command: true, force_crossing: false });
                         Ok(None)
                     }
                 }
@@ -2525,7 +2526,7 @@ impl Session {
         if !self.settings.pickdrag || !corner.is_finite() || (during_command && !self.current_prompt().is_some_and(|p| p.accept.select)) {
             return false;
         }
-        self.pending_window = Some(PendingWindow { corner, during_command });
+        self.pending_window = Some(PendingWindow { corner, during_command, force_crossing: false });
         true
     }
 
@@ -2537,7 +2538,7 @@ impl Session {
         let space = self.space();
         let pickadd = self.settings.pickadd;
         if let Some(pw) = self.pending_window.take() {
-            let crossing = p.x < pw.corner.x;
+            let crossing = pw.force_crossing || p.x < pw.corner.x;
             let hs = select::select_window(self.doc()?, &space, Bounds2::new(pw.corner, p), crossing);
             let hs = cmd::groups::expand(self, hs);
             let mut sel = if pickadd || shift { self.selection() } else { Vec::new() };
@@ -2552,7 +2553,7 @@ impl Session {
         let ap = self.pixel_size() * self.settings.pickbox.max(1.0) * 1.5;
         match select::pick(self.doc()?, &space, p, ap) {
             Some(h) => self.idle_pick(h, shift),
-            None => self.pending_window = Some(PendingWindow { corner: p, during_command: false }),
+            None => self.pending_window = Some(PendingWindow { corner: p, during_command: false, force_crossing: false }),
         }
         Ok(())
     }

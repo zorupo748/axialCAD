@@ -896,5 +896,276 @@ fn trim_quick_global_undo_redo_after_finish() {
     }
 }
 
+#[test]
+fn trim_selection_window_overlay_appearance_and_layer_independence() {
+    let mut c = Canvas::new(false);
+    c.app.session.cmdline("LINE 0,0 100,0").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("LINE 25,-10 25,10").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("LINE 50,-10 50,10").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("LINE 75,-10 75,10").unwrap();
+    c.app.session.cmdline("").unwrap();
+
+    // Create and switch to a distinct active layer with red color
+    c.app.session.cmdline("LAYER M RED_LAYER C 1  ").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("").unwrap();
+    assert!(c.app.session.running.is_none(), "LAYER command must be finished");
+    assert_eq!(c.app.session.doc().unwrap().header.str("CLAYER", "0"), "RED_LAYER");
+
+    // Start TRIM
+    c.app.cmdline("TRIM");
+    assert_eq!(c.app.session.running.as_ref().map(|r| r.id.as_str()), Some("trim"));
+
+    // 1. Move to empty space at (70, -25) and click to initiate crossing selection
+    let p_start = c.screen(Vec2::new(70.0, -25.0));
+    let _ = c.paint(p_start);
+    let input_start = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_start),
+            egui::Event::PointerButton { pos: p_start, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_start, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut output_start = c.ctx.run_ui(input_start, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+    output_start.textures_delta.clear();
+
+    // Verify pending_window is active with corner at (70, -25)
+    let pw = c.app.session.pending_window.expect("pending_window must be set during TRIM crossing");
+    assert!((pw.corner.x - 70.0).abs() < 1e-4 && (pw.corner.y - (-25.0)).abs() < 1e-4);
+
+    // 2. Drag cursor to the LEFT to (30, 25): Crossing window (x < corner.x)
+    let p_left = c.screen(Vec2::new(30.0, 25.0));
+    let shapes_crossing = c.paint(p_left);
+
+    // Verify that the crossing window is rendered with semi-transparent fill and crossing stroke
+    let tokens = theme::Tokens::get();
+    let mut has_fill = false;
+    let mut has_crossing_stroke = false;
+    let mut has_red_stroke = false;
+    fn check_crossing(s: &egui::Shape, tokens: &theme::Tokens, has_fill: &mut bool, has_crossing_stroke: &mut bool, has_red_stroke: &mut bool) {
+        match s {
+            egui::Shape::Rect(r) => {
+                if r.fill.a() > 0 && r.fill.a() < 255 {
+                    *has_fill = true;
+                }
+                if r.stroke.color == tokens.crossing_stroke {
+                    *has_crossing_stroke = true;
+                }
+                if r.stroke.color == Color32::from_rgb(255, 0, 0) || r.stroke.color == Color32::RED {
+                    *has_red_stroke = true;
+                }
+            }
+            egui::Shape::LineSegment { stroke, .. } => {
+                if stroke.color == tokens.crossing_stroke {
+                    *has_crossing_stroke = true;
+                }
+                if stroke.color == Color32::from_rgb(255, 0, 0) || stroke.color == Color32::RED {
+                    *has_red_stroke = true;
+                }
+            }
+            egui::Shape::Vec(v) => {
+                for inner in v {
+                    check_crossing(inner, tokens, has_fill, has_crossing_stroke, has_red_stroke);
+                }
+            }
+            _ => {}
+        }
+    }
+    for s in &shapes_crossing {
+        check_crossing(&s.shape, &tokens, &mut has_fill, &mut has_crossing_stroke, &mut has_red_stroke);
+    }
+    assert!(has_fill, "TRIM crossing window must render a semi-transparent fill");
+    assert!(has_crossing_stroke, "TRIM crossing window must use theme crossing stroke");
+    assert!(!has_red_stroke, "TRIM crossing window must NOT use active layer's red color");
+
+    // 3. Move cursor to the RIGHT to (90, 10): Window selection (x > corner.x)
+    let p_right = c.screen(Vec2::new(90.0, 10.0));
+    let shapes_window = c.paint(p_right);
+    let mut has_window_stroke = false;
+    fn check_window(s: &egui::Shape, tokens: &theme::Tokens, has_window_stroke: &mut bool) {
+        match s {
+            egui::Shape::Rect(r) => {
+                if r.stroke.color == tokens.window_stroke {
+                    *has_window_stroke = true;
+                }
+            }
+            egui::Shape::LineSegment { stroke, .. } => {
+                if stroke.color == tokens.window_stroke {
+                    *has_window_stroke = true;
+                }
+            }
+            egui::Shape::Vec(v) => {
+                for inner in v {
+                    check_window(inner, tokens, has_window_stroke);
+                }
+            }
+            _ => {}
+        }
+    }
+    for s in &shapes_window {
+        check_window(&s.shape, &tokens, &mut has_window_stroke);
+    }
+    assert!(has_window_stroke, "TRIM selection to the right must use theme window stroke (solid)");
+
+    // 4. Confirm crossing selection at (30, 10)
+    let input_end = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_left),
+            egui::Event::PointerButton { pos: p_left, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_left, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut output_end = c.ctx.run_ui(input_end, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+    output_end.textures_delta.clear();
+
+    // Verify pending_window is cleared
+    assert!(c.app.session.pending_window.is_none(), "pending_window must be cleared after confirming crossing");
+
+    // Verify trimming occurred: H middle segment and cutter V2 (50, -10 to 50, 10) removed
+    let ents_after = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after.len(), 4, "crossing trim in one pass leaves exactly 4 lines");
+}
+
+#[test]
+fn trim_selection_overlay_respects_selectionarea_disabled() {
+    let mut c = Canvas::new(false);
+    c.app.cmdline("TRIM");
+
+    // Start window at (70, -25)
+    let p_start = c.screen(Vec2::new(70.0, -25.0));
+    let input_start = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_start),
+            egui::Event::PointerButton { pos: p_start, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_start, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut output = c.ctx.run_ui(input_start, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+    output.textures_delta.clear();
+
+    // 1. With SELECTIONAREA disabled: no fill must be rendered on the selection box
+    c.app.session.settings.selectionarea = false;
+    let p_drag = c.screen(Vec2::new(30.0, 25.0));
+    let expected_r = Rect::from_two_pos(p_start, p_drag);
+    let shapes_no_fill = c.paint(p_drag);
+
+    let mut fill_found = false;
+    fn check_box_fill(s: &egui::Shape, expected: Rect, fill_found: &mut bool) {
+        match s {
+            egui::Shape::Rect(r) if (r.rect.min.distance(expected.min) < 2.0) && (r.rect.max.distance(expected.max) < 2.0) && r.fill.a() > 0 => {
+                *fill_found = true;
+            }
+            egui::Shape::Vec(v) => {
+                for inner in v {
+                    check_box_fill(inner, expected, fill_found);
+                }
+            }
+            _ => {}
+        }
+    }
+    for s in &shapes_no_fill {
+        check_box_fill(&s.shape, expected_r, &mut fill_found);
+    }
+    assert!(!fill_found, "when SELECTIONAREA is false, pending_window must NOT render any fill");
+
+    // 2. With SELECTIONAREA enabled: fill must be rendered on the selection box
+    c.app.session.settings.selectionarea = true;
+    let shapes_with_fill = c.paint(p_drag);
+    fill_found = false;
+    for s in &shapes_with_fill {
+        check_box_fill(&s.shape, expected_r, &mut fill_found);
+    }
+    assert!(fill_found, "when SELECTIONAREA is true, pending_window must render semi-transparent fill");
+}
+
+#[test]
+fn trim_explicit_crossing_keyword_forces_green_overlay_dragging_right() {
+    let mut c = Canvas::new(false);
+    c.app.cmdline("TRIM");
+
+    // Enter explicit Crossing mode via keyword "C"
+    c.app.cmdline("C");
+
+    // First corner at (30, 25)
+    let p_first = c.screen(Vec2::new(30.0, 25.0));
+    let input_first = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_first),
+            egui::Event::PointerButton { pos: p_first, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_first, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut output = c.ctx.run_ui(input_first, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+    output.textures_delta.clear();
+
+    let pw = c.app.session.pending_window.as_ref().expect("pending_window active");
+    assert!(pw.force_crossing, "pending_window must have force_crossing=true");
+
+    // Drag to the RIGHT at (70, 25) (c.x > corner.x)
+    let p_right = c.screen(Vec2::new(70.0, 25.0));
+    let shapes = c.paint(p_right);
+
+    let tokens = theme::Tokens::get();
+    let mut has_crossing_stroke = false;
+    let mut has_window_stroke = false;
+    fn check_strokes(s: &egui::Shape, tokens: &theme::Tokens, has_cross: &mut bool, has_win: &mut bool) {
+        match s {
+            egui::Shape::Rect(r) => {
+                if r.stroke.color == tokens.crossing_stroke { *has_cross = true; }
+                if r.stroke.color == tokens.window_stroke { *has_win = true; }
+            }
+            egui::Shape::LineSegment { stroke, .. } => {
+                if stroke.color == tokens.crossing_stroke { *has_cross = true; }
+                if stroke.color == tokens.window_stroke { *has_win = true; }
+            }
+            egui::Shape::Vec(v) => {
+                for inner in v {
+                    check_strokes(inner, tokens, has_cross, has_win);
+                }
+            }
+            _ => {}
+        }
+    }
+    for s in &shapes {
+        check_strokes(&s.shape, &tokens, &mut has_crossing_stroke, &mut has_window_stroke);
+    }
+    assert!(has_crossing_stroke, "explicit Crossing keyword must force green dashed crossing stroke even when dragging right");
+    assert!(!has_window_stroke, "explicit Crossing keyword must NOT use blue window stroke");
+
+    // Cancel and verify cleanup of overlay
+    c.app.session.cancel();
+    assert!(c.app.session.pending_window.is_none(), "pending_window must be cleared on cancel");
+    let shapes_after = c.paint(p_right);
+    let mut cross_found = false;
+    let mut win_found = false;
+    for s in &shapes_after {
+        check_strokes(&s.shape, &tokens, &mut cross_found, &mut win_found);
+    }
+    assert!(!cross_found && !win_found, "overlay must be completely cleaned up after cancel");
+}
+
 
 

@@ -1189,48 +1189,55 @@ fn param_on(s: &Segment, p: Vec2) -> f64 {
     }
 }
 
-fn line_in_bounds(l: &Line, bx: &Bounds2, sides: &[Line; 4], tol: f64) -> bool {
+fn line_in_bounds(l: &Line, bx: &Bounds2, sides: &[Line; 4], tol: f64, crossing: bool) -> bool {
     let expanded = bx.expand(tol);
-    if expanded.contains(l.at(0.5)) {
-        return true;
+    if crossing {
+        if expanded.contains(l.at(0.5)) || expanded.contains(l.a) || expanded.contains(l.b) {
+            return true;
+        }
+        sides.iter().any(|sd| line_line(sd, l).is_some())
+    } else {
+        expanded.contains(l.a) && expanded.contains(l.b)
     }
-    if bx.contains(l.a) || bx.contains(l.b) {
-        return true;
-    }
-    sides.iter().any(|sd| line_line(sd, l).is_some())
 }
 
-fn arc_in_bounds(ga: &Arc, bx: &Bounds2, sides: &[Line; 4], tol: f64) -> bool {
+fn arc_in_bounds(ga: &Arc, bx: &Bounds2, sides: &[Line; 4], tol: f64, crossing: bool) -> bool {
     let expanded = bx.expand(tol);
-    if expanded.contains(ga.mid_point()) {
-        return true;
+    if crossing {
+        if expanded.contains(ga.mid_point()) || expanded.contains(ga.start_point()) || expanded.contains(ga.end_point()) {
+            return true;
+        }
+        let seg = Segment::Arc { arc: *ga, ccw: true };
+        sides.iter().any(|sd| !intersect_ext(&seg, &Segment::Line(*sd), false).is_empty())
+    } else {
+        expanded.contains_box(&ga.bounds())
     }
-    if bx.contains(ga.start_point()) || bx.contains(ga.end_point()) {
-        return true;
-    }
-    let seg = Segment::Arc { arc: *ga, ccw: true };
-    sides.iter().any(|sd| !intersect_ext(&seg, &Segment::Line(*sd), false).is_empty())
 }
 
-fn polyline_in_bounds(pl: &Polyline, bx: &Bounds2, sides: &[Line; 4], tol: f64) -> bool {
-    for seg in pl.segments() {
-        match seg {
-            Segment::Line(l) => {
-                if line_in_bounds(&l, bx, sides, tol) {
-                    return true;
+fn polyline_in_bounds(pl: &Polyline, bx: &Bounds2, sides: &[Line; 4], tol: f64, crossing: bool) -> bool {
+    let expanded = bx.expand(tol);
+    if crossing {
+        for seg in pl.segments() {
+            match seg {
+                Segment::Line(l) => {
+                    if line_in_bounds(&l, bx, sides, tol, true) {
+                        return true;
+                    }
                 }
-            }
-            Segment::Arc { arc, .. } => {
-                if arc_in_bounds(&arc, bx, sides, tol) {
-                    return true;
+                Segment::Arc { arc, .. } => {
+                    if arc_in_bounds(&arc, bx, sides, tol, true) {
+                        return true;
+                    }
                 }
             }
         }
+        false
+    } else {
+        expanded.contains_box(&pl.bounds())
     }
-    false
 }
 
-pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, edges: Edges, quick: bool) -> Result<Option<Vec<EntityKind>>> {
+pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, edges: Edges, quick: bool, crossing: bool) -> Result<Option<Vec<EntityKind>>> {
     if super::curves::is_locked(s, h) {
         return Ok(None);
     }
@@ -1258,7 +1265,7 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
-                if quick && line_in_bounds(&ln, &bx, &sides, tol) {
+                if quick && line_in_bounds(&ln, &bx, &sides, tol, crossing) {
                     return Ok(Some(Vec::new()));
                 }
                 return Ok(None);
@@ -1272,7 +1279,7 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
             for w in cuts.windows(2) {
                 let (Some(&t0), Some(&t1)) = (w.first(), w.get(1)) else { continue };
                 let sub = Line::new(ln.at(t0), ln.at(t1));
-                if !line_in_bounds(&sub, &bx, &sides, tol) {
+                if !line_in_bounds(&sub, &bx, &sides, tol, crossing) {
                     kept.push(line(sub.a, sub.b));
                 }
             }
@@ -1292,7 +1299,7 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
-                if quick && arc_in_bounds(&ga, &bx, &sides, tol) {
+                if quick && arc_in_bounds(&ga, &bx, &sides, tol, crossing) {
                     return Ok(Some(Vec::new()));
                 }
                 return Ok(None);
@@ -1306,7 +1313,7 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
             for w in cuts.windows(2) {
                 let (Some(&t0), Some(&t1)) = (w.first(), w.get(1)) else { continue };
                 let sub_arc = Arc::new(ga.center, ga.radius, ga.start + t0, ga.start + t1);
-                if !arc_in_bounds(&sub_arc, &bx, &sides, tol) {
+                if !arc_in_bounds(&sub_arc, &bx, &sides, tol, crossing) {
                     kept.push(arc(&sub_arc));
                 }
             }
@@ -1323,7 +1330,7 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
             angs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if angs.len() < 2 {
                 let full_arc = Arc::new(c.center.xy(), c.radius, 0.0, TAU - 1e-12);
-                if quick && arc_in_bounds(&full_arc, &bx, &sides, tol) {
+                if quick && arc_in_bounds(&full_arc, &bx, &sides, tol, crossing) {
                     return Ok(Some(Vec::new()));
                 }
                 return Ok(None);
@@ -1334,7 +1341,7 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
                 let a0 = angs[i];
                 let a1 = angs[(i + 1) % n];
                 let sub_arc = Arc::new(c.center.xy(), c.radius, a0, a1);
-                if !arc_in_bounds(&sub_arc, &bx, &sides, tol) {
+                if !arc_in_bounds(&sub_arc, &bx, &sides, tol, crossing) {
                     kept.push(arc(&sub_arc));
                 }
             }
@@ -1361,7 +1368,7 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
-                if quick && polyline_in_bounds(&pl, &bx, &sides, tol) {
+                if quick && polyline_in_bounds(&pl, &bx, &sides, tol, crossing) {
                     return Ok(Some(Vec::new()));
                 }
                 return Ok(None);
@@ -1378,7 +1385,7 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
                     let sub_vs = sub_polyline(&segs, t0, t1);
                     if sub_vs.len() >= 2 {
                         let sub_pl = Polyline { vertices: sub_vs.clone(), closed: false };
-                        if !polyline_in_bounds(&sub_pl, &bx, &sides, tol) {
+                        if !polyline_in_bounds(&sub_pl, &bx, &sides, tol, crossing) {
                             kept.push(lwpoly(sub_vs, false));
                         }
                     }

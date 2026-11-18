@@ -8,7 +8,7 @@ use cadcraft_doc::{Drawing, Entity, EntityKind, Handle};
 use cadcraft_geom::{Bounds2, Line, Vec2, line_line};
 use serde_json::{Value, json};
 
-use super::helpers::{line, lwpoly, rect_vertices};
+use super::helpers::line;
 use super::modify::{Edges, extend, trim, quick_mode, misses_edges, edge_mode, proj_mode, trim_window_entity};
 use super::{bad, point_param, points_param};
 use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Session, Step};
@@ -62,9 +62,9 @@ fn fence(s: &mut Session, pts: &[Vec2], extending: bool, edges: Edges, quick: bo
     run_picks(s, work, extending, edges, quick, tol)
 }
 
-/// Trim (or extend) every object a crossing window from `a` to `b` touches, picked at its point
-/// in the window nearest the first corner `a`.
-fn crossing(s: &mut Session, a: Vec2, b: Vec2, extending: bool, edges: Edges, quick: bool) -> Result<(usize, Vec<(Handle, Vec<Handle>)>)> {
+/// Trim (or extend) every object a window from `a` to `b` touches (or contains if `crossing_mode` is false),
+/// picked at its point in the window nearest the first corner `a`.
+fn crossing(s: &mut Session, a: Vec2, b: Vec2, extending: bool, edges: Edges, quick: bool, crossing_mode: bool) -> Result<(usize, Vec<(Handle, Vec<Handle>)>)> {
     let space = s.space();
     let d = s.doc()?;
     let bx = Bounds2::new(a, b);
@@ -78,7 +78,7 @@ fn crossing(s: &mut Session, a: Vec2, b: Vec2, extending: bool, edges: Edges, qu
         ];
         let inside = |p: Vec2| bx.expand(tol).contains(p);
         let mut work: Vec<(Handle, Vec<Vec2>)> = Vec::new();
-        for h in crate::select::select_window(d, &space, bx, true) {
+        for h in crate::select::select_window(d, &space, bx, crossing_mode) {
             let Some(e) = d.entity(h) else { continue };
             let mut best: Option<Vec2> = None;
             for pl in crate::select::hit_polylines(d, e, tol) {
@@ -103,7 +103,7 @@ fn crossing(s: &mut Session, a: Vec2, b: Vec2, extending: bool, edges: Edges, qu
     let targets = crate::select::select_window(d, &space, bx, true);
     let mut plan: Vec<(Handle, Vec<EntityKind>)> = Vec::new();
     for h in targets {
-        if let Some(kept) = trim_window_entity(s, h, a, bx, edges, quick)? {
+        if let Some(kept) = trim_window_entity(s, h, a, bx, edges, quick, crossing_mode)? {
             plan.push((h, kept));
         }
     }
@@ -237,7 +237,13 @@ fn run(s: &mut Session, p: &Value, extending: bool) -> Result<Value> {
     if p.get("crossing").is_some_and(|v| !v.is_null()) {
         let c = points_param(p, "crossing").filter(|v| v.len() == 2).ok_or_else(|| bad(cmd, "`crossing` needs two corners [[x,y], [x,y]]"))?;
         let (Some(a), Some(b)) = (c.first(), c.get(1)) else { return Err(bad(cmd, "`crossing` needs two corners")) };
-        let (n, _) = crossing(s, *a, *b, extending, edges, quick)?;
+        let (n, _) = crossing(s, *a, *b, extending, edges, quick, true)?;
+        return Ok(json!({ key: n }));
+    }
+    if p.get("window").is_some_and(|v| !v.is_null()) {
+        let c = points_param(p, "window").filter(|v| v.len() == 2).ok_or_else(|| bad(cmd, "`window` needs two corners [[x,y], [x,y]]"))?;
+        let (Some(a), Some(b)) = (c.first(), c.get(1)) else { return Err(bad(cmd, "`window` needs two corners")) };
+        let (n, _) = crossing(s, *a, *b, extending, edges, quick, false)?;
         return Ok(json!({ key: n }));
     }
     let h = super::targets(s, p)?.first().copied().ok_or_else(|| bad(cmd, "`handle` is required"))?;
@@ -264,8 +270,8 @@ enum Stage {
     Edges(Vec<Handle>),
     /// Fence points so far.
     Fence(Vec<Vec2>),
-    /// A crossing window: its first corner once picked.
-    Crossing(Option<Vec2>),
+    /// A selection window or crossing: its first corner once picked, and whether crossing is forced by keyword.
+    Crossing(Option<Vec2>, bool),
     Mode,
     Project,
     Edge,
@@ -413,8 +419,8 @@ impl Interactive for TrimM {
                 None => Prompt::new("Specify first fence point", Accept::POINT),
                 Some(l) => Prompt::new("Specify next fence point", Accept::POINT).kw(&["Undo"]).base(*l),
             },
-            Stage::Crossing(None) => Prompt::new("Specify first corner", Accept::POINT),
-            Stage::Crossing(Some(_)) => Prompt::new("Specify opposite corner", Accept::POINT),
+            Stage::Crossing(None, _) => Prompt::new("Specify first corner", Accept::POINT),
+            Stage::Crossing(Some(a), _) => Prompt::new("Specify opposite corner", Accept::POINT).corner(*a),
             Stage::Mode => {
                 let msg = if self.extend { "Enter an extend mode option" } else { "Enter a trim mode option" };
                 Prompt::new(msg, Accept::TEXT).kw(&["Quick", "Standard"]).default(if quick_mode(s) { "Quick" } else { "Standard" })
@@ -519,13 +525,18 @@ impl Interactive for TrimM {
                 }
                 Ok(Step::Continue)
             }
-            Stage::Crossing(first) => {
+            Stage::Crossing(first, explicit_crossing) => {
                 match (first, i) {
-                    (None, Input::Point(p)) => self.stage = Stage::Crossing(Some(p)),
+                    (None, Input::Point(p)) => {
+                        self.stage = Stage::Crossing(Some(p), explicit_crossing);
+                        s.pending_window = Some(crate::PendingWindow { corner: p, during_command: true, force_crossing: explicit_crossing });
+                    }
                     (Some(a), Input::Point(b)) => {
+                        s.pending_window = None;
                         self.stage = Stage::Pick;
+                        let crossing_mode = explicit_crossing || b.x < a.x;
                         let r = self.step(s, |m, s| {
-                            let (_n, reps) = crossing(s, a, b, extending, m.edges(quick, implied), quick)?;
+                            let (_n, reps) = crossing(s, a, b, extending, m.edges(quick, implied), quick, crossing_mode)?;
                             for (old_h, new_hs) in reps {
                                 m.update_edge_handles(old_h, &new_hs);
                             }
@@ -535,7 +546,10 @@ impl Interactive for TrimM {
                             s.echo(e.to_string());
                         }
                     }
-                    (_, Input::Enter) => self.stage = Stage::Pick,
+                    (_, Input::Enter | Input::Cancel) => {
+                        s.pending_window = None;
+                        self.stage = Stage::Pick;
+                    }
                     _ => {}
                 }
                 Ok(Step::Continue)
@@ -545,8 +559,9 @@ impl Interactive for TrimM {
                     let ap = s.pixel_size() * s.settings.pickbox.max(1.0) * 1.5;
                     let space = s.space();
                     let Some(h) = crate::select::pick(s.doc()?, &space, p, ap) else {
-                        // A pick in empty space opens a crossing window there.
-                        self.stage = Stage::Crossing(Some(p));
+                        // A pick in empty space opens a window/crossing there.
+                        self.stage = Stage::Crossing(Some(p), false);
+                        s.pending_window = Some(crate::PendingWindow { corner: p, during_command: true, force_crossing: false });
                         return Ok(Step::Continue);
                     };
                     let r = self.step(s, |m, s| {
@@ -564,7 +579,7 @@ impl Interactive for TrimM {
                     match k.as_str() {
                         "cuTting edges" | "Boundary edges" => self.select_edges(s),
                         "Fence" => self.stage = Stage::Fence(Vec::new()),
-                        "Crossing" => self.stage = Stage::Crossing(None),
+                        "Crossing" => self.stage = Stage::Crossing(None, true),
                         "mOde" => self.stage = Stage::Mode,
                         "Project" => self.stage = Stage::Project,
                         "Edge" => self.stage = Stage::Edge,
@@ -600,7 +615,6 @@ impl Interactive for TrimM {
                 .windows(2)
                 .filter_map(|w| Some(line(*w.first()?, *w.get(1)?)))
                 .collect(),
-            Stage::Crossing(Some(a)) => vec![lwpoly(rect_vertices(*a, c), true)],
             _ => Vec::new(),
         }
     }
