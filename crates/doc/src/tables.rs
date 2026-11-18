@@ -617,9 +617,9 @@ impl Default for MLeaderStyle {
 }
 
 impl MLeaderStyle {
-    /// The Standard style for metric drawings: text and arrows as high as ISO-25's.
+    /// The Standard style for metric drawings: text as high as ISO-25's, with 2.0 mm arrowheads.
     pub fn metric() -> Self {
-        MLeaderStyle { arrow_size: 2.5, text_height: 2.5, landing_gap: 0.625, dogleg: 5.0, ..Default::default() }
+        MLeaderStyle { arrow_size: 2.0, text_height: 2.5, landing_gap: 0.625, dogleg: 5.0, ..Default::default() }
     }
 }
 

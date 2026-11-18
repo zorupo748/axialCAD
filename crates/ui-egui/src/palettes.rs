@@ -103,6 +103,7 @@ pub const DRAFTING: &[(&str, &[Tool], &[Tool])] = &[
             (Icon::AddLeader, "mleaderedit", "Add Leader"),
             (Icon::RemoveLeader, "mleaderedit.remove", "Remove Leader"),
             (Icon::AlignLeaders, "mleaderalign", "Align"),
+            (Icon::Properties, "ui.panel.leaderproperties", "Leader Properties"),
         ],
     ),
     ("Table", &[(Icon::Table, "table", "Table")], &[]),
@@ -549,8 +550,12 @@ fn value_box(ui: &mut egui::Ui, text: &str, combo: bool, enabled: bool) -> egui:
 
 /// An editable numeric/text field that commits on Enter or focus loss.
 fn edit_field(ui: &mut egui::Ui, id: egui::Id, value: String) -> Option<String> {
+    edit_field_width(ui, id, value, ui.available_width() - 10.0)
+}
+
+fn edit_field_width(ui: &mut egui::Ui, id: egui::Id, value: String, width: f32) -> Option<String> {
     let mut buf = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| value.clone());
-    let w = ui.available_width() - 10.0;
+    let w = width.max(40.0);
     let te = id.with("te");
     let resp = ui.add_sized([w, 20.0], egui::TextEdit::singleline(&mut buf).id(te).font(crate::theme::body()));
     let mut out = None;
@@ -578,11 +583,83 @@ fn number(typed: Option<String>, bad: &mut Option<String>) -> Option<f64> {
     v
 }
 
+/// Committed strictly positive finite numeric field for leader arrow size.
+fn positive_number(typed: Option<String>, bad: &mut Option<String>, non_pos: &mut bool) -> Option<f64> {
+    let typed = typed?;
+    match cadcraft_engine::units::parse_distance(&typed) {
+        Some(v) if v.is_finite() && v > 0.0 => Some(v),
+        Some(_) => {
+            *non_pos = true;
+            None
+        }
+        None => {
+            *bad = Some(typed);
+            None
+        }
+    }
+}
+
 /// Reports a numeric field the user typed that isn't a number; the field shows its value again.
 fn report_bad(app: &mut CadApp, bad: Option<String>) {
     if let Some(text) = bad {
         app.session.echo(crate::tf!("Not a number or distance: {text}", text = text.trim()));
     }
+}
+
+pub(crate) fn drawing_insunits(d: &cadcraft_engine::doc::Drawing) -> i64 {
+    let default = if d.header.i64("MEASUREMENT", 0) == 1 { 4 } else { 1 };
+    d.header.i64("INSUNITS", default)
+}
+
+pub(crate) fn drawing_units_short(d: &cadcraft_engine::doc::Drawing) -> &'static str {
+    match drawing_insunits(d) {
+        1 => "in",
+        2 => "ft",
+        3 => "mi",
+        4 => "mm",
+        5 => "cm",
+        6 => "m",
+        7 => "km",
+        8 => "µin",
+        9 => "mil",
+        10 => "yd",
+        14 => "dm",
+        _ => "",
+    }
+}
+
+pub(crate) fn drawing_units_badge(d: &cadcraft_engine::doc::Drawing) -> String {
+    let short = drawing_units_short(d);
+    if short.is_empty() {
+        crate::tl!("units").to_string()
+    } else {
+        format!("{} ({short})", crate::tl!("u"))
+    }
+}
+
+pub(crate) fn drawing_units_label(d: &cadcraft_engine::doc::Drawing) -> String {
+    let code = drawing_insunits(d);
+    let name = crate::i18n::t(cadcraft_engine::units::insunits_name(code));
+    crate::tf!("Drawing units: {units}", units = name)
+}
+
+pub(crate) fn format_arrow_size(v: f64, lu: i64, lp: i64) -> String {
+    let formatted = cadcraft_engine::units::format_distance(v, lu, lp);
+    if !matches!(lu, 3 | 4 | 5)
+        && cadcraft_engine::units::parse_distance(&formatted).is_none_or(|p| (p - v).abs() > 1e-9)
+    {
+        let s = format!("{v:.10}");
+        let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+        if trimmed.is_empty() || trimmed == "-" {
+            return format!("{v}");
+        }
+        return trimmed.to_string();
+    }
+    formatted
+}
+
+pub(crate) fn effective_mleader_style(d: &cadcraft_engine::doc::Drawing) -> (String, cadcraft_doc::MLeaderStyle) {
+    d.effective_mleader_style()
 }
 
 /// A drop-down of `items` showing `current`; returns the item clicked.
@@ -793,10 +870,44 @@ pub(crate) fn properties_section(app: &mut CadApp, ui: &mut egui::Ui) {
                 act("dimstyle.current", json!({ "name": n }));
             }
         });
+        let mut non_pos_arrow = false;
         prop_row(ui, "Multileader style", |ui| {
             if let Some(n) = pick_menu(ui, &h.str("CMLEADERSTYLE", "Standard"), ml_styles) {
                 act("mleaderstyle", json!({ "name": n, "current": true }));
             }
+        });
+        let (cur_ml_name, cur_ml_style) = effective_mleader_style(d);
+        let units_badge = drawing_units_badge(d);
+        let units_label = drawing_units_label(d);
+        let ml_tip = crate::tf!(
+            "Arrow size for new leaders (DIRECTRIZZR / MLEADER) in {units}. Existing drawn leaders are not changed.",
+            units = units_label
+        );
+        prop_row(ui, "Arrow size", |ui| {
+            ui.horizontal(|ui| {
+                let badge_w = 48.0;
+                let w = (ui.available_width() - badge_w - 10.0).max(52.0);
+                let typed = edit_field_width(
+                    ui,
+                    ui.id().with(("cur_ml_arrow_size", &cur_ml_name)),
+                    format_arrow_size(cur_ml_style.arrow_size, lu, lp),
+                    w,
+                );
+                if let Some(f) = positive_number(typed, &mut bad, &mut non_pos_arrow) {
+                    act("mleaderstyle", json!({ "name": cur_ml_name, "arrowSize": f, "current": true }));
+                }
+                ui.label(egui::RichText::new(&units_badge).font(crate::theme::small()).color(t.text_dim))
+                    .on_hover_text(ml_tip.clone());
+            });
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(120.0);
+            ui.label(
+                egui::RichText::new(format!("{} · {units_label}", crate::tl!("New leaders only")))
+                    .font(crate::theme::small())
+                    .color(t.text_dim),
+            )
+            .on_hover_text(ml_tip);
         });
         prop_row(ui, "Table style", |ui| {
             if let Some(n) = pick_menu(ui, &h.str("CTABLESTYLE", "Standard"), tb_styles) {
@@ -842,6 +953,9 @@ pub(crate) fn properties_section(app: &mut CadApp, ui: &mut egui::Ui) {
         prop_row(ui, "Plot table type", |ui| read_only(ui, kind));
         if let Some((c, p)) = action {
             let _ = app.run(c, p);
+        }
+        if non_pos_arrow {
+            app.session.echo(crate::tl!("Arrow size must be a positive finite number."));
         }
         report_bad(app, bad);
         return;
@@ -973,7 +1087,57 @@ pub(crate) fn properties_section(app: &mut CadApp, ui: &mut egui::Ui) {
             });
         });
     });
-    if sel.len() == 1 {
+    let mut non_pos_arrow = false;
+    let mleaders: Vec<&cadcraft_doc::MLeader> = sel
+        .iter()
+        .filter_map(|h| d.entity(*h))
+        .filter_map(|e| match &e.kind {
+            EntityKind::MLeader(m) => Some(m),
+            _ => None,
+        })
+        .collect();
+    if !mleaders.is_empty() && mleaders.len() == sel.len() {
+        group(ui, "Geometry");
+        let style_shown = match mleaders.first() {
+            Some(m0) if mleaders.iter().all(|m| m.style == m0.style) => m0.style.clone(),
+            _ => crate::tl!("*VARIES*").to_string(),
+        };
+        let arrow_shown = match mleaders.first() {
+            Some(m0) if mleaders.iter().all(|m| (m.arrow_size - m0.arrow_size).abs() <= 1e-12) => {
+                format_arrow_size(m0.arrow_size, lu, lp)
+            }
+            _ => crate::tl!("*VARIES*").to_string(),
+        };
+        let units_badge = drawing_units_badge(d);
+        let units_label = drawing_units_label(d);
+        let ml_tip = crate::tf!(
+            "Arrow size for the selected leader(s) only, in {units}. Does not affect other leaders or the style.",
+            units = units_label
+        );
+        prop_row(ui, "Multileader style", |ui| read_only(ui, &style_shown));
+        prop_row(ui, "Arrow size", |ui| {
+            ui.horizontal(|ui| {
+                let badge_w = 48.0;
+                let w = (ui.available_width() - badge_w - 10.0).max(52.0);
+                let typed = edit_field_width(ui, ui.id().with(("mleader_arrowSize", &ids)), arrow_shown.clone(), w);
+                if let Some(f) = positive_number(typed, &mut bad, &mut non_pos_arrow) {
+                    set = Some(json!({ "handles": ids, "arrowSize": f }));
+                }
+                ui.label(egui::RichText::new(&units_badge).font(crate::theme::small()).color(t.text_dim))
+                    .on_hover_text(ml_tip.clone());
+            });
+        });
+        let scope = if mleaders.len() == 1 {
+            crate::tl!("Selected leader only")
+        } else {
+            crate::tl!("Selected leaders only")
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(120.0);
+            ui.label(egui::RichText::new(format!("{scope} · {units_label}")).font(crate::theme::small()).color(t.text_dim))
+                .on_hover_text(ml_tip);
+        });
+    } else if sel.len() == 1 {
         group(ui, "Geometry");
         let real = |v: f64| format!("{v:.4}");
         // Rotations show as the drawing measures directions (ANGBASE, ANGDIR).
@@ -1173,6 +1337,9 @@ pub(crate) fn properties_section(app: &mut CadApp, ui: &mut egui::Ui) {
             *r = json!(app.session.angle_settings().unshown(v.to_radians()).to_degrees());
         }
         let _ = app.run("properties.set", p);
+    }
+    if non_pos_arrow {
+        app.session.echo(crate::tl!("Arrow size must be a positive finite number."));
     }
     report_bad(app, bad);
     if let Some(p) = custom_set {

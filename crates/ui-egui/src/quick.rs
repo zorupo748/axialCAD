@@ -397,6 +397,16 @@ pub fn quick_properties(app: &mut CadApp, ctx: &egui::Context) {
                         }
                         ui.end_row();
                     }
+                    Some(EntityKind::MLeader(ml)) => {
+                        ui.label(RichText::new(crate::tl!("Arrow size")).color(Tokens::get().text_dim));
+                        let s = format!("{:.4}", ml.arrow_size);
+                        if let Some(n) = crate::parametric::expr_field(ui, id("ml_as"), &s)
+                            && let Some(f) = cadcraft_engine::units::parse_distance(&n).or_else(|| n.parse::<f64>().ok()).filter(|f| f.is_finite() && *f > 0.0)
+                        {
+                            set = Some(("arrowSize".into(), json!(f)));
+                        }
+                        ui.end_row();
+                    }
                     _ => {}
                 }
             });

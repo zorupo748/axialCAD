@@ -328,7 +328,7 @@ fn text_style(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Action 
         styles.push(Style { name: s.name, fields: Vec::new() });
     }
     let current = d.header.str("TEXTSTYLE", "Standard");
-    style_manager(ctx, open, "Text Style", "style", &current, &styles)
+    style_manager(ctx, open, "Text Style", "style", &current, &styles, None)
 }
 
 fn table_style(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Action {
@@ -354,7 +354,7 @@ fn table_style(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Action
         styles.push(Style { name: s.name, fields: Vec::new() });
     }
     let current = d.header.str("CTABLESTYLE", "Standard");
-    style_manager(ctx, open, "Table Style", "tablestyle", &current, &styles)
+    style_manager(ctx, open, "Table Style", "tablestyle", &current, &styles, None)
 }
 
 fn mleader_style(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Action {
@@ -369,7 +369,7 @@ fn mleader_style(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Acti
         .map(|s| Style {
             name: s.name.clone(),
             fields: vec![
-                Field::Num("arrowSize", "Arrowhead size", s.arrow_size),
+                Field::Num("arrowSize", "Arrow size", s.arrow_size),
                 Field::Num("textHeight", "Text height", s.text_height),
                 Field::Num("landingGap", "Landing gap", s.landing_gap),
                 Field::Num("dogleg", "Landing length", s.dogleg),
@@ -382,12 +382,13 @@ fn mleader_style(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Acti
         styles.push(Style { name: s.name, fields: Vec::new() });
     }
     let current = d.header.str("CMLEADERSTYLE", "Standard");
-    style_manager(ctx, open, "Multileader Style", "mleaderstyle", &current, &styles)
+    let units_note = crate::palettes::drawing_units_label(d);
+    style_manager(ctx, open, "Multileader Style", "mleaderstyle", &current, &styles, Some(&units_note))
 }
 
 /// A style list (set current, new) beside the selected style's properties. `cmd` takes
 /// `{name, <field>: value, current?}`.
-fn style_manager(ctx: &egui::Context, open: &mut bool, title: &str, cmd: &'static str, current: &str, styles: &[Style]) -> Action {
+fn style_manager(ctx: &egui::Context, open: &mut bool, title: &str, cmd: &'static str, current: &str, styles: &[Style], units_note: Option<&str>) -> Action {
     let t = Tokens::get();
     let sel_key = format!("{cmd}_sel");
     let new_key = format!("{cmd}_new");
@@ -395,7 +396,12 @@ fn style_manager(ctx: &egui::Context, open: &mut bool, title: &str, cmd: &'stati
     let mut new_name = temp::<String>(ctx, &new_key).unwrap_or_default();
     let mut action = None;
     egui::Window::new(title).open(open).default_size(vec2(520.0, 280.0)).resizable(true).show(ctx, |ui| {
-        ui.label(RichText::new(format!("Current style: {current}")).color(t.text_dim));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("Current style: {current}")).color(t.text_dim));
+            if let Some(note) = units_note {
+                ui.label(RichText::new(format!("· {note}")).color(t.text_dim));
+            }
+        });
         ui.separator();
         ui.columns(2, |cols| {
             let [left, right] = cols else { return };
@@ -430,8 +436,9 @@ fn style_manager(ctx: &egui::Context, open: &mut bool, title: &str, cmd: &'stati
                 for f in &style.fields {
                     let change = match f {
                         Field::Num(key, label, v) => {
-                            ui.label(*label);
-                            num_field(ui, (cmd, &style.name, *key), *v).filter(|v| *v >= 0.0).map(|v| (*key, json!(v)))
+                            ui.label(crate::i18n::t(label));
+                            let min_ok = |x: f64| if matches!(*key, "arrowSize" | "textHeight") { x > 0.0 } else { x >= 0.0 };
+                            num_field(ui, (cmd, &style.name, *key), *v).filter(|v| min_ok(*v)).map(|v| (*key, json!(v)))
                         }
                         Field::Bool(key, label, v) => {
                             ui.label("");

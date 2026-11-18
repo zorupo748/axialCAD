@@ -224,6 +224,26 @@ impl Drawing {
         self.dim_styles.iter().find(|l| l.name.eq_ignore_ascii_case(name))
     }
 
+    /// Resolve the effective multileader style for `CMLEADERSTYLE` (case-insensitive), falling
+    /// back to the first table entry or to the metric/imperial default when the table is empty.
+    pub fn effective_mleader_style(&self) -> (String, MLeaderStyle) {
+        let name = self.header.str("CMLEADERSTYLE", "Standard");
+        let style = self
+            .mleader_styles
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(&name))
+            .or(self.mleader_styles.first())
+            .cloned()
+            .unwrap_or_else(|| {
+                if self.header.i64("MEASUREMENT", 0) == 1 {
+                    MLeaderStyle::metric()
+                } else {
+                    MLeaderStyle::default()
+                }
+            });
+        (name, style)
+    }
+
     /// The DIM* variables in the header that differ from the current dimension style, as
     /// [`DimStyle`] fields: AutoCAD's style overrides (set with SETVAR), which new dimensions
     /// take on.

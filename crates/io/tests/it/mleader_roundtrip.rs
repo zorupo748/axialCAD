@@ -265,3 +265,51 @@ fn multileader_through_dwg() {
     assert_eq!(got.len(), 1, "{:?}", back.model.iter().map(|e| e.kind.dxf_name()).collect::<Vec<_>>());
     assert_eq!(*got[0], m);
 }
+
+#[test]
+fn customized_style_and_per_entity_arrow_size_survive_dxf_and_dwg_reopen() {
+    let mut d = Drawing::new_metric();
+    d.mleader_styles[0].arrow_size = 12.75;
+    let m_style = MLeader {
+        leaders: vec![vec![Vec3::new(0.0, 0.0, 0.0)]],
+        landing: Vec3::new(10.0, 0.0, 0.0),
+        dogleg: 0.0,
+        text: None,
+        style: "Standard".into(),
+        arrow_size: 12.75,
+        spline: false,
+        block: None,
+    };
+    let m_override = MLeader { arrow_size: 42.5, landing: Vec3::new(10.0, 20.0, 0.0), ..m_style.clone() };
+    d.add(&Space::Model, Common::default(), EntityKind::MLeader(m_style)).unwrap();
+    d.add(&Space::Model, Common::default(), EntityKind::MLeader(m_override)).unwrap();
+
+    // Default save format (R2018 DXF) and R2007 DXF both preserve style and entity overrides.
+    for opts in [
+        cadcraft_io::SaveOptions::default(),
+        cadcraft_io::SaveOptions { version: Some(cadcraft_io::Version::R2007), binary: false },
+    ] {
+        let bytes = cadcraft_io::write_with(&d, "leaders.dxf", &opts).unwrap();
+        let back = cadcraft_io::read(&bytes, "leaders.dxf").unwrap();
+        let st = back.mleader_styles.iter().find(|s| s.name == "Standard").unwrap();
+        assert!((st.arrow_size - 12.75).abs() < 1e-9, "style arrow_size lost in {opts:?}: {}", st.arrow_size);
+        let got = mleaders(&back);
+        assert_eq!(got.len(), 2);
+        assert!((got[0].arrow_size - 12.75).abs() < 1e-9);
+        assert!((got[1].arrow_size - 42.5).abs() < 1e-9);
+    }
+
+    // DWG save & reopen also preserves both style and per-entity arrow sizes.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let dwg = cadcraft_io::write(&d, "leaders.dwg").unwrap();
+        let back = cadcraft_io::read(&dwg, "leaders.dwg").unwrap();
+        let st = back.mleader_styles.iter().find(|s| s.name == "Standard").unwrap();
+        assert!((st.arrow_size - 12.75).abs() < 1e-9, "style arrow_size lost in DWG: {}", st.arrow_size);
+        let got = mleaders(&back);
+        assert_eq!(got.len(), 2);
+        assert!((got[0].arrow_size - 12.75).abs() < 1e-9);
+        assert!((got[1].arrow_size - 42.5).abs() < 1e-9);
+    }
+}
+

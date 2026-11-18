@@ -16,7 +16,7 @@ use crate::{Accept, Input, Interactive, Prompt, Result, Session, Step};
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("properties", "Properties", run_get).menu(&["Modify", "Properties"]).alias(&["pr", "props", "ch"]).params("{handles?} → properties of the selection").noundo(),
-        CommandSpec::new("properties.set", "Set Properties", run_set).params("{handles?, layer?, color?, linetype?, lineweight?, ltscale?, thickness?, transparency?: \"ByLayer\" | \"ByBlock\" | 0..90, visible?, <geometry fields: radius, center, start, end, text, height, rotation…>; dimensions: textOverride, dimStyle, textHeight, arrowSize, dimScale, precision (per-dimension overrides)}"),
+        CommandSpec::new("properties.set", "Set Properties", run_set).params("{handles?, layer?, color?, linetype?, lineweight?, ltscale?, thickness?, transparency?: \"ByLayer\" | \"ByBlock\" | 0..90, visible?, <geometry fields: radius, center, start, end, text, height, rotation…>; dimensions: textOverride, dimStyle, textHeight, arrowSize, dimScale, precision (per-dimension overrides); mleaders: arrowSize (per-entity arrowhead size)}"),
         CommandSpec::new("matchprop", "Match Properties", matchprop::run_matchprop)
             .menu(&["Modify", "Match Properties"])
             .alias(&["ma", "painter"])
@@ -131,6 +131,8 @@ fn run_get(s: &mut Session, p: &Value) -> Result<Value> {
     let d = s.doc()?;
     if hs.is_empty() {
         let h = &d.header;
+        let (ml_name, ml_style) = d.effective_mleader_style();
+        let ml_arrow = ml_style.arrow_size;
         return Ok(json!({
             "selection": "No selection",
             "color": Color::from_aci(h.i64("CECOLOR", 256) as i16).name(),
@@ -140,6 +142,8 @@ fn run_get(s: &mut Session, p: &Value) -> Result<Value> {
             "lineweight": Lineweight::from_dxf(h.i64("CELWEIGHT", -1) as i16).name(),
             "textStyle": h.str("TEXTSTYLE", "Standard"),
             "dimStyle": h.str("DIMSTYLE", "Standard"),
+            "mleaderStyle": ml_name,
+            "mleaderArrowSize": ml_arrow,
             "textHeight": h.f64("TEXTSIZE", 0.2),
         }));
     }
@@ -214,6 +218,12 @@ fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
         let dim_style = str_param(p, "dimStyle")
             .map(|n| d.dim_style(n).map(|st| st.name.clone()).ok_or_else(|| bad("properties.set", format!("dimension style `{n}` not found"))))
             .transpose()?;
+        if let Some(arrow) = p.get("arrowSize").filter(|v| !v.is_null())
+            && hs.iter().any(|h| d.entity(*h).is_some_and(|e| matches!(e.kind, EntityKind::MLeader(_))))
+            && !arrow.as_f64().is_some_and(|x| x.is_finite() && x > 0.0)
+        {
+            return Err(bad("properties.set", "`arrowSize` must be a positive finite number"));
+        }
         (linetype, dim_style)
     };
     let d = s.doc_mut()?;
@@ -466,6 +476,11 @@ fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
                     }
                     if let Some(x) = num("angle") {
                         h.angle = x.to_radians();
+                    }
+                }
+                EntityKind::MLeader(m) => {
+                    if let Some(x) = num("arrowSize").filter(|x| *x > 0.0) {
+                        m.arrow_size = x;
                     }
                 }
                 _ => {}
@@ -1257,6 +1272,14 @@ fn run_tablestyle(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn run_mleaderstyle(s: &mut Session, p: &Value) -> Result<Value> {
+    let arrow_size = match p.get("arrowSize") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_f64()
+                .filter(|h| h.is_finite() && *h > 0.0)
+                .ok_or_else(|| bad("mleaderstyle", "`arrowSize` must be a positive finite number"))?,
+        ),
+    };
     let d = s.doc_mut()?;
     if let Some(name) = str_param(p, "name").map(str::trim).filter(|n| !n.is_empty()) {
         let idx = match d.mleader_styles.iter().position(|t| t.name.eq_ignore_ascii_case(name)) {
@@ -1268,7 +1291,7 @@ fn run_mleaderstyle(s: &mut Session, p: &Value) -> Result<Value> {
         };
         if let Some(st) = d.mleader_styles.get_mut(idx) {
             let num = |k: &str| p.get(k).and_then(Value::as_f64).filter(|h| h.is_finite() && *h >= 0.0);
-            if let Some(v) = num("arrowSize") {
+            if let Some(v) = arrow_size {
                 st.arrow_size = v;
             }
             if let Some(v) = num("textHeight").filter(|v| *v > 0.0) {

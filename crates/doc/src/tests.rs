@@ -21,7 +21,9 @@ fn new_metric_drawing_has_metric_multileader_and_table_styles() {
     let m = Drawing::new_metric();
     let iso = m.dim_style("ISO-25").unwrap();
     let ml = m.mleader_styles.iter().find(|s| s.name == "Standard").unwrap();
-    assert_eq!((ml.text_height, ml.arrow_size), (iso.text_height, iso.arrow_size));
+    assert_eq!(ml.text_height, iso.text_height);
+    assert_eq!(ml.arrow_size, 2.0);
+    assert_eq!(iso.arrow_size, 2.5);
     assert_eq!(ml.dogleg, 5.0);
     let ts = m.table_styles.iter().find(|s| s.name == "Standard").unwrap();
     assert_eq!(ts.text_height, iso.text_height);
@@ -30,6 +32,8 @@ fn new_metric_drawing_has_metric_multileader_and_table_styles() {
     let i = Drawing::new_imperial();
     assert_eq!(i.mleader_styles, vec![MLeaderStyle::default()]);
     assert_eq!(i.table_styles, vec![TableStyle::default()]);
+    assert_eq!(i.mleader_styles[0].arrow_size, 0.18);
+    assert_eq!(i.dim_styles[0].arrow_size, 0.18);
     assert_eq!((i.mleader_styles[0].text_height, i.table_styles[0].text_height), (0.18, 0.18));
 }
 

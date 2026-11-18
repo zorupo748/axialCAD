@@ -447,8 +447,7 @@ mod qdim;
 fn mleader_kind(s: &Session, pts: &[Vec2], text: &str, landing: bool) -> Option<EntityKind> {
     let (landing_pt, arrow_pts) = pts.split_last()?;
     let d = s.doc().ok()?;
-    let cur = d.header.str("CMLEADERSTYLE", "Standard");
-    let st = d.mleader_styles.iter().find(|m| m.name.eq_ignore_ascii_case(&cur)).or(d.mleader_styles.first()).cloned().unwrap_or_default();
+    let (_, st) = d.effective_mleader_style();
     // The style's sizes are the drawn sizes: a multileader style has no scale of its own and
     // DIMSCALE (a dimension-style setting) does not apply, as in AutoCAD.
     let th = st.text_height;
