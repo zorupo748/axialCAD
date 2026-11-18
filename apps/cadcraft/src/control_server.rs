@@ -435,15 +435,17 @@ mod tests {
     #[test]
     fn a_request_without_the_token_is_unauthorized() {
         // A local peer that does not hold the session token cannot drive the app (CWE-306).
-        let addr = serve_echo();
+        let (addr, rx) = serve_with(Limits::default());
         let replies = exchange(addr, b"{\"id\":9,\"method\":\"ping\"}\n");
         assert_eq!(replies.len(), 1, "{replies:?}");
         assert_eq!(replies[0]["ok"], false);
         assert!(replies[0]["error"].as_str().unwrap().contains("unauthorized"), "{replies:?}");
+        assert!(rx.try_recv().is_err(), "request without token must never be dispatched");
         // A wrong token is also refused.
         let wrong = exchange(addr, b"{\"id\":9,\"method\":\"ping\",\"token\":\"nope\"}\n");
         assert_eq!(wrong[0]["ok"], false);
         assert!(wrong[0]["error"].as_str().unwrap().contains("unauthorized"), "{wrong:?}");
+        assert!(rx.try_recv().is_err(), "request with wrong token must never be dispatched");
     }
 
     /// A request carrying the session token reaches the control dispatcher.
