@@ -293,6 +293,14 @@ pub trait Interactive: Send {
     fn editing_text_entity(&self) -> Option<Handle> {
         None
     }
+    /// Candidate User Coordinate System (UCS) under preview during interactive definition.
+    fn preview_ucs(&self, _s: &Session) -> Option<cadcraft_geom::UcsFrame> {
+        None
+    }
+    /// Candidate camera orientation/view under preview during interactive UCS definition.
+    fn preview_camera(&self, _s: &Session) -> Option<cadcraft_geom::OrbitCamera> {
+        None
+    }
 }
 
 /// See [`Interactive::drag`].

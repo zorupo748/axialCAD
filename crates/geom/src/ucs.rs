@@ -128,6 +128,199 @@ impl UcsFrame {
             None
         }
     }
+
+    /// Construct an orthonormal right-handed frame from an origin and a point on the positive X axis.
+    ///
+    /// Preserves the reference frame's Y and Z orientations by applying the minimal rotation
+    /// that aligns `ref_frame.x_axis` with `(pt_x - origin).normalized()`.
+    pub fn from_2_points(origin: Vec3, pt_x: Vec3, ref_frame: &UcsFrame) -> Result<Self, &'static str> {
+        let vx = pt_x - origin;
+        let lx = vx.len();
+        if lx < EPS {
+            return Err("El punto del eje X no puede coincidir con el origen.");
+        }
+        let target_x = vx / lx;
+        let y_axis = rotate_minimal(ref_frame.y_axis, ref_frame.x_axis, target_x);
+        let z_axis = target_x.cross(y_axis).normalized();
+        let y_axis = z_axis.cross(target_x).normalized();
+
+        Ok(Self {
+            origin,
+            x_axis: target_x,
+            y_axis,
+            z_axis,
+        })
+    }
+
+    /// Construct an orthonormal right-handed frame defining a single axis direction.
+    ///
+    /// Resolves the other two axes deterministically and right-handed using minimal rotation
+    /// relative to `ref_frame`.
+    pub fn from_axis_vector(
+        origin: Vec3,
+        axis_vec: Vec3,
+        axis: crate::camera::Axis3D,
+        ref_frame: &UcsFrame,
+    ) -> Result<Self, &'static str> {
+        let l = axis_vec.len();
+        if l < EPS {
+            return Err("El vector de dirección no puede tener longitud cero.");
+        }
+        let target = axis_vec / l;
+        match axis {
+            crate::camera::Axis3D::X => {
+                let y = rotate_minimal(ref_frame.y_axis, ref_frame.x_axis, target);
+                let z = target.cross(y).normalized();
+                let y = z.cross(target).normalized();
+                Ok(Self { origin, x_axis: target, y_axis: y, z_axis: z })
+            }
+            crate::camera::Axis3D::Y => {
+                let x = rotate_minimal(ref_frame.x_axis, ref_frame.y_axis, target);
+                let z = x.cross(target).normalized();
+                let x = target.cross(z).normalized();
+                Ok(Self { origin, x_axis: x, y_axis: target, z_axis: z })
+            }
+            crate::camera::Axis3D::Z => {
+                let x = rotate_minimal(ref_frame.x_axis, ref_frame.z_axis, target);
+                let y = target.cross(x).normalized();
+                let x = y.cross(target).normalized();
+                Ok(Self { origin, x_axis: x, y_axis: y, z_axis: target })
+            }
+        }
+    }
+
+    /// Rotate this UCS around its local X axis by `angle_rad` radians.
+    pub fn rotated_x(&self, angle_rad: f64) -> Self {
+        let y_axis = rotate_around_axis(self.y_axis, self.x_axis, angle_rad);
+        let z_axis = self.x_axis.cross(y_axis).normalized();
+        let y_axis = z_axis.cross(self.x_axis).normalized();
+        Self { origin: self.origin, x_axis: self.x_axis, y_axis, z_axis }
+    }
+
+    /// Rotate this UCS around its local Y axis by `angle_rad` radians.
+    pub fn rotated_y(&self, angle_rad: f64) -> Self {
+        let x_axis = rotate_around_axis(self.x_axis, self.y_axis, angle_rad);
+        let z_axis = x_axis.cross(self.y_axis).normalized();
+        let x_axis = self.y_axis.cross(z_axis).normalized();
+        Self { origin: self.origin, x_axis, y_axis: self.y_axis, z_axis }
+    }
+
+    /// Rotate this UCS around its local Z axis by `angle_rad` radians.
+    pub fn rotated_z(&self, angle_rad: f64) -> Self {
+        let x_axis = rotate_around_axis(self.x_axis, self.z_axis, angle_rad);
+        let y_axis = self.z_axis.cross(x_axis).normalized();
+        let x_axis = y_axis.cross(self.z_axis).normalized();
+        Self { origin: self.origin, x_axis, y_axis, z_axis: self.z_axis }
+    }
+
+    /// Return an AutoCAD-standard predefined UCS orientation.
+    ///
+    /// IMPORTANT: Standard presets are always defined strictly relative to the
+    /// World Coordinate System (WCS / Universal), with origin at WCS (0,0,0).
+    pub fn preset(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "top" | "plan" | "superior" => Some(Self::WORLD),
+            "bottom" | "inferior" => Some(Self {
+                origin: Vec3::ZERO,
+                x_axis: Vec3::X,
+                y_axis: -Vec3::Y,
+                z_axis: -Vec3::Z,
+            }),
+            "front" | "frontal" => Some(Self {
+                origin: Vec3::ZERO,
+                x_axis: Vec3::X,
+                y_axis: Vec3::Z,
+                z_axis: -Vec3::Y,
+            }),
+            "back" | "posterior" => Some(Self {
+                origin: Vec3::ZERO,
+                x_axis: -Vec3::X,
+                y_axis: Vec3::Z,
+                z_axis: Vec3::Y,
+            }),
+            "left" | "izquierda" => Some(Self {
+                origin: Vec3::ZERO,
+                x_axis: -Vec3::Y,
+                y_axis: Vec3::Z,
+                z_axis: -Vec3::X,
+            }),
+            "right" | "derecha" => Some(Self {
+                origin: Vec3::ZERO,
+                x_axis: Vec3::Y,
+                y_axis: Vec3::Z,
+                z_axis: Vec3::X,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Align UCS to a planar face defined by at least 3 corner points.
+    ///
+    /// - Origin is placed at `corners[0]`.
+    /// - X axis points along `corners[1] - corners[0]`.
+    /// - Normal Z axis is perpendicular to the face.
+    /// - Supports flipping X and flipping Y.
+    pub fn align_to_face(corners: &[Vec3], flip_x: bool, flip_y: bool) -> Result<Self, &'static str> {
+        if corners.len() < 3 {
+            return Err("Se requieren al menos 3 vértices para definir una cara.");
+        }
+        let o = corners[0];
+        let v1 = corners[1] - o;
+        let l1 = v1.len();
+        if l1 < EPS {
+            return Err("La arista de la cara tiene longitud nula.");
+        }
+        let mut x_axis = v1 / l1;
+
+        let v2 = corners[2] - o;
+        let mut z_axis = x_axis.cross(v2);
+        let lz = z_axis.len();
+        if lz < 1e-6 {
+            return Err("Los vértices de la cara son colineales y no definen un plano.");
+        }
+        z_axis = z_axis / lz;
+        let mut y_axis = z_axis.cross(x_axis).normalized();
+
+        if flip_x {
+            x_axis = -x_axis;
+            y_axis = -y_axis;
+        }
+        if flip_y {
+            y_axis = -y_axis;
+            z_axis = -z_axis;
+        }
+
+        Ok(Self { origin: o, x_axis, y_axis, z_axis })
+    }
+}
+
+/// Rotate vector `v` by the minimal rotation mapping unit vector `from` to unit vector `to`.
+pub fn rotate_minimal(v: Vec3, from: Vec3, to: Vec3) -> Vec3 {
+    let dot = from.dot(to).clamp(-1.0, 1.0);
+    if dot > 1.0 - 1e-12 {
+        return v;
+    }
+    if dot < -1.0 + 1e-12 {
+        // 180 degrees: find an arbitrary orthogonal axis to `from`
+        let perp = if from.x.abs() < 0.9 {
+            Vec3::new(0.0, -from.z, from.y)
+        } else {
+            Vec3::new(-from.y, from.x, 0.0)
+        }
+        .normalized();
+        return perp * (2.0 * perp.dot(v)) - v;
+    }
+    let axis = from.cross(to).normalized();
+    let cos_t = dot;
+    let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+    v * cos_t + axis.cross(v) * sin_t + axis * (axis.dot(v) * (1.0 - cos_t))
+}
+
+/// Rotate a vector `v` around unit axis `axis` by angle `angle_rad` radians.
+pub fn rotate_around_axis(v: Vec3, axis: Vec3, angle_rad: f64) -> Vec3 {
+    let cos_t = angle_rad.cos();
+    let sin_t = angle_rad.sin();
+    v * cos_t + axis.cross(v) * sin_t + axis * (axis.dot(v) * (1.0 - cos_t))
 }
 
 #[cfg(test)]
@@ -225,5 +418,78 @@ mod tests {
         assert!((hit - ucs.origin).dot(ucs.z_axis).abs() < 1e-12);
         // Ray parallel to plane: normal is (0, -1/sqrt(2), 1/sqrt(2)), so ray along X (1, 0, 0) is parallel
         assert!(ucs.unproject_ray(ray_orig, Vec3::X).is_none());
+    }
+
+    #[test]
+    fn test_ucs_from_2_points() {
+        let origin = Vec3::new(10.0, 20.0, 0.0);
+        let pt_x = Vec3::new(10.0, 30.0, 0.0); // Points in +Y of WCS
+        let ucs = UcsFrame::from_2_points(origin, pt_x, &UcsFrame::WORLD).expect("2 points succeeds");
+        assert_eq!(ucs.origin, origin);
+        assert!(ucs.x_axis.near(Vec3::Y, 1e-9));
+        // Strict orthonormality and right-handedness
+        assert!(ucs.x_axis.dot(ucs.y_axis).abs() < 1e-12);
+        assert!(ucs.x_axis.dot(ucs.z_axis).abs() < 1e-12);
+        assert!(ucs.y_axis.dot(ucs.z_axis).abs() < 1e-12);
+        let det = ucs.x_axis.dot(ucs.y_axis.cross(ucs.z_axis));
+        assert!((det - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_ucs_from_axis_vector() {
+        let origin = Vec3::new(0.0, 0.0, 0.0);
+        let z_dir = Vec3::new(0.0, 1.0, 1.0);
+        let ucs = UcsFrame::from_axis_vector(origin, z_dir, crate::camera::Axis3D::Z, &UcsFrame::WORLD)
+            .expect("Z axis succeeds");
+        assert!(ucs.z_axis.near(z_dir.normalized(), 1e-9));
+        assert!(ucs.x_axis.dot(ucs.y_axis).abs() < 1e-12);
+        assert!(ucs.x_axis.dot(ucs.z_axis).abs() < 1e-12);
+        let det = ucs.x_axis.dot(ucs.y_axis.cross(ucs.z_axis));
+        assert!((det - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_ucs_rotations() {
+        let u = UcsFrame::WORLD;
+        let rot_x = u.rotated_x(std::f64::consts::FRAC_PI_2);
+        assert!(rot_x.x_axis.near(Vec3::X, 1e-9));
+        assert!(rot_x.y_axis.near(Vec3::Z, 1e-9));
+        assert!(rot_x.z_axis.near(-Vec3::Y, 1e-9));
+
+        let rot_z = u.rotated_z(std::f64::consts::PI);
+        assert!(rot_z.x_axis.near(-Vec3::X, 1e-9));
+        assert!(rot_z.y_axis.near(-Vec3::Y, 1e-9));
+        assert!(rot_z.z_axis.near(Vec3::Z, 1e-9));
+    }
+
+    #[test]
+    fn test_ucs_presets_are_wcs_referenced() {
+        let top = UcsFrame::preset("top").expect("top preset");
+        assert!(top.is_world());
+
+        let front = UcsFrame::preset("front").expect("front preset");
+        assert_eq!(front.origin, Vec3::ZERO);
+        assert!(front.x_axis.near(Vec3::X, 1e-9));
+        assert!(front.y_axis.near(Vec3::Z, 1e-9));
+        assert!(front.z_axis.near(-Vec3::Y, 1e-9));
+    }
+
+    #[test]
+    fn test_ucs_align_to_face() {
+        let corners = [
+            Vec3::new(0.0, 0.0, 10.0),
+            Vec3::new(5.0, 0.0, 10.0),
+            Vec3::new(5.0, 5.0, 10.0),
+            Vec3::new(0.0, 5.0, 10.0),
+        ];
+        let ucs = UcsFrame::align_to_face(&corners, false, false).expect("face align");
+        assert_eq!(ucs.origin, corners[0]);
+        assert!(ucs.x_axis.near(Vec3::X, 1e-9));
+        assert!(ucs.y_axis.near(Vec3::Y, 1e-9));
+        assert!(ucs.z_axis.near(Vec3::Z, 1e-9));
+
+        let flipped = UcsFrame::align_to_face(&corners, true, false).expect("face align flip x");
+        assert!(flipped.x_axis.near(-Vec3::X, 1e-9));
+        assert!(flipped.y_axis.near(-Vec3::Y, 1e-9));
     }
 }

@@ -111,6 +111,24 @@ impl Interactive for Guarded {
             None
         })
     }
+    fn preview_ucs(&self, s: &Session) -> Option<cadcraft_geom::UcsFrame> {
+        if self.broken.get().is_some() {
+            return None;
+        }
+        catch_unwind(AssertUnwindSafe(|| self.inner.preview_ucs(s))).unwrap_or_else(|_| {
+            self.broken.set(Some("panic in preview_ucs"));
+            None
+        })
+    }
+    fn preview_camera(&self, s: &Session) -> Option<cadcraft_geom::OrbitCamera> {
+        if self.broken.get().is_some() {
+            return None;
+        }
+        catch_unwind(AssertUnwindSafe(|| self.inner.preview_camera(s))).unwrap_or_else(|_| {
+            self.broken.set(Some("panic in preview_camera"));
+            None
+        })
+    }
 }
 
 #[cfg(test)]

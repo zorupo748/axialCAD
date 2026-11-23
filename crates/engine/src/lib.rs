@@ -513,6 +513,8 @@ pub struct Settings {
     pub axistrack: bool,
     /// VSCURRENT: current visual style name ("2dWireframe", "Conceptual", etc.).
     pub vscurrent: String,
+    /// Acompañar vista al definir SCP (view continuously follows candidate UCS orientation).
+    pub ucs_follow_view: bool,
 }
 
 impl Default for Settings {
@@ -584,6 +586,7 @@ impl Default for Settings {
             auditctl: false,
             drawing_plane: cadcraft_geom::DrawingPlane::XY,
             vscurrent: "2dWireframe".into(),
+            ucs_follow_view: false,
         }
     }
 }
@@ -749,6 +752,8 @@ pub struct Session {
     /// change behavior on Ctrl — currently only ARC's "hold Ctrl to switch direction" — read
     /// this instead of receiving modifiers through `Input`, which stays free of UI state.
     pub ctrl_down: bool,
+    /// Whether Shift is held right now (from the UI, overwritten every frame).
+    pub shift_down: bool,
     /// Origin of the point currently being fed by `input_snapped`; never reused by typed points.
     picked_viewport: Option<snap::ViewportPoint>,
     /// The last drawing comparison (COMPARE), drawn over the drawing it was made for.
@@ -834,6 +839,7 @@ impl Session {
             is_interactive_ui: false,
             cursor_deferred: None,
             ctrl_down: false,
+            shift_down: false,
             picked_viewport: None,
             compare: None,
             tracking: snap::tracking::Tracker::default(),
@@ -997,6 +1003,67 @@ impl Session {
         } else {
             Ok(false)
         }
+    }
+    pub fn preview_ucs(&self) -> Option<cadcraft_geom::UcsFrame> {
+        self.running.as_ref()?.machine.preview_ucs(self)
+    }
+    pub fn preview_camera(&self) -> Option<cadcraft_geom::OrbitCamera> {
+        self.running.as_ref()?.machine.preview_camera(self)
+    }
+    pub fn save_named_ucs(&mut self, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(EngineError::Other("El nombre del SCP no puede estar vacío.".into()));
+        }
+        let cur = self.ucs();
+        let doc = self.doc_mut()?;
+        doc.ucss.retain(|u| !u.name.eq_ignore_ascii_case(name));
+        doc.ucss.push(cadcraft_doc::Ucs {
+            name: name.to_string(),
+            origin: cur.origin,
+            x_axis: cur.x_axis,
+            y_axis: cur.y_axis,
+        });
+        Ok(())
+    }
+    pub fn restore_named_ucs(&mut self, name: &str) -> Result<bool> {
+        let name = name.trim();
+        let found = self.doc()?.ucss.iter().find(|u| u.name.eq_ignore_ascii_case(name)).cloned();
+        if let Some(u) = found {
+            let z_axis = u.x_axis.cross(u.y_axis).normalized();
+            let y_axis = z_axis.cross(u.x_axis).normalized();
+            self.set_ucs(cadcraft_geom::UcsFrame::new(u.origin, u.x_axis, y_axis, z_axis))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+    pub fn delete_named_ucs(&mut self, name: &str) -> Result<bool> {
+        let name = name.trim();
+        let doc = self.doc_mut()?;
+        let before = doc.ucss.len();
+        doc.ucss.retain(|u| !u.name.eq_ignore_ascii_case(name));
+        Ok(doc.ucss.len() < before)
+    }
+    pub fn rename_named_ucs(&mut self, old_name: &str, new_name: &str) -> Result<bool> {
+        let old_name = old_name.trim();
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return Err(EngineError::Other("El nuevo nombre del SCP no puede estar vacío.".into()));
+        }
+        let doc = self.doc_mut()?;
+        if doc.ucss.iter().any(|u| u.name.eq_ignore_ascii_case(new_name)) {
+            return Err(EngineError::Other(format!("Ya existe un SCP llamado `{new_name}`.")));
+        }
+        if let Some(u) = doc.ucss.iter_mut().find(|u| u.name.eq_ignore_ascii_case(old_name)) {
+            u.name = new_name.to_string();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+    pub fn named_ucss(&self) -> Result<Vec<cadcraft_doc::Ucs>> {
+        Ok(self.doc()?.ucss.clone())
     }
     pub fn drawing_plane(&self) -> cadcraft_geom::DrawingPlane {
         if self.settings.drawing_plane_manual {
@@ -1662,7 +1729,11 @@ impl Session {
                                 | "mtext"
                                 | "ucs"
                                 | "ucs.3point"
+                                | "ucs.2point"
                                 | "ucs.origin"
+                                | "ucs.xaxis"
+                                | "ucs.yaxis"
+                                | "ucs.zaxis"
                                 | "circle"
                                 | "rectang"
                                 | "text"

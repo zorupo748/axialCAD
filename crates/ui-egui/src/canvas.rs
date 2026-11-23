@@ -2772,10 +2772,17 @@ fn resolve_effective_point(
     prompt_base: Option<Vec2>,
     dyn_frame: Option<crate::dyninput::Frame>,
 ) -> Option<(Vec2, Vec3)> {
-    let raw_world = xf.to_world(hp);
+    let is_ucs_cmd = app.session.running.as_ref().is_some_and(|r| r.id.starts_with("ucs"));
+    let cam = app.session.camera();
+    let raw_world = if is_ucs_cmd {
+        let c = xf.rect.center();
+        let q = Vec2::new(f64::from(hp.x - c.x) / xf.scale, -f64::from(hp.y - c.y) / xf.scale);
+        cam.unproject_to_plane(q)
+    } else {
+        xf.to_world(hp)
+    };
     let c = xf.rect.center();
     let q = Vec2::new(f64::from(hp.x - c.x) / xf.scale, -f64::from(hp.y - c.y) / xf.scale);
-    let cam = app.session.camera();
     let aperture = app.session.settings.aperture;
     let base_osmode = app.session.settings.osmode;
     let zlock = app.session.settings.zlock;
@@ -2783,7 +2790,7 @@ fn resolve_effective_point(
     let prompt_base3 = app.session.current_prompt().as_ref().and_then(|p| p.base3);
     let base3 = prompt_base3.unwrap_or(app.session.last_point3);
     let was_z_zero = app.canvas.axis_track_z_zero;
-    let line_prompt = app.session.running.as_ref().is_some_and(|r| matches!(r.id.as_str(), "line" | "ucs" | "ucs.3point"));
+    let line_prompt = is_ucs_cmd || app.session.running.as_ref().is_some_and(|r| r.id == "line");
     let z0_mode = app.session.current_prompt().is_some_and(|p| p.global_xy_zero);
     if line_prompt && z0_mode {
         return resolve_global_z0_point(app, hp, xf, dyn_frame);
@@ -2803,7 +2810,11 @@ fn resolve_effective_point(
         let r2 = ucs_pt3.map_or(raw_world, |p| ucs.to_local(p).xy());
         (ucs_pt3, r2)
     } else {
-        let pp = xf.to_world3_with_offset(hp, plane, continuation_offset);
+        let pp = if is_ucs_cmd {
+            cam.unproject_to_plane_with_offset(q, plane, continuation_offset)
+        } else {
+            xf.to_world3_with_offset(hp, plane, continuation_offset)
+        };
         let r2 = if line_prompt { pp.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
         (pp, r2)
     };
@@ -3319,7 +3330,10 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     let (view, camera) = app
         .session
         .state()
-        .map(|s| (s.view(), if matches!(s.space, cadcraft_doc::Space::Paper(_)) && s.mspace.is_none() { None } else { Some(app.session.camera()) }))
+        .map(|s| {
+            let cam = app.session.preview_camera().unwrap_or_else(|| app.session.camera());
+            (s.view(), if matches!(s.space, cadcraft_doc::Space::Paper(_)) && s.mspace.is_none() { None } else { Some(cam) })
+        })
         .unwrap_or((view, camera));
     let scale = f64::from(rect.height()) / view.height.max(1e-12);
     let xf = Xf { rect, center: view.center, scale, camera };
@@ -4100,6 +4114,8 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         tooltip(&painter, warn_pos, warning);
     }
     draw_tiles(app, ui, &tiles);
+    // Candidate UCS triad preview (drawn directly in 3D drawing canvas at candidate origin)
+    draw_candidate_ucs_triad(app, &painter, &xf, rect);
     // UCS icon, ViewCube and viewport label.
     if app.ui.show_ucs_icon {
         let ucs_pos = crate::viewcube::ucs_icon_pos(app, rect);
@@ -4880,10 +4896,106 @@ fn draw_ucs_icon(app: &CadApp, p: &egui::Painter, rect: Rect, hovered: bool) {
     }
 }
 
+/// Renders the candidate UCS triad directly in the 3D drawing canvas at the candidate origin.
+fn draw_candidate_ucs_triad(app: &CadApp, p: &egui::Painter, xf: &Xf, _rect: Rect) {
+    let Some(cand) = app.session.preview_ucs() else {
+        return;
+    };
+    let origin_screen = xf.to_screen3(cand.origin);
+    if !origin_screen.x.is_finite() || !origin_screen.y.is_finite() {
+        return;
+    }
+
+    let arm_screen_len = 60.0f32;
+    let f_bold = egui::FontId::proportional(13.0);
+
+    // If candidate origin is distinct from current cursor (e.g. during axis or plane picking),
+    // draw rubber-band guide line from candidate origin to cursor.
+    let cursor3 = app.session.cursor3;
+    if cand.origin.dist(cursor3) > 1e-4 {
+        let cursor_screen = xf.to_screen3(cursor3);
+        if cursor_screen.x.is_finite() && cursor_screen.y.is_finite() {
+            let guide_col = Color32::from_rgb(0xff, 0xd7, 0x00); // Gold
+            p.extend(egui::Shape::dashed_line(
+                &[origin_screen, cursor_screen],
+                Stroke::new(1.8, guide_col),
+                6.0,
+                4.0,
+            ));
+            p.circle_filled(cursor_screen, 3.5, guide_col);
+            p.circle_stroke(cursor_screen, 4.5, Stroke::new(1.0, Color32::BLACK));
+        }
+    }
+
+    // Origin marker (distinct gold diamond with dark border)
+    let marker_col = Color32::from_rgb(0xff, 0xd7, 0x00);
+    let marker_sz = 6.0f32;
+    let diamond = vec![
+        origin_screen + vec2(0.0, -marker_sz),
+        origin_screen + vec2(marker_sz, 0.0),
+        origin_screen + vec2(0.0, marker_sz),
+        origin_screen + vec2(-marker_sz, 0.0),
+    ];
+    p.add(egui::Shape::convex_polygon(diamond, marker_col, Stroke::new(1.2, Color32::BLACK)));
+
+    // Badge label "SCP candidato"
+    let badge_pos = origin_screen + vec2(10.0, 12.0);
+    p.text(
+        badge_pos,
+        egui::Align2::LEFT_TOP,
+        crate::tl!("SCP candidato"),
+        egui::FontId::proportional(10.5),
+        Color32::from_rgb(0xff, 0xd7, 0x00),
+    );
+
+    // Project each axis arm (X = Red, Y = Green, Z = Blue)
+    let axes = [
+        (cand.x_axis, "X", Color32::from_rgb(0xf4, 0x43, 0x36)),
+        (cand.y_axis, "Y", Color32::from_rgb(0x4c, 0xaf, 0x50)),
+        (cand.z_axis, "Z", Color32::from_rgb(0x21, 0x96, 0xf3)),
+    ];
+
+    for (axis_vec, label, color) in axes {
+        let pt_screen = xf.to_screen3(cand.origin + axis_vec);
+        let screen_delta = pt_screen - origin_screen;
+        let len = screen_delta.length();
+        if len > 1e-4 {
+            let dir = screen_delta / len;
+            let tip = origin_screen + dir * arm_screen_len;
+            p.line_segment([origin_screen, tip], Stroke::new(2.5, color));
+
+            // Arrow head lines
+            let perp = vec2(-dir.y, dir.x);
+            let arrow_base = tip - dir * 8.0;
+            let a1 = arrow_base + perp * 4.0;
+            let a2 = arrow_base - perp * 4.0;
+            p.line_segment([tip, a1], Stroke::new(2.0, color));
+            p.line_segment([tip, a2], Stroke::new(2.0, color));
+
+            let label_pos = tip + dir * 12.0;
+            p.text(label_pos, egui::Align2::CENTER_CENTER, label, f_bold.clone(), color);
+        }
+    }
+}
+
 fn viewport_label(p: &egui::Painter, rect: Rect) {
     let t = Tokens::get();
     let at = pos2(rect.left() + 10.0, rect.top() + 8.0);
     p.text(at, egui::Align2::LEFT_TOP, crate::tl!("+  |  Top  |  2D Wireframe"), crate::theme::small(), t.canvas_ink);
+
+    let help_at = pos2(rect.left() + 10.0, rect.top() + 26.0);
+    p.text(
+        help_at,
+        egui::Align2::LEFT_TOP,
+        crate::tl!("Dos dedos: desplazar · Shift + dos dedos: orbitar · Ctrl + dos dedos o pinza: zoom"),
+        crate::theme::small(),
+        t.text_dim,
+    );
+}
+
+pub fn trackpad_toggle_rect(rect: Rect) -> Rect {
+    let min = pos2(rect.left() + 10.0, rect.top() + 26.0);
+    Rect::from_min_size(min, vec2(174.0, 22.0))
 }
 
 fn draw_viewcube(app: &mut CadApp, ui: &mut egui::Ui, rect: Rect) {
