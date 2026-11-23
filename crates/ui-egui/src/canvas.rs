@@ -3142,12 +3142,13 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // counts the canvas. Over those the OS cursor stays visible and the crosshair stays put, as
     // over the menu bar (#1701).
     let any_popup_open = egui::Popup::is_any_open(ui.ctx());
+    let popup_blocked = any_popup_open || app.canvas.popup_open;
     app.canvas.popup_open = any_popup_open;
     let contains = hover_pos.is_some_and(|p| rect.contains(p));
     let layer_ok = hover_pos.is_some_and(|p| ui.ctx().layer_id_at(p) == Some(ui.layer_id()));
     let hovered = resp.hovered();
     let viewcube_blocked = hover_pos.is_some_and(|p| crate::viewcube::Layout::blocks_canvas_pointer(rect, p));
-    let inside = !any_popup_open && contains && layer_ok && hovered && !viewcube_blocked;
+    let inside = !popup_blocked && contains && layer_ok && hovered && !viewcube_blocked;
     crate::debug_cursor::trace_inside(ui.ctx(), inside, hover_pos, rect, any_popup_open, contains, layer_ok, hovered, viewcube_blocked);
     if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         crate::debug_cursor::trace_escape(ui.ctx(), "canvas::selection_window", "Escape clears selection/drag window");
