@@ -612,6 +612,26 @@ fn preferences(app: &CadApp, ui: &mut egui::Ui, changes: &mut Map<String, Value>
             changes.insert("MAXARRAY".into(), json!(max));
         }
         ui.end_row();
+
+        ui.label(crate::tl!("Navigation device"));
+        let current_device = changes
+            .get("navDevice")
+            .and_then(Value::as_str)
+            .and_then(super::NavDevice::parse)
+            .unwrap_or(app.options.nav_device);
+        ui.horizontal(|ui| {
+            for dev in super::NavDevice::ALL {
+                let label = match dev {
+                    super::NavDevice::Auto => crate::tl!("Auto"),
+                    super::NavDevice::Trackpad => crate::tl!("Trackpad"),
+                    super::NavDevice::Mouse => crate::tl!("Mouse"),
+                };
+                if ui.radio(current_device == dev, label).clicked() && current_device != dev {
+                    changes.insert("navDevice".into(), json!(dev.as_str()));
+                }
+            }
+        });
+        ui.end_row();
     });
     hint(ui, crate::tl!("An array that would create more objects than this is refused."));
     ui.add_space(6.0);

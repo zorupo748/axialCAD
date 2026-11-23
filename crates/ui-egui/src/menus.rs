@@ -74,6 +74,9 @@ pub const UI_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("ui.toggle.cmdline", "Command Line", &["Window", "Command Line"], Some("Cmd+9")),
     ("ui.toggle.viewcube", "ViewCube", &["View", "ViewCube", "On"], None),
     ("ui.toggle.ucsicon", "UCS Icon", &["View", "UCS Icon", "On"], None),
+    ("ui.trackpad.toggle", "Toggle Trackpad Mode", &["View", "Trackpad", "Toggle Pan/Orbit"], None),
+    ("ui.trackpad.pan", "Trackpad Pan Mode", &["View", "Trackpad", "Pan"], None),
+    ("ui.trackpad.orbit", "Trackpad Orbit Mode", &["View", "Trackpad", "Orbit"], None),
     ("ui.theme.system", "Use System Setting", &["View", "Interface Theme", "Use System Setting"], None),
     ("ui.theme.light", "Light", &["View", "Interface Theme", "Light"], None),
     ("ui.theme.dark", "Dark", &["View", "Interface Theme", "Dark"], None),
@@ -396,6 +399,29 @@ fn run_ui_command_inner(app: &mut CadApp, id: &str, params: &Value) -> Option<Re
         "ui.toggle.ucsicon" => {
             toggle(&mut app.ui.show_ucs_icon, params);
             Ok(Value::Null)
+        }
+        "ui.trackpad.toggle" | "trackpad.toggle" => {
+            app.canvas.trackpad_mode = app.canvas.trackpad_mode.toggle();
+            if app.canvas.trackpad_mode == crate::canvas::TrackpadNavMode::Orbit {
+                app.session.begin_orbit();
+            }
+            let label = match app.canvas.trackpad_mode {
+                crate::canvas::TrackpadNavMode::Pan => "Pan",
+                crate::canvas::TrackpadNavMode::Orbit => "Orbit",
+            };
+            app.session.echo(format!("Trackpad mode: {label}"));
+            Ok(json!({ "mode": label }))
+        }
+        "ui.trackpad.pan" => {
+            app.canvas.trackpad_mode = crate::canvas::TrackpadNavMode::Pan;
+            app.session.echo("Trackpad mode: Pan");
+            Ok(json!({ "mode": "Pan" }))
+        }
+        "ui.trackpad.orbit" => {
+            app.canvas.trackpad_mode = crate::canvas::TrackpadNavMode::Orbit;
+            app.session.begin_orbit();
+            app.session.echo("Trackpad mode: Orbit");
+            Ok(json!({ "mode": "Orbit" }))
         }
         "ui.toggle.menubar" | "menubar" => {
             toggle(&mut app.ui.in_window_menu, params);

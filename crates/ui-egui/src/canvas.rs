@@ -122,8 +122,10 @@ pub struct VirtualNavState {
 /// pointer pinned inside the canvas without suppressing `XI_RawMotion` deltas or button release.
 pub fn uses_x11_backend() -> bool {
     cfg!(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))
-        && std::env::var_os("DISPLAY").is_some()
-        && std::env::var_os("CADCRAFT_WAYLAND").is_none()
+        && (std::env::var_os("CADCRAFT_X11").is_some()
+            || (std::env::var_os("DISPLAY").is_some()
+                && std::env::var_os("WAYLAND_DISPLAY").is_none()
+                && std::env::var_os("CADCRAFT_WAYLAND").is_none()))
 }
 
 pub fn release_virtual_nav(ctx: &egui::Context, canvas: &mut CanvasState) {
@@ -151,6 +153,22 @@ pub fn wrap_virtual_cursor_pos(pos: Pos2, rect: Rect) -> Pos2 {
     let x = rect.min.x + (pos.x - rect.min.x).rem_euclid(w);
     let y = rect.min.y + (pos.y - rect.min.y).rem_euclid(h);
     Pos2::new(x, y)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TrackpadNavMode {
+    #[default]
+    Pan,
+    Orbit,
+}
+
+impl TrackpadNavMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            TrackpadNavMode::Pan => TrackpadNavMode::Orbit,
+            TrackpadNavMode::Orbit => TrackpadNavMode::Pan,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -221,9 +239,27 @@ pub struct CanvasState {
     pub parallel_plane_warning: bool,
     pan_last: Option<Pos2>,
     pub virtual_nav: Option<VirtualNavState>,
+    /// Preferred trackpad navigation mode: Pan (default) or Orbit.
+    pub trackpad_mode: TrackpadNavMode,
+    /// Whether an orbit gesture is currently active (to avoid calling begin_orbit repeatedly).
+    orbit_gesture_active: bool,
+    /// True while kinetic scroll inertia from a pan gesture is decaying after fingers lifted.
+    pan_inertia: bool,
     /// True when the latest scroll came from a trackpad (or other precise-scrolling device):
     /// scrolling then pans and pinch zooms. A notched mouse wheel clears it so the wheel zooms.
     scroll_pans: bool,
+    /// Navigation diagnostic logger throttle time.
+    last_diag_time: Option<std::time::Instant>,
+    /// Navigation diagnostic logger last recorded action.
+    last_diag_action: Option<&'static str>,
+    /// Diagnostics: timestamp of latest pointer movement.
+    last_pointer_move_time: Option<std::time::Instant>,
+    /// Diagnostics: number of pointer motion events received since last gesture.
+    pointer_motion_count_before_gesture: usize,
+    /// Diagnostics: whether a pinch gesture has already logged its start.
+    pinch_diag_active: bool,
+    /// Diagnostics: timestamp when pinch gesture started.
+    pinch_diag_start: Option<std::time::Instant>,
     /// Hot grips (object, grip index): the ones Shift+clicked while idle, then the ones the
     /// running GRIP edit works on (the engine's grip modes take them from there).
     pub hot_grips: Vec<(Handle, usize)>,
@@ -3157,48 +3193,265 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             }
         }
     }
-    // Whether Ctrl is held right now. Written every frame (not just while a command prompts), so
-    // previews that read `Session::ctrl_down` always see the current state. The engine
+    // Whether Ctrl/Shift is held right now. Written every frame (not just while a command prompts), so
+    // previews that read `Session::ctrl_down` / `Session::shift_down` always see the current state. The engine
     // deliberately does not carry modifiers through `Input`, which is UI-agnostic (see PR
     // #407's Limits note: modifiers used to be dropped on the floor at this point).
-    app.session.ctrl_down = mods.ctrl;
-    // Which device is scrolling? On macOS, trackpads (and Magic Mouse) report precise point
-    // deltas; notched mouse wheels report lines. The answer is sticky because egui spreads a wheel
-    // notch over several frames. Elsewhere (browsers, Wayland smooth-scroll mice) ordinary wheels
-    // also report points, so the wheel keeps zooming there.
-    ui.input(|i| {
+    let has_focus = ui.ctx().input(|i| i.focused);
+    app.session.ctrl_down = has_focus && mods.ctrl;
+    app.session.shift_down = has_focus && mods.shift;
+    // Which device is scrolling? Under Auto, precise point deltas (trackpad on Wayland/macOS/Windows)
+    // pan and pinch zooms; line deltas (mouse wheels) zoom. Under explicit Trackpad/Mouse profiles,
+    // the user's preference decides unconditionally.
+    match app.options.nav_device {
+        crate::options::NavDevice::Trackpad => app.canvas.scroll_pans = true,
+        crate::options::NavDevice::Mouse => app.canvas.scroll_pans = false,
+        crate::options::NavDevice::Auto => {}
+    }
+    let (touch_started, touch_ended, wheel_shift, wheel_ctrl, raw_scroll, scroll_unit_opt, had_wheel, pointer_motion_count) = ui.input(|i| {
+        let (mut started, mut ended, mut w_shift, mut w_ctrl) = (false, false, false, false);
+        let mut raw_sc = egui::Vec2::ZERO;
+        let mut last_unit = None;
+        let mut had_w = false;
+        let mut ptr_moves = 0;
         for e in &i.raw.events {
-            if let egui::Event::MouseWheel { unit, .. } = e {
-                app.canvas.scroll_pans = cfg!(target_os = "macos") && *unit == egui::MouseWheelUnit::Point;
+            match e {
+                egui::Event::PointerMoved(_) => ptr_moves += 1,
+                egui::Event::MouseWheel { unit, delta, phase, modifiers } => {
+                    had_w = true;
+                    last_unit = Some(*unit);
+                    if modifiers.shift {
+                        w_shift = true;
+                    }
+                    if modifiers.ctrl || modifiers.command {
+                        w_ctrl = true;
+                    }
+                    raw_sc += *delta;
+                    match phase {
+                        egui::TouchPhase::Start => started = true,
+                        egui::TouchPhase::End | egui::TouchPhase::Cancel => ended = true,
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         }
+        (started, ended, w_shift, w_ctrl, raw_sc, last_unit, had_w, ptr_moves)
     });
-    if inside && app.canvas.scroll_pans && scroll != egui::Vec2::ZERO {
-        // Two-finger swipe pans: the drawing follows the fingers, like a middle-drag.
-        // Pinch (and Cmd+scroll) still zoom via `zoom_delta` below.
-        let _ = app.session.pan_step(f64::from(scroll.x), f64::from(scroll.y), scale);
+    let has_raw_wheel = raw_scroll != egui::Vec2::ZERO;
+    let trackpad_delta = if has_raw_wheel { raw_scroll } else { scroll };
+    let is_shift = mods.shift || wheel_shift;
+    let is_ctrl = mods.ctrl || mods.command || wheel_ctrl;
+
+    // Pointer diagnostics before gesture starts
+    if pointer_motion_count > 0 {
+        app.canvas.pointer_motion_count_before_gesture += pointer_motion_count;
+        app.canvas.last_pointer_move_time = Some(std::time::Instant::now());
     }
+
+    if app.options.nav_device == crate::options::NavDevice::Auto && had_wheel {
+        // Under Auto:
+        // 1) Point deltas (Wayland/macOS/Windows trackpad) pan/orbit.
+        // 2) Any touch lifecycle phase (Start/End/Cancel) identifies a touch surface.
+        // 3) Simultaneous 2-axis deltas identify a 2D trackpad swipe.
+        // 4) When Shift is held, notched mouse wheels don't zoom in CAD anyway;
+        //    treating Shift+scroll as orbit ensures 3D orbit works seamlessly across all backends.
+        // 5) When Ctrl is held on trackpad, it triggers trackpad zoom.
+        app.canvas.scroll_pans = scroll_unit_opt == Some(egui::MouseWheelUnit::Point)
+            || touch_started
+            || touch_ended
+            || (raw_scroll.x.abs() > 0.01 && raw_scroll.y.abs() > 0.01)
+            || is_shift
+            || (is_ctrl && (touch_started || touch_ended || scroll_unit_opt == Some(egui::MouseWheelUnit::Point)));
+    }
+
+    if touch_ended {
+        // If fingers lifted while panning (not orbiting), mark trailing inertia as pan
+        app.canvas.pan_inertia = !app.canvas.orbit_gesture_active;
+        app.canvas.orbit_gesture_active = false;
+    } else if touch_started || !has_raw_wheel {
+        app.canvas.pan_inertia = false;
+    }
+    if trackpad_delta == egui::Vec2::ZERO {
+        app.canvas.orbit_gesture_active = false;
+    }
+
     let opts = ui.ctx().options(|o| o.input_options);
+    // Native pinch detection: strictly real pinch (Touch/Zoom events), not egui's Ctrl+wheel synthesis
+    let zoom_pinch = ui.input(|i| {
+        if let Some(touch) = i.multi_touch() {
+            return touch.zoom_delta;
+        }
+        let pinch: f32 = i
+            .raw
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::Zoom(factor) => Some(*factor),
+                _ => None,
+            })
+            .product();
+        if pinch.is_finite() && pinch > 0.0 { pinch } else { 1.0 }
+    });
+    let is_pinching = (zoom_pinch - 1.0).abs() > 1e-4;
+
+    let mut chosen_action = "none";
+    let mut action_reason = "idle";
+
+    // Diagnostic logging for Pinch start / progress / end
+    if is_pinching {
+        if !app.canvas.pinch_diag_active {
+            app.canvas.pinch_diag_active = true;
+            let now = std::time::Instant::now();
+            app.canvas.pinch_diag_start = Some(now);
+            let time_since_pointer_ms = app.canvas.last_pointer_move_time
+                .map(|t| now.duration_since(t).as_millis())
+                .unwrap_or(0);
+            let msg = format!(
+                "[PINCH_DIAG] START | dt_since_last_ptr_move={}ms ptr_events_before={} inside={} on_menu={}",
+                time_since_pointer_ms,
+                app.canvas.pointer_motion_count_before_gesture,
+                inside,
+                on_menu
+            );
+            log::info!(target: "cadcraft_ui_egui::pinch", "{msg}");
+            if std::env::var_os("CADCRAFT_NAV_DEBUG").is_some() || std::env::var_os("CADCRAFT_DEBUG").is_some() {
+                eprintln!("{msg}");
+            }
+            app.canvas.pointer_motion_count_before_gesture = 0;
+        }
+    } else if app.canvas.pinch_diag_active {
+        app.canvas.pinch_diag_active = false;
+        let duration_ms = app.canvas.pinch_diag_start
+            .map(|t| std::time::Instant::now().duration_since(t).as_millis())
+            .unwrap_or(0);
+        let msg = format!("[PINCH_DIAG] END | duration={}ms", duration_ms);
+        log::info!(target: "cadcraft_ui_egui::pinch", "{msg}");
+        if std::env::var_os("CADCRAFT_NAV_DEBUG").is_some() || std::env::var_os("CADCRAFT_DEBUG").is_some() {
+            eprintln!("{msg}");
+        }
+    }
+
+    if is_pinching {
+        if inside && !on_menu {
+            if let Some(hp) = hover_pos {
+                let c = rect.center();
+                let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
+                let _ = app.session.zoom_about_camera(f64::from(zoom_pinch), q);
+                chosen_action = "zoom";
+                action_reason = "pinch_gesture";
+            }
+        } else {
+            chosen_action = "ignored";
+            action_reason = if !inside { "pinch_outside_canvas" } else { "pinch_blocked_on_menu" };
+        }
+    } else if app.canvas.scroll_pans && trackpad_delta != egui::Vec2::ZERO {
+        if inside && !on_menu {
+            // Priority arbitration when both Ctrl and Shift are held:
+            // Shift takes precedence for 3D Orbit so an accidental Ctrl doesn't block orbit.
+            // When Ctrl alone is held (without Shift): reliable trackpad 2-finger zoom anchored at cursor.
+            if is_shift {
+                let can_orbit = !app.canvas.pan_inertia;
+                let is_orbit = app.canvas.orbit_gesture_active || can_orbit;
+                if is_orbit {
+                    if !app.canvas.orbit_gesture_active {
+                        app.session.begin_orbit();
+                        app.canvas.orbit_gesture_active = true;
+                    }
+                    let _ = app.session.orbit_step(f64::from(trackpad_delta.x), f64::from(trackpad_delta.y));
+                    chosen_action = "orbit";
+                    action_reason = if mods.shift { "shift_key_orbit" } else { "wheel_shift_orbit" };
+                }
+            } else if is_ctrl {
+                // Ctrl + 2-finger scroll = continuous smooth zoom anchored at cursor.
+                // Releasing Ctrl mid-gesture seamlessly drops back to panning without jumps.
+                app.canvas.orbit_gesture_active = false;
+                if let Some(hp) = hover_pos {
+                    let factor = (f64::from(trackpad_delta.y) * 0.005).exp();
+                    let c = rect.center();
+                    let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
+                    let _ = app.session.zoom_about_camera(factor, q);
+                    chosen_action = "zoom";
+                    action_reason = "ctrl_trackpad_scroll_zoom";
+                }
+            } else {
+                if app.canvas.orbit_gesture_active {
+                    // If user releases Shift mid-gesture, smoothly switch back to pan without residual orbit
+                    app.canvas.orbit_gesture_active = false;
+                }
+                let _ = app.session.pan_step(f64::from(trackpad_delta.x), f64::from(trackpad_delta.y), scale);
+                chosen_action = "pan";
+                action_reason = match app.options.nav_device {
+                    crate::options::NavDevice::Trackpad => "nav_device_trackpad_pan",
+                    crate::options::NavDevice::Auto if scroll_unit_opt == Some(egui::MouseWheelUnit::Point) => "auto_point_unit_pan",
+                    crate::options::NavDevice::Auto if touch_started || touch_ended => "auto_touch_phase_pan",
+                    crate::options::NavDevice::Auto if raw_scroll.x.abs() > 0.01 && raw_scroll.y.abs() > 0.01 => "auto_2axis_delta_pan",
+                    _ => "scroll_pans_fallback",
+                };
+            }
+        } else {
+            chosen_action = "ignored";
+            action_reason = if !inside { "scroll_outside_canvas" } else { "scroll_blocked_on_menu" };
+        }
+    } else if trackpad_delta == egui::Vec2::ZERO || is_pinching {
+        app.canvas.orbit_gesture_active = false;
+    }
+
     let wheel = ui.input(|i| wheel_zoom_points(&i.raw.events, &opts, rect.height()));
-    if inside
+    if chosen_action == "none"
         && !app.canvas.scroll_pans
         && wheel != 0.0
-        && let Some(hp) = hover_pos
     {
-        // Zoom with the mouse wheel about the cursor, each notch at once.
-        let f = app.session.wheel_zoom_factor(f64::from(wheel));
-        let c = rect.center();
-        let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
-        let _ = app.session.zoom_about_camera(f, q);
+        if inside && !on_menu {
+            if let Some(hp) = hover_pos {
+                // Zoom with the mouse wheel about the cursor, each notch at once.
+                let f = app.session.wheel_zoom_factor(f64::from(wheel));
+                let c = rect.center();
+                let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
+                let _ = app.session.zoom_about_camera(f, q);
+                chosen_action = "zoom";
+                action_reason = "mouse_wheel_notch";
+            }
+        } else {
+            chosen_action = "ignored";
+            action_reason = if !inside { "wheel_outside_canvas" } else { "wheel_blocked_on_menu" };
+        }
     }
-    let zoom_pinch = ui.input(|i| crate::animation::zoom_delta(i, &opts, app.shows_animations()));
-    if inside
-        && (zoom_pinch - 1.0).abs() > 1e-4
-        && let Some(hp) = hover_pos
-    {
-        let c = rect.center();
-        let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
-        let _ = app.session.zoom_about_camera(f64::from(zoom_pinch), q);
+
+    // Concise per-gesture diagnostic logging (actionable, deduplicated, throttle-capped)
+    if had_wheel || is_pinching {
+        let backend = if uses_x11_backend() { "x11" } else { "wayland" };
+        let dev_str = app.options.nav_device.as_str();
+        let ev_str = if is_pinching { "Pinch" } else { "MouseWheel" };
+        let unit_str = match scroll_unit_opt {
+            Some(egui::MouseWheelUnit::Point) => "Point",
+            Some(egui::MouseWheelUnit::Line) => "Line",
+            Some(egui::MouseWheelUnit::Page) => "Page",
+            None => "None",
+        };
+        let delta = if is_pinching { egui::vec2(zoom_pinch, 0.0) } else { trackpad_delta };
+        let cam = app.session.camera();
+
+        let now = std::time::Instant::now();
+        let should_log = touch_started
+            || touch_ended
+            || app.canvas.last_diag_action != Some(chosen_action)
+            || app.canvas.last_diag_time.map_or(true, |t| now.duration_since(t).as_millis() >= 250);
+
+        if should_log {
+            app.canvas.last_diag_time = Some(now);
+            app.canvas.last_diag_action = Some(chosen_action);
+            let msg = format!(
+                "[NAV_DIAG] backend={backend} dev={dev_str} ev={ev_str} unit={unit_str} delta=({:.1},{:.1}) shift={is_shift} ctrl={is_ctrl} inside={inside} on_menu={on_menu} action={chosen_action} reason=\"{action_reason}\" target=[{:.2},{:.2},{:.2}] az={:.1}° el={:.1}° h={:.1}",
+                delta.x, delta.y,
+                cam.target.x, cam.target.y, cam.target.z,
+                cam.azimuth.to_degrees(), cam.elevation.to_degrees(), cam.height
+            );
+            log::info!(target: "cadcraft_ui_egui::nav", "{msg}");
+            if std::env::var_os("CADCRAFT_NAV_DEBUG").is_some() || std::env::var_os("CADCRAFT_DEBUG").is_some() {
+                eprintln!("{msg}");
+            }
+        }
     }
     let escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
     if escape_pressed {

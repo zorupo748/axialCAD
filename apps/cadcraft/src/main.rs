@@ -410,11 +410,16 @@ fn main() -> eframe::Result {
             d
         });
     }
-    // winit has no file drag-and-drop on Wayland (only on X11), so dropping files from the file
-    // manager showed a "no" cursor. Run through XWayland when it's there; CADCRAFT_WAYLAND=1
-    // keeps the native Wayland backend.
+    // Run through XWayland/X11 only when forced via CADCRAFT_X11=1 or on a pure X11 session
+    // where WAYLAND_DISPLAY is not set. When WAYLAND_DISPLAY is present, run native Wayland
+    // to preserve pointer gestures (zwp_pointer_gestures_v1), smooth trackpad scrolling and
+    // native surface integration.
     #[cfg(all(unix, not(target_os = "macos")))]
-    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("CADCRAFT_WAYLAND").is_none() {
+    if std::env::var_os("CADCRAFT_X11").is_some()
+        || (std::env::var_os("DISPLAY").is_some()
+            && std::env::var_os("WAYLAND_DISPLAY").is_none()
+            && std::env::var_os("CADCRAFT_WAYLAND").is_none())
+    {
         options.event_loop_builder = Some(Box::new(|b| {
             use winit::platform::x11::EventLoopBuilderExtX11;
             b.with_x11();
