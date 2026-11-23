@@ -93,3 +93,6 @@ truck-polymesh = { path = "vendor/truck/truck-polymesh" }
 truck-shapeops = { path = "vendor/truck/truck-shapeops" }
 truck-stepio = { path = "vendor/truck/truck-stepio" }
 truck-topology = { path = "vendor/truck/truck-topology" }
+
+[patch.crates-io]
+winit = { path = "vendor/winit-0.30.13" }
