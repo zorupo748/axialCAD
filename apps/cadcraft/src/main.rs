@@ -272,27 +272,83 @@ fn filters_for_save(name: &str) -> [(&'static str, &'static str); 7] {
     filters
 }
 
-/// The per-user settings directory (it holds `logs/` and `autosave/`): `CADCRAFT_CONFIG_DIR` if set, else
-/// `$XDG_CONFIG_HOME/cadcraft` or `~/.config/cadcraft` on Linux and the BSDs,
-/// `~/Library/Application Support/CADCraft` on macOS, `%APPDATA%\CADCraft` on Windows.
-fn config_dir() -> Option<std::path::PathBuf> {
-    config_dir_from(|k| std::env::var_os(k))
+fn has_any_entry(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir).map(|mut it| it.next().is_some()).unwrap_or(false)
 }
 
-/// [`config_dir`] with the environment passed in (`var` looks a variable up). An empty variable
-/// counts as unset, so a blank value never means the working directory.
-fn config_dir_from(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+/// Check whether `dir` contains recognizable existing configuration/state.
+///
+/// For legacy roots (`is_legacy = true`), a non-empty `logs/` directory indicates that
+/// historical CADCraft runs took place. For the primary root (`is_legacy = false`),
+/// startup artifacts such as log files or empty `support`/`autosave` folders created
+/// during early boot must NOT be counted as existing user configuration, so that they
+/// never hide valid legacy configuration.
+pub(crate) fn has_existing_config(dir: &std::path::Path, is_legacy: bool) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
+    if dir.join("workspace.json").is_file() {
+        return true;
+    }
+    if dir.join("support").is_dir() && has_any_entry(&dir.join("support")) {
+        return true;
+    }
+    if dir.join("plotters").is_dir() && has_any_entry(&dir.join("plotters")) {
+        return true;
+    }
+    if dir.join("autosave").is_dir() && has_any_entry(&dir.join("autosave")) {
+        return true;
+    }
+    if is_legacy {
+        let logs = dir.join(logging::LOG_DIR);
+        if logs.is_dir() && has_any_entry(&logs) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The per-user settings directory (it holds `logs/` and `autosave/`):
+/// `AXIALCAD_CONFIG_DIR` if set, else `CADCRAFT_CONFIG_DIR` if set, else
+/// the platform settings directory with fallback to legacy configuration if present.
+pub(crate) fn config_dir() -> Option<std::path::PathBuf> {
+    config_dir_from_env(std::env::consts::OS, |k| std::env::var_os(k))
+}
+
+pub(crate) fn config_dir_from(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    config_dir_from_env(std::env::consts::OS, var)
+}
+
+/// [`config_dir`] with the platform and environment passed in (`var` looks a variable up).
+/// An empty variable counts as unset, so a blank value never means the working directory.
+pub(crate) fn config_dir_from_env(platform: &str, var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
     let set = |k: &str| var(k).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
-    if let Some(dir) = set("CADCRAFT_CONFIG_DIR") {
+    // Explicit environment variables take precedence over default paths.
+    if let Some(dir) = set("AXIALCAD_CONFIG_DIR").or_else(|| set("CADCRAFT_CONFIG_DIR")) {
         return Some(dir);
     }
-    if cfg!(target_os = "macos") {
-        set("HOME").map(|h| h.join("Library/Application Support/CADCraft"))
-    } else if cfg!(windows) {
-        set("APPDATA").map(|a| a.join("CADCraft"))
+    let (primary, legacy) = match platform {
+        "macos" => {
+            let home = set("HOME")?;
+            (home.join("Library/Application Support/axialCAD"), home.join("Library/Application Support/CADCraft"))
+        }
+        "windows" => {
+            let appdata = set("APPDATA")?;
+            (appdata.join("axialCAD"), appdata.join("CADCraft"))
+        }
+        _ => {
+            // The XDG spec ignores a relative XDG_CONFIG_HOME.
+            let base = set("XDG_CONFIG_HOME").filter(|p| p.is_absolute()).or_else(|| set("HOME").map(|h| h.join(".config")))?;
+            (base.join("axialcad"), base.join("cadcraft"))
+        }
+    };
+
+    // If recognizable configuration exists in legacy and primary has no user configuration,
+    // use legacy (no automatic migration). Clean installs use primary.
+    if has_existing_config(&legacy, true) && !has_existing_config(&primary, false) {
+        Some(legacy)
     } else {
-        // The XDG spec ignores a relative XDG_CONFIG_HOME.
-        set("XDG_CONFIG_HOME").filter(|p| p.is_absolute()).or_else(|| set("HOME").map(|h| h.join(".config"))).map(|c| c.join("cadcraft"))
+        Some(primary)
     }
 }
 
@@ -315,8 +371,8 @@ fn version_string() -> String {
     format!("cadcraft {} ({sha})", env!("CARGO_PKG_VERSION"))
 }
 
-/// The control port from `--control <port>` or `CADCRAFT_CONTROL_PORT` (`source`); a value that is
-/// not a port is logged and ignored instead of silently starting no control channel.
+/// The control port from `--control <port>`, `AXIALCAD_CONTROL_PORT`, or `CADCRAFT_CONTROL_PORT` (`source`);
+/// a value that is not a port is logged and ignored instead of silently starting no control channel.
 fn control_port_from(source: &str, value: Option<String>) -> Option<u16> {
     let value = value?;
     let port = value.trim().parse().ok();
@@ -327,24 +383,32 @@ fn control_port_from(source: &str, value: Option<String>) -> Option<u16> {
 }
 
 /// `--control` followed by `value`: a bare `--control` (last argument) keeps the port already
-/// read from `CADCRAFT_CONTROL_PORT` (`current`) instead of turning the control channel off.
+/// read from environment (`current`) instead of turning the control channel off.
 fn control_flag(current: Option<u16>, value: Option<String>) -> Option<u16> {
     if value.is_some() {
         return control_port_from("--control", value);
     }
     match current {
-        Some(port) => log::warn!("--control: no port given; using CADCRAFT_CONTROL_PORT ({port})"),
+        Some(port) => log::warn!("--control: no port given; using environment control port ({port})"),
         None => log::warn!("--control: no port given; the control channel is off"),
     }
     current
 }
 
+fn initial_control_port() -> Option<u16> {
+    if let Some(val) = std::env::var_os("AXIALCAD_CONTROL_PORT").filter(|v| !v.is_empty()) {
+        control_port_from("AXIALCAD_CONTROL_PORT", Some(val.to_string_lossy().into_owned()))
+    } else if let Some(val) = std::env::var_os("CADCRAFT_CONTROL_PORT").filter(|v| !v.is_empty()) {
+        control_port_from("CADCRAFT_CONTROL_PORT", Some(val.to_string_lossy().into_owned()))
+    } else {
+        None
+    }
+}
+
 fn main() -> eframe::Result {
     // First, so every start-up record is captured; see `logging`.
     let logger = logging::install();
-    // lossy, so a value that is not Unicode is reported like any other bad port instead of ignored
-    let mut control_port =
-        control_port_from("CADCRAFT_CONTROL_PORT", std::env::var_os("CADCRAFT_CONTROL_PORT").map(|p| p.to_string_lossy().into_owned()));
+    let mut control_port = initial_control_port();
     let mut files = Vec::new();
     let mut sample = false;
     let mut args = std::env::args().skip(1);
@@ -596,9 +660,16 @@ mod tests {
 
     #[test]
     fn the_override_variable_wins_and_empty_values_are_unset() {
-        let vars = [("CADCRAFT_CONFIG_DIR", "/tmp/cc"), ("HOME", "/home/u"), ("XDG_CONFIG_HOME", "/x"), ("APPDATA", "C:\\a")];
-        assert_eq!(config_dir_from(env(&vars)), Some(PathBuf::from("/tmp/cc")));
-        let empty = [("CADCRAFT_CONFIG_DIR", ""), ("HOME", ""), ("XDG_CONFIG_HOME", ""), ("APPDATA", "")];
+        // AXIALCAD_CONFIG_DIR has precedence over CADCRAFT_CONFIG_DIR
+        let both = [("AXIALCAD_CONFIG_DIR", "/tmp/ax"), ("CADCRAFT_CONFIG_DIR", "/tmp/cc"), ("HOME", "/home/u")];
+        assert_eq!(config_dir_from(env(&both)), Some(PathBuf::from("/tmp/ax")));
+
+        // CADCRAFT_CONFIG_DIR stands in when AXIALCAD_CONFIG_DIR is absent
+        let legacy = [("CADCRAFT_CONFIG_DIR", "/tmp/cc"), ("HOME", "/home/u")];
+        assert_eq!(config_dir_from(env(&legacy)), Some(PathBuf::from("/tmp/cc")));
+
+        // Empty override variables are unset (fall back to default or None)
+        let empty = [("AXIALCAD_CONFIG_DIR", ""), ("CADCRAFT_CONFIG_DIR", ""), ("HOME", ""), ("XDG_CONFIG_HOME", ""), ("APPDATA", "")];
         assert_eq!(config_dir_from(env(&empty)), None, "no usable variable means no directory, not the working directory");
         assert_eq!(config_dir_from(env(&[])), None);
     }
@@ -606,24 +677,117 @@ mod tests {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn linux_and_bsd_follow_xdg_config_home() {
-        assert_eq!(config_dir_from(env(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/home/u")])), Some(PathBuf::from("/x/cadcraft")));
-        assert_eq!(config_dir_from(env(&[("HOME", "/home/u")])), Some(PathBuf::from("/home/u/.config/cadcraft")));
+        // In a clean environment (no existing directories), default path is ~/.config/axialcad
+        let non_existent_base = format!("/tmp/nonexistent-test-{}", std::process::id());
+        let xdg = format!("{non_existent_base}/x");
+        let home = format!("{non_existent_base}/u");
+        assert_eq!(
+            config_dir_from(env(&[("XDG_CONFIG_HOME", &xdg), ("HOME", &home)])),
+            Some(PathBuf::from(format!("{xdg}/axialcad")))
+        );
+        assert_eq!(
+            config_dir_from(env(&[("HOME", &home)])),
+            Some(PathBuf::from(format!("{home}/.config/axialcad")))
+        );
         // The XDG spec says a relative XDG_CONFIG_HOME is ignored.
-        assert_eq!(config_dir_from(env(&[("XDG_CONFIG_HOME", "rel"), ("HOME", "/home/u")])), Some(PathBuf::from("/home/u/.config/cadcraft")));
+        assert_eq!(
+            config_dir_from(env(&[("XDG_CONFIG_HOME", "rel"), ("HOME", &home)])),
+            Some(PathBuf::from(format!("{home}/.config/axialcad")))
+        );
+    }
+
+    #[test]
+    fn config_dir_detects_existing_legacy_directory_and_falls_back() {
+        let base = std::env::temp_dir().join(format!("ax-test-fallback-{}", std::process::id()));
+        let legacy = base.join("cadcraft");
+        let primary = base.join("axialcad");
+        let _ = std::fs::create_dir_all(&legacy);
+        let _ = std::fs::write(legacy.join("workspace.json"), b"{}");
+
+        let vars = [("XDG_CONFIG_HOME", base.to_str().unwrap()), ("HOME", "/tmp")];
+        // With legacy having workspace.json and primary not existing, fallback selects legacy
+        assert_eq!(config_dir_from(env(&vars)), Some(legacy.clone()));
+
+        // If primary is created but EMPTY, fallback STILL selects legacy
+        let _ = std::fs::create_dir_all(&primary);
+        assert_eq!(config_dir_from(env(&vars)), Some(legacy.clone()));
+
+        // If primary receives actual config, primary takes precedence
+        let _ = std::fs::write(primary.join("workspace.json"), b"{}");
+        assert_eq!(config_dir_from(env(&vars)), Some(primary));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn startup_artifacts_in_primary_do_not_hide_legacy_config_across_runs() {
+        let base = std::env::temp_dir().join(format!("ax-test-artifacts-{}", std::process::id()));
+        let legacy = base.join("cadcraft");
+        let primary = base.join("axialcad");
+        let _ = std::fs::create_dir_all(&legacy);
+        let _ = std::fs::write(legacy.join("workspace.json"), b"{}");
+
+        let vars = [("XDG_CONFIG_HOME", base.to_str().unwrap()), ("HOME", "/tmp")];
+
+        // 1. Initial state: primary does not exist, legacy has workspace.json
+        assert_eq!(config_dir_from(env(&vars)), Some(legacy.clone()));
+
+        // 2. Simulate early boot artifacts created in primary (empty support dir, logs folder, log file)
+        let _ = std::fs::create_dir_all(primary.join("support"));
+        let _ = std::fs::create_dir_all(primary.join("autosave"));
+        let _ = std::fs::create_dir_all(primary.join("plotters"));
+        let _ = std::fs::create_dir_all(primary.join("logs"));
+        let _ = std::fs::write(primary.join("logs").join("cadcraft.log"), b"startup log line\n");
+
+        // First run with startup artifacts in primary MUST STILL select legacy
+        assert_eq!(config_dir_from(env(&vars)), Some(legacy.clone()));
+
+        // Second startup (segundo arranque) MUST STILL select legacy
+        assert_eq!(config_dir_from(env(&vars)), Some(legacy.clone()));
+
+        // 3. Only when user creates actual configuration in primary does primary take precedence
+        let _ = std::fs::write(primary.join("workspace.json"), b"{}");
+        assert_eq!(config_dir_from(env(&vars)), Some(primary));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn legacy_recognized_via_logs_when_workspace_not_customized() {
+        let base = std::env::temp_dir().join(format!("ax-test-legacy-logs-{}", std::process::id()));
+        let legacy = base.join("cadcraft");
+        let primary = base.join("axialcad");
+        let _ = std::fs::create_dir_all(legacy.join("logs"));
+        let _ = std::fs::write(legacy.join("logs").join("cadcraft.log"), b"previous run\n");
+
+        let vars = [("XDG_CONFIG_HOME", base.to_str().unwrap()), ("HOME", "/tmp")];
+        // Legacy with historical log files is recognized
+        assert_eq!(config_dir_from(env(&vars)), Some(legacy.clone()));
+
+        // Empty logs in primary do not override
+        let _ = std::fs::create_dir_all(primary.join("logs"));
+        assert_eq!(config_dir_from(env(&vars)), Some(legacy.clone()));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_uses_application_support() {
-        assert_eq!(config_dir_from(env(&[("HOME", "/Users/u")])), Some(PathBuf::from("/Users/u/Library/Application Support/CADCraft")));
+        let home = format!("/tmp/nonexistent-mac-{}", std::process::id());
+        assert_eq!(
+            config_dir_from(env(&[("HOME", &home)])),
+            Some(PathBuf::from(format!("{home}/Library/Application Support/axialCAD")))
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_uses_appdata() {
+        let appdata = format!("C:\\nonexistent-win-{}", std::process::id());
         assert_eq!(
-            config_dir_from(env(&[("APPDATA", "C:\\Users\\u\\AppData\\Roaming")])),
-            Some(PathBuf::from("C:\\Users\\u\\AppData\\Roaming").join("CADCraft"))
+            config_dir_from(env(&[("APPDATA", &appdata)])),
+            Some(PathBuf::from(format!("{appdata}\\axialCAD")))
         );
     }
 

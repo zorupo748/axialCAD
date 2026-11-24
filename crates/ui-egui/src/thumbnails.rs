@@ -14,20 +14,52 @@ fn path_hash(path: &str) -> u64 {
     s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3))
 }
 
-/// Directory where thumbnail PNGs are stored.
-pub fn cache_dir() -> PathBuf {
+/// Deterministic key for a thumbnail file name.
+fn thumbnail_key(path: &str) -> String {
+    format!("{:016x}.png", path_hash(path))
+}
+
+fn base_cache_dir() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir)
-        .join("cadcraft")
-        .join("thumbnails")
 }
 
-/// The cached thumbnail file path for `path`.
+fn cache_dir_from(base: &Path) -> PathBuf {
+    base.join("axialcad").join("thumbnails")
+}
+
+fn legacy_cache_dir_from(base: &Path) -> PathBuf {
+    base.join("cadcraft").join("thumbnails")
+}
+
+/// Directory where thumbnail PNGs are stored.
+pub fn cache_dir() -> PathBuf {
+    cache_dir_from(&base_cache_dir())
+}
+
+/// Legacy directory where thumbnail PNGs were stored.
+pub fn legacy_cache_dir() -> PathBuf {
+    legacy_cache_dir_from(&base_cache_dir())
+}
+
+fn thumbnail_path_from(base: &Path, path: &str) -> PathBuf {
+    let key = thumbnail_key(path);
+    let primary = cache_dir_from(base).join(&key);
+    if !primary.is_file() {
+        let legacy = legacy_cache_dir_from(base).join(&key);
+        if legacy.is_file() {
+            return legacy;
+        }
+    }
+    primary
+}
+
+/// The cached thumbnail file path for `path`. Reads existing thumbnail from legacy cache
+/// if primary does not exist, preserving fast startup without deleting legacy cache.
 pub fn thumbnail_path(path: &str) -> PathBuf {
-    let key = format!("{:016x}.png", path_hash(path));
-    cache_dir().join(key)
+    thumbnail_path_from(&base_cache_dir(), path)
 }
 
 /// Generate and save a 240x160 thumbnail PNG for `drawing` at `path`.
@@ -60,7 +92,7 @@ pub fn update_thumbnail(drawing: &cadcraft_doc::Drawing, last_view: Option<cadcr
     };
     let ropts = cadcraft_render::raster::RasterOptions { background: cadcraft_color::Rgb::from_u32(0x22262e), ..Default::default() };
     if let Some(png_bytes) = cadcraft_render::raster::render_png(&dl, &view, &ropts) {
-        let target = thumbnail_path(path);
+        let target = cache_dir().join(thumbnail_key(path));
         if let Some(parent) = target.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -129,4 +161,46 @@ pub fn is_same_file(path_a: &str, path_b: &str) -> bool {
         return ca == cb;
     }
     pa == pb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_dir_uses_axialcad_and_legacy_uses_cadcraft() {
+        let primary = cache_dir();
+        assert!(primary.ends_with(Path::new("axialcad").join("thumbnails")));
+        let legacy = legacy_cache_dir();
+        assert!(legacy.ends_with(Path::new("cadcraft").join("thumbnails")));
+    }
+
+    #[test]
+    fn thumbnail_path_reads_primary_or_falls_back_to_legacy() {
+        let tmp = std::env::temp_dir().join(format!("axialcad-thumb-test-{}", std::process::id()));
+        let primary_dir = cache_dir_from(&tmp);
+        let legacy_dir = legacy_cache_dir_from(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&primary_dir).unwrap();
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+
+        let drawing_path = "/nonexistent/test_drawing.dxf";
+        let key = thumbnail_key(drawing_path);
+        let primary_file = primary_dir.join(&key);
+        let legacy_file = legacy_dir.join(&key);
+
+        // 1. Neither file exists: resolves to primary file path (where it will be written)
+        assert_eq!(thumbnail_path_from(&tmp, drawing_path), primary_file);
+
+        // 2. Only legacy exists: falls back to reading legacy file
+        std::fs::write(&legacy_file, b"legacy png").unwrap();
+        assert_eq!(thumbnail_path_from(&tmp, drawing_path), legacy_file);
+
+        // 3. Both exist: primary takes precedence without mixing or deleting legacy
+        std::fs::write(&primary_file, b"primary png").unwrap();
+        assert_eq!(thumbnail_path_from(&tmp, drawing_path), primary_file);
+        assert!(legacy_file.is_file(), "legacy cache must remain untouched");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

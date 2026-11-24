@@ -31,6 +31,17 @@ pub struct PlotterStore {
 static STORE: OnceLock<PlotterStore> = OnceLock::new();
 static MEMORY: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
+#[cfg(not(target_arch = "wasm32"))]
+static TEST_ENV_OVERRIDE: Mutex<Option<std::collections::HashMap<String, std::ffi::OsString>>> = Mutex::new(None);
+
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub fn set_test_env(vars: Option<std::collections::HashMap<String, std::ffi::OsString>>) {
+    if let Ok(mut lock) = TEST_ENV_OVERRIDE.lock() {
+        *lock = vars;
+    }
+}
+
 /// Install the host's plotter folder (first call wins).
 pub fn set_plotter_store(s: PlotterStore) {
     let _ = STORE.set(s);
@@ -60,22 +71,86 @@ impl PlotterStore {
         }
     }
 
-    /// The `plotters` folder of the CADCraft settings directory (`CADCRAFT_CONFIG_DIR`, else
-    /// the platform's settings directory).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn has_any_entry(dir: &std::path::Path) -> bool {
+        std::fs::read_dir(dir).map(|mut it| it.next().is_some()).unwrap_or(false)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn has_existing_config(dir: &std::path::Path, is_legacy: bool) -> bool {
+        if !dir.is_dir() {
+            return false;
+        }
+        if dir.join("workspace.json").is_file() {
+            return true;
+        }
+        if dir.join("support").is_dir() && Self::has_any_entry(&dir.join("support")) {
+            return true;
+        }
+        if dir.join("plotters").is_dir() && Self::has_any_entry(&dir.join("plotters")) {
+            return true;
+        }
+        if dir.join("autosave").is_dir() && Self::has_any_entry(&dir.join("autosave")) {
+            return true;
+        }
+        if is_legacy {
+            let logs = dir.join("logs");
+            if logs.is_dir() && Self::has_any_entry(&logs) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn settings_root_from(os: &str, var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+        use std::path::PathBuf;
+        let get = |k: &str| var(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+        if let Some(explicit) = get("AXIALCAD_CONFIG_DIR").or_else(|| get("CADCRAFT_CONFIG_DIR")) {
+            return Some(explicit);
+        }
+        let (primary, legacy) = match os {
+            "macos" => (
+                get("HOME").map(|h| h.join("Library/Application Support/axialCAD")),
+                get("HOME").map(|h| h.join("Library/Application Support/CADCraft")),
+            ),
+            "windows" => (
+                get("APPDATA").map(|r| r.join("axialCAD")),
+                get("APPDATA").map(|r| r.join("CADCraft")),
+            ),
+            _ => (
+                get("XDG_CONFIG_HOME").filter(|p| p.is_absolute()).map(|r| r.join("axialcad")).or_else(|| get("HOME").map(|h| h.join(".config/axialcad"))),
+                get("XDG_CONFIG_HOME").filter(|p| p.is_absolute()).map(|r| r.join("cadcraft")).or_else(|| get("HOME").map(|h| h.join(".config/cadcraft"))),
+            ),
+        };
+        match (primary, legacy) {
+            (Some(p), Some(l)) => {
+                if Self::has_existing_config(&l, true) && !Self::has_existing_config(&p, false) {
+                    Some(l)
+                } else {
+                    Some(p)
+                }
+            }
+            (Some(p), None) => Some(p),
+            (None, Some(l)) => Some(l),
+            (None, None) => None,
+        }
+    }
+
+    /// The `plotters` folder of the axialCAD settings directory (`AXIALCAD_CONFIG_DIR`,
+    /// `CADCRAFT_CONFIG_DIR`, else the platform's settings directory).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn settings_folder() -> PlotterStore {
         fn dir() -> std::result::Result<std::path::PathBuf, String> {
-            use std::path::PathBuf;
-            let get = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-            let root = match std::env::var_os("CADCRAFT_CONFIG_DIR") {
-                Some(r) if !r.is_empty() => Some(PathBuf::from(r)),
-                Some(_) => None,
-                None => match std::env::consts::OS {
-                    "macos" => get("HOME").map(|h| h.join("Library/Application Support/CADCraft")),
-                    "windows" => get("APPDATA").map(|r| r.join("CADCraft")),
-                    _ => get("XDG_CONFIG_HOME").map(|r| r.join("cadcraft")).or_else(|| get("HOME").map(|h| h.join(".config/cadcraft"))),
-                },
+            let var_fn = |k: &str| {
+                if let Ok(lock) = TEST_ENV_OVERRIDE.lock() {
+                    if let Some(map) = lock.as_ref() {
+                        return map.get(k).cloned();
+                    }
+                }
+                std::env::var_os(k)
             };
+            let root = PlotterStore::settings_root_from(std::env::consts::OS, var_fn);
             root.map(|r| r.join("plotters")).ok_or_else(|| "there is no settings folder for plotter configurations".to_string())
         }
         /// A plain file name of ours (no separators, no parent references).

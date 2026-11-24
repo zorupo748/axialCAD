@@ -296,3 +296,167 @@ fn axialcad_devices_and_stroke_font_aliases() {
     let st = d.text_styles.iter().find(|t| t.name == "BrandStyle").expect("style created");
     assert_eq!(st.font, "CADCraft Stroke", "canonical font name stored in TextStyle");
 }
+
+#[test]
+fn settings_root_precedence_and_platform_defaults() {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    // 1. AXIALCAD_CONFIG_DIR has precedence over CADCRAFT_CONFIG_DIR
+    let env_both = |k: &str| match k {
+        "AXIALCAD_CONFIG_DIR" => Some(OsString::from("/custom/axial")),
+        "CADCRAFT_CONFIG_DIR" => Some(OsString::from("/custom/cadcraft")),
+        _ => None,
+    };
+    assert_eq!(
+        PlotterStore::settings_root_from("linux", env_both),
+        Some(PathBuf::from("/custom/axial"))
+    );
+
+    // 2. Empty AXIALCAD_CONFIG_DIR falls back to CADCRAFT_CONFIG_DIR
+    let env_empty_axial = |k: &str| match k {
+        "AXIALCAD_CONFIG_DIR" => Some(OsString::from("")),
+        "CADCRAFT_CONFIG_DIR" => Some(OsString::from("/custom/cadcraft")),
+        _ => None,
+    };
+    assert_eq!(
+        PlotterStore::settings_root_from("linux", env_empty_axial),
+        Some(PathBuf::from("/custom/cadcraft"))
+    );
+
+    // 3. Clean platform defaults resolve to axialCAD paths
+    let env_linux = |k: &str| match k {
+        "HOME" => Some(OsString::from("/home/user")),
+        _ => None,
+    };
+    assert_eq!(
+        PlotterStore::settings_root_from("linux", env_linux),
+        Some(PathBuf::from("/home/user/.config/axialcad"))
+    );
+
+    let env_macos = |k: &str| match k {
+        "HOME" => Some(OsString::from("/Users/user")),
+        _ => None,
+    };
+    assert_eq!(
+        PlotterStore::settings_root_from("macos", env_macos),
+        Some(PathBuf::from("/Users/user/Library/Application Support/axialCAD"))
+    );
+
+    let env_windows = |k: &str| match k {
+        "APPDATA" => Some(OsString::from(r"C:\Users\user\AppData\Roaming")),
+        _ => None,
+    };
+    assert_eq!(
+        PlotterStore::settings_root_from("windows", env_windows),
+        Some(PathBuf::from(r"C:\Users\user\AppData\Roaming").join("axialCAD"))
+    );
+}
+
+static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct ScopedEnv {
+    map: std::collections::HashMap<String, std::ffi::OsString>,
+}
+
+impl ScopedEnv {
+    fn new() -> Self {
+        Self { map: std::collections::HashMap::new() }
+    }
+
+    fn set(&mut self, key: &str, val: &std::path::Path) {
+        self.map.insert(key.to_string(), val.as_os_str().to_os_string());
+        cadcraft_engine::cmd::plotters::set_test_env(Some(self.map.clone()));
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.map.remove(key);
+        cadcraft_engine::cmd::plotters::set_test_env(Some(self.map.clone()));
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        cadcraft_engine::cmd::plotters::set_test_env(None);
+    }
+}
+
+#[test]
+fn plotter_store_real_filesystem_save_read_list_delete_in_temp_dir() {
+    let _lock = TEST_ENV_LOCK.lock().unwrap();
+    let mut env_guard = ScopedEnv::new();
+
+    let tmp = std::env::temp_dir().join(format!("axialcad-plotter-fs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // 1. AXIALCAD_CONFIG_DIR directs real PlotterStore I/O to tmp/plotters
+    env_guard.set("AXIALCAD_CONFIG_DIR", &tmp);
+    env_guard.remove("CADCRAFT_CONFIG_DIR");
+
+    let store = PlotterStore::settings_folder();
+    let filename = "real_device.plotter.json";
+    let content = r#"{"name":"Real Device","output":"pdf","papers":[]}"#;
+
+    // Write: must create tmp/plotters and real file
+    assert!((store.write)(filename, content).is_ok());
+    let real_file = tmp.join("plotters").join(filename);
+    assert!(real_file.is_file(), "plotter file must exist on disk");
+
+    // List: must list the real file from disk
+    let files = (store.list)().expect("list succeeds");
+    assert!(files.contains(&filename.to_string()), "file must be listed");
+
+    // Read: must read exact content from disk
+    let read_back = (store.read)(filename).expect("read succeeds");
+    assert_eq!(read_back, content);
+
+    // Delete: must remove real file from disk
+    assert!((store.delete)(filename).is_ok());
+    assert!(!real_file.exists(), "file must be removed from disk");
+
+    // 2. CADCRAFT_CONFIG_DIR fallback directs real I/O when AXIALCAD_CONFIG_DIR is absent
+    env_guard.remove("AXIALCAD_CONFIG_DIR");
+    let legacy_tmp = std::env::temp_dir().join(format!("cadcraft-plotter-fs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&legacy_tmp);
+    std::fs::create_dir_all(&legacy_tmp).unwrap();
+    env_guard.set("CADCRAFT_CONFIG_DIR", &legacy_tmp);
+
+    let legacy_store = PlotterStore::settings_folder();
+    assert!((legacy_store.write)(filename, content).is_ok());
+    assert!(legacy_tmp.join("plotters").join(filename).is_file());
+    assert!((legacy_store.delete)(filename).is_ok());
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_dir_all(&legacy_tmp);
+}
+
+#[test]
+fn plotter_store_has_existing_config_distinguishes_startup_artifacts() {
+    let tmp = std::env::temp_dir().join(format!("axialcad-plotter-artifacts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let legacy = tmp.join("cadcraft");
+    let primary = tmp.join("axialcad");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::create_dir_all(&primary).unwrap();
+
+    // 1. Empty folders in primary do not count as user configuration
+    std::fs::create_dir_all(primary.join("support")).unwrap();
+    std::fs::create_dir_all(primary.join("plotters")).unwrap();
+    std::fs::create_dir_all(primary.join("autosave")).unwrap();
+    std::fs::create_dir_all(primary.join("logs")).unwrap();
+    std::fs::write(primary.join("logs").join("cadcraft.log"), b"startup log\n").unwrap();
+    assert!(!PlotterStore::has_existing_config(&primary, false), "startup artifacts in primary must not count as config");
+
+    // 2. Legacy with workspace.json is recognized
+    std::fs::write(legacy.join("workspace.json"), b"{}").unwrap();
+    assert!(PlotterStore::has_existing_config(&legacy, true), "legacy with workspace.json is recognized");
+
+    // 3. Primary with real user plotter file counts as existing config
+    std::fs::write(primary.join("plotters").join("custom.plotter.json"), b"{}").unwrap();
+    assert!(PlotterStore::has_existing_config(&primary, false), "primary with user plotter is recognized");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

@@ -20,15 +20,7 @@ pub struct Workspace {
 }
 
 fn config_dir_from(platform: &str, get: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    if let Some(root) = get("CADCRAFT_CONFIG_DIR") {
-        return (!root.is_empty()).then(|| PathBuf::from(root));
-    }
-    let nonempty = |key| get(key).filter(|value| !value.is_empty()).map(PathBuf::from);
-    match platform {
-        "macos" => nonempty("HOME").map(|home| home.join("Library/Application Support/CADCraft")),
-        "windows" => nonempty("APPDATA").map(|root| root.join("CADCraft")),
-        _ => nonempty("XDG_CONFIG_HOME").map(|root| root.join("cadcraft")).or_else(|| nonempty("HOME").map(|home| home.join(".config/cadcraft"))),
-    }
+    crate::config_dir_from_env(platform, get)
 }
 
 fn snapshot(ui: &UiState) -> Result<Value, String> {
@@ -146,7 +138,7 @@ fn write(path: &Path, workspace: &Value) -> Result<(), String> {
 
 impl Workspace {
     pub fn load() -> (Self, Option<UiState>, Option<String>) {
-        Self::at(config_dir_from(std::env::consts::OS, |key| std::env::var_os(key)).map(|root| root.join("workspace.json")))
+        Self::at(crate::config_dir().map(|root| root.join("workspace.json")))
     }
 
     fn at(path: Option<PathBuf>) -> (Self, Option<UiState>, Option<String>) {
@@ -204,17 +196,29 @@ mod tests {
     #[test]
     fn profile_override_isolated_or_explicitly_disabled() {
         let get = |key: &str| match key {
-            "CADCRAFT_CONFIG_DIR" => Some(OsString::from("/private/test-state")),
+            "AXIALCAD_CONFIG_DIR" => Some(OsString::from("/private/axial-state")),
+            "CADCRAFT_CONFIG_DIR" => Some(OsString::from("/private/legacy-state")),
             "HOME" | "APPDATA" | "XDG_CONFIG_HOME" => Some(OsString::from("/unrelated-user-profile")),
             _ => None,
         };
         for platform in ["macos", "windows", "linux", "freebsd"] {
-            assert_eq!(config_dir_from(platform, get), Some(PathBuf::from("/private/test-state")));
-            assert_eq!(config_dir_from(platform, |key| if key == "CADCRAFT_CONFIG_DIR" { Some(OsString::new()) } else { get(key) }), None);
+            // AXIALCAD_CONFIG_DIR wins
+            assert_eq!(config_dir_from(platform, get), Some(PathBuf::from("/private/axial-state")));
+            // Empty AXIALCAD_CONFIG_DIR falls back to CADCRAFT_CONFIG_DIR
+            assert_eq!(
+                config_dir_from(platform, |key| if key == "AXIALCAD_CONFIG_DIR" { Some(OsString::new()) } else { get(key) }),
+                Some(PathBuf::from("/private/legacy-state"))
+            );
+            // Both empty -> falls back to defaults or None if user profile is empty
+            assert_eq!(
+                config_dir_from(platform, |key| if key == "AXIALCAD_CONFIG_DIR" || key == "CADCRAFT_CONFIG_DIR" { Some(OsString::new()) } else { None }),
+                None
+            );
         }
+        let clean_home = |key: &str| (key == "XDG_CONFIG_HOME").then(|| OsString::from("/tmp/nonexistent-x"));
         assert_eq!(
-            config_dir_from("linux", |key| (key == "XDG_CONFIG_HOME").then(|| OsString::from("/config"))),
-            Some(PathBuf::from("/config/cadcraft"))
+            config_dir_from("linux", clean_home),
+            Some(PathBuf::from("/tmp/nonexistent-x/axialcad"))
         );
         assert_eq!(config_dir_from("macos", |_| None), None);
     }
@@ -351,5 +355,47 @@ mod tests {
         store.save_on_exit(&ui).unwrap();
         assert!(!read(&path).unwrap().unwrap().show_status_bar);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn explicit_inaccessible_path_fails_observably_without_fallback() {
+        let base = temp_dir();
+        let config_root = base.join("config_dir");
+        fs::create_dir_all(&config_root).unwrap();
+        let workspace_path = config_root.join("workspace.json");
+
+        // 1. config_dir_from selects the explicit path without falling back
+        let explicit_env = |key: &str| (key == "AXIALCAD_CONFIG_DIR").then(|| config_root.as_os_str().to_os_string());
+        assert_eq!(config_dir_from("linux", explicit_env), Some(config_root.clone()));
+
+        // 2. Initial load from nonexistent file in valid directory returns None without error
+        let (mut store, _, error) = Workspace::at(Some(workspace_path.clone()));
+        assert!(error.is_none(), "initial load from nonexistent file returns None without panic");
+
+        // Make the location inaccessible by replacing config_root with a regular file
+        fs::remove_dir(&config_root).unwrap();
+        fs::write(&config_root, b"blocking file content").unwrap();
+
+        // 3. Real save operation fails observably via existing mechanism
+        let mut ui = UiState::default();
+        ui.show_command_line = !ui.show_command_line;
+        let save_result = store.save_if_changed(&ui);
+        assert!(save_result.is_err(), "save operation must fail when explicit path cannot be created");
+
+        let err_msg = save_result.unwrap_err();
+        assert!(
+            err_msg.contains("config_dir"),
+            "error message must describe the failure: {err_msg}"
+        );
+
+        // 4. Initial load with an already inaccessible path also reports error observably
+        let (_, _, load_err) = Workspace::at(Some(config_root.join("sub").join("workspace.json")));
+        assert!(load_err.is_some(), "initial load from inaccessible path must report error");
+
+        // 5. Confirm that no silent fallback wrote to a default location or the parent temp dir
+        assert!(!base.join("workspace.json").exists(), "no fallback write to parent directory");
+
+        let _ = fs::remove_file(&config_root);
+        let _ = fs::remove_dir_all(base);
     }
 }
