@@ -1,4 +1,4 @@
-# Distribución y Empaquetado Linux de CADcraft
+# Distribución y Empaquetado Linux de axialCAD
 
 Este documento describe la arquitectura de empaquetado, la estructura de artefactos generados, las dependencias del sistema, el ciclo de vida de configuración y las directrices para la validación y lanzamiento de paquetes.
 
@@ -102,7 +102,7 @@ La instalación en el prefijo del usuario (por defecto `~/.local/`) adopta una t
 - **Contención física y verificación de límites de directorio:** Se verifica la contención estricta mediante límites reales de directorio (utilizando delimitadores `/` y resolución canónica, rechazando prefijos textuales ambiguos). Se comprueba que los directorios padres gestionados (`bin/`, `share/`, `share/cadcraft/`, `versions/`) no sean enlaces simbólicos que apunten fuera del prefijo de instalación.
 - **Recuperación transaccional ante errores ordinarios:** Antes de realizar mutaciones, se registra un snapshot del estado previo (`current`, `previous`, binarios de entrada en `bin/`, metadatos, manifiestos y recursos de escritorio/iconos compartidos). Ante cualquier fallo en activación, integración, migración o rollback, el manejador `recover_transaction` restaura el estado previo y limpia artefactos parciales manteniendo el bloqueo activo. Si la recuperación fallase, se notifica y se preserva el directorio de respaldo `.recovery.<pid>`.
 - **Migración segura de instalaciones anteriores:** La migración desde esquemas planos legacy se ejecuta únicamente después de superar la prevalidación y obtener confirmación del usuario. Solo se migran los archivos acreditados en el manifiesto anterior. Si la migración o activación fallan, se restaura la instalación plana previa.
-- **Preservación de archivos ajenos:** Al desinstalar o actualizar, se eliminan únicamente los archivos registrados en el manifiesto. Los directorios de versiones y carpetas compartidas solo se podan con `rmdir` si quedan completamente vacíos; cualquier archivo creado por el usuario o ajeno a CADCraft se preserva intacto.
+- **Preservación de archivos ajenos:** Al desinstalar o actualizar, se eliminan únicamente los archivos registrados en el manifiesto. Los directorios de versiones y carpetas compartidas solo se podan con `rmdir` si quedan completamente vacíos; cualquier archivo creado por el usuario o ajeno a axialCAD se preserva intacto.
 - **Detección estricta de colisiones y alcance de `--force`:** Un archivo preexistente en el destino se considera gestionado única y exclusivamente si está acreditado por un manifiesto `install-manifest.txt` válido de una instalación previa (rutas relativas estrictas, sin `..` y con resolución física dentro del prefijo). Se han eliminado deliberadamente heurísticas permisivas por prefijo (`share/cadcraft/`), nombre (`ai.storyteller.cadcraft`) o texto de enlaces. El modificador `--force` permite únicamente sobrescribir archivos no gestionados que colisionen dentro del prefijo. **Bajo ninguna circunstancia `--force` permite:**
   1. Saltarse la contención física ni sobrescribir enlaces que resuelvan fuera del prefijo.
   2. Omitir la comprobación de procesos activos (`cadcraft` o `cadcraft-cli`).
@@ -154,7 +154,7 @@ cd cadcraft-<nueva-version>-linux-x86_64
 ```
 - Valida la nueva compilación antes de activarla.
 - Apunta `previous` a la versión activa anterior y `current` a la nueva versión.
-- Si CADCraft está abierto, exige cerrarlo antes de proceder.
+- Si axialCAD está abierto, exige cerrarlo antes de proceder.
 - Mantiene intactos los archivos de configuración (`~/.config/cadcraft`), estado de sesión (`~/.local/share/ai.storyteller.cadcraft`), y dibujos.
 
 ### C. Reversión Explícita (Rollback)
@@ -176,7 +176,7 @@ Si se utilizó un **prefijo de instalación personalizado**, la implementación 
 > **Rollback de binarios vs. migración de configuración:** La reversión devuelve los ejecutables al estado binario de la versión anterior. Si la versión más reciente realizó modificaciones o migraciones en el formato de `workspace.json`, guardó dibujos con esquemas nuevos o alteró la configuración en `~/.config/cadcraft/`, el rollback de binarios **no revierte automáticamente esas transformaciones de datos**. Se recomienda realizar copias de seguridad de dibujos críticos antes de probar versiones mayores.
 
 ### D. Comprobación del Menú de Aplicaciones
-La mayoría de entornos de escritorio modernos (GNOME, KDE Plasma, XFCE) actualizan el menú de aplicaciones en segundo plano de forma automática. Si el icono o lanzador de CADCraft no aparece inmediatamente:
+La mayoría de entornos de escritorio modernos (GNOME, KDE Plasma, XFCE) actualizan el menú de aplicaciones en segundo plano de forma automática. Si el icono o lanzador de axialCAD no aparece inmediatamente:
 - **GNOME en X11:** Pulsar `Alt+F2`, escribir `r` y pulsar `Enter`.
 - **GNOME en Wayland:** Cerrar y volver a iniciar la sesión de usuario, o ejecutar:
   ```bash
@@ -189,7 +189,7 @@ La mayoría de entornos de escritorio modernos (GNOME, KDE Plasma, XFCE) actuali
 ~/.local/share/cadcraft/uninstall.sh
 # O ejecutando ./uninstall.sh desde la carpeta del paquete
 ```
-- Lee `install-manifest.txt` y borra únicamente los archivos instalados por CADCraft.
+- Lee `install-manifest.txt` y borra únicamente los archivos instalados por axialCAD.
 - Elimina los enlaces simbólicos en `~/.local/bin/` y las versiones en `versions/`.
 - No utiliza borrado recursivo indiscriminado (`rm -rf`) sobre carpetas compartidas: utiliza `rmdir` para que cualquier fichero ajeno o de usuario que se haya depositado en la carpeta quede intacto.
 - Actualiza las bases de datos de escritorio y MIME para retirar el acceso del menú.
@@ -199,7 +199,7 @@ La mayoría de entornos de escritorio modernos (GNOME, KDE Plasma, XFCE) actuali
 
 ## 4. Conservación de Preferencias y Datos
 
-CADCraft separa estrictamente los binarios de la configuración según los estándares XDG:
+axialCAD separa estrictamente los binarios de la configuración según los estándares XDG:
 - **Configuración, logs y autosave:** `$XDG_CONFIG_HOME/cadcraft/` (por defecto `~/.config/cadcraft/`). Contiene `workspace.json`, logs de ejecución y archivos de autorrecuperación (`autosave/`).
 - **Almacén de estado y vistas:** `$XDG_DATA_HOME/ai.storyteller.cadcraft/` (por defecto `~/.local/share/ai.storyteller.cadcraft/app.ron`). Guarda estado de ventanas, paneles y geometría de egui.
 - **Documentos de usuario:** Guardados exclusivamente en las carpetas personales elegidas por el usuario (`.dwg`, `.dxf`, `.dwt`), sin residir nunca en el árbol del instalador.

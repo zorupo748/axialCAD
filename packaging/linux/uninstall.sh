@@ -71,8 +71,8 @@ MANIFEST="${TARGET_CADCRAFT}/install-manifest.txt"
 LOCK_FILE="${TARGET_CADCRAFT}/.install.lock"
 
 if [[ ! -f "$MANIFEST" ]]; then
-  echo "error: CADCraft installation manifest not found at: $MANIFEST" >&2
-  echo "CADCraft does not appear to be installed in: $PREFIX" >&2
+  echo "error: axialCAD installation manifest not found at: $MANIFEST" >&2
+  echo "axialCAD does not appear to be installed in: $PREFIX" >&2
   exit 1
 fi
 
@@ -114,7 +114,7 @@ acquire_lock() {
   mkdir -p "$TARGET_CADCRAFT" 2>/dev/null || true
   eval "exec ${LOCK_FD}>\"\$LOCK_FILE\""
   if ! flock -n "$LOCK_FD"; then
-    echo "error: another CADCraft operation is currently running in $TARGET_ROOT." >&2
+    echo "error: another axialCAD operation is currently running in $TARGET_ROOT." >&2
     exit 1
   fi
   LOCK_ACQUIRED=1
@@ -179,18 +179,18 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     done
 
     if [[ ${#MATCHED_PIDS[@]} -gt 0 ]]; then
-      echo "error: CADCraft processes are currently running from target installation:" >&2
+      echo "error: axialCAD processes are currently running from target installation:" >&2
       for m in "${MATCHED_PIDS[@]}"; do
         echo "  - PID $m" >&2
       done
-      echo "Please close CADCraft before uninstalling." >&2
+      echo "Please close axialCAD before uninstalling." >&2
       exit 1
     fi
   fi
 fi
 
 echo "=================================================================="
-echo " CADCraft — Uninstallation"
+echo " axialCAD — Uninstallation"
 echo "=================================================================="
 echo "Target Prefix: $PREFIX"
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -199,7 +199,7 @@ fi
 echo "=================================================================="
 
 if [[ "$NON_INTERACTIVE" -eq 0 && "$DRY_RUN" -eq 0 ]]; then
-  read -r -p "Are you sure you want to uninstall CADCraft from $PREFIX? [y/N] " CONFIRM || CONFIRM="n"
+  read -r -p "Are you sure you want to uninstall axialCAD from $PREFIX? [y/N] " CONFIRM || CONFIRM="n"
   if [[ ! "$CONFIRM" =~ ^[yY] ]]; then
     echo "Uninstallation cancelled."
     exit 0
@@ -281,7 +281,7 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   fi
 
   echo ""
-  echo "CADCraft has been uninstalled successfully."
+  echo "axialCAD has been uninstalled successfully."
   echo "Total files removed: $REMOVED_COUNT"
   echo ""
   echo "Notice:"

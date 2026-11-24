@@ -1,4 +1,4 @@
-# CADCraft roadmap detail
+# axialCAD roadmap detail
 
 > **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (Block Editor for static blocks: "Use blocks" evidence updated) · **Target:** Autodesk AutoCAD 2027
 

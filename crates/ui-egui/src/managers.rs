@@ -605,19 +605,19 @@ fn page_rows(
         && !choices.devices.iter().any(|d| d.name.eq_ignore_ascii_case(&page.device));
     ui.label("Printer/plotter");
     let dev_label = if is_external_device {
-        "Exportador PDF de CADcraft".to_string()
+        "Exportador PDF de axialCAD".to_string()
     } else {
         device_label(page).to_string()
     };
     egui::ComboBox::from_id_salt(salt.with("device")).selected_text(dev_label).width(190.0).show_ui(ui, |ui| {
         if is_external_device {
-            let label = format!("Exportador PDF de CADcraft (origen: {})", page.device);
+            let label = format!("Exportador PDF de axialCAD (origen: {})", page.device);
             if ui
                 .selectable_label(true, &label)
                 .on_hover_text(format!(
                     "Dispositivo configurado en el dibujo: '{}'.\n\
-                     Dispositivo efectivo: Exportador PDF de CADcraft.\n\
-                     CADcraft no ejecuta controladores externos PC3; la salida se genera mediante su motor PDF nativo.",
+                     Dispositivo efectivo: Exportador PDF de axialCAD.\n\
+                     axialCAD no ejecuta controladores externos PC3; la salida se genera mediante su motor PDF nativo.",
                     page.device
                 ))
                 .clicked()
@@ -650,8 +650,8 @@ fn page_rows(
             )
             .on_hover_text(format!(
                 "Dispositivo configurado en el dibujo: '{}'.\n\
-                 Dispositivo efectivo: Exportador PDF de CADcraft.\n\
-                 CADcraft no ejecuta controladores externos PC3; la salida se genera mediante su motor PDF nativo.",
+                 Dispositivo efectivo: Exportador PDF de axialCAD.\n\
+                 axialCAD no ejecuta controladores externos PC3; la salida se genera mediante su motor PDF nativo.",
                 page.device
             ));
         });

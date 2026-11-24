@@ -172,7 +172,7 @@ acquire_lock() {
   mkdir -p "$TARGET_CADCRAFT"
   eval "exec ${LOCK_FD}>\"\$LOCK_FILE\""
   if ! flock -n "$LOCK_FD"; then
-    echo "error: another CADCraft installation or rollback operation is currently running in $TARGET_ROOT." >&2
+    echo "error: another axialCAD installation or rollback operation is currently running in $TARGET_ROOT." >&2
     exit 1
   fi
   LOCK_ACQUIRED=1
@@ -241,11 +241,11 @@ check_cadcraft_running() {
   done
 
   if [[ ${#matched_pids[@]} -gt 0 ]]; then
-    echo "error: CADCraft processes are currently running from target installation:" >&2
+    echo "error: axialCAD processes are currently running from target installation:" >&2
     for m in "${matched_pids[@]}"; do
       echo "  - PID $m" >&2
     done
-    echo "Please save your drawings and close CADCraft before installing, updating, or rolling back." >&2
+    echo "Please save your drawings and close axialCAD before installing, updating, or rolling back." >&2
     echo "For safety and data integrity, process bypass is not permitted." >&2
     exit 1
   fi
@@ -772,7 +772,7 @@ if [[ "$IS_ROLLBACK" -eq 1 ]]; then
   ROLLBACK_SHA="$PARSED_SHA"
 
   echo "=================================================================="
-  echo " CADCraft — Rolling Back Installation"
+  echo " axialCAD — Rolling Back Installation"
   echo "=================================================================="
   echo "Current Version:   ${CURR_TARGET:-unknown}"
   echo "Rollback Target:   $PREV_TARGET ($ROLLBACK_VERSION, ${ROLLBACK_SHA:0:10})"
@@ -855,7 +855,7 @@ fi
 # Mode: Normal Installation / Local Update
 # -----------------------------------------------------------------------------
 if [[ -z "$SRC_DIR" ]]; then
-  echo "error: install.sh must be run from an extracted CADCraft package directory." >&2
+  echo "error: install.sh must be run from an extracted axialCAD package directory." >&2
   exit 1
 fi
 
@@ -1089,7 +1089,7 @@ if [[ "$FORCE" -eq 0 ]]; then
     for c in "${COLLISIONS[@]}"; do
       echo "  - $TARGET_ROOT/$c" >&2
     done
-    echo "These files already exist and are not accredited by any existing CADCraft manifest." >&2
+    echo "These files already exist and are not accredited by any existing axialCAD manifest." >&2
     echo "Refusing to overwrite unmanaged files. Use --force to override." >&2
     exit 1
   fi
@@ -1097,9 +1097,9 @@ fi
 
 echo "=================================================================="
 if [[ "$IS_UPDATE" -eq 1 ]]; then
-  echo " CADCraft — Updating Installation"
+  echo " axialCAD — Updating Installation"
 else
-  echo " CADCraft — User Installation"
+  echo " axialCAD — User Installation"
 fi
 echo "=================================================================="
 echo "Version:      $PKG_VERSION (${PKG_SHA:0:10})"
@@ -1454,7 +1454,7 @@ TRANSACTION_COMMITTED=1
 
 echo ""
 if [[ "$SAME_BUILD_EXISTS" -eq 1 && "$ALREADY_ACTIVE" -eq 1 ]]; then
-  echo "CADCraft build $BUILD_ID is already installed and active."
+  echo "axialCAD build $BUILD_ID is already installed and active."
   echo "Refreshed desktop integration, symlinks, and caches."
 else
   echo "Installation complete!"
@@ -1483,7 +1483,7 @@ else
 fi
 echo ""
 echo "Uninstallation:"
-echo "  To uninstall CADCraft cleanly (preserving personal drawings and configs):"
+echo "  To uninstall axialCAD cleanly (preserving personal drawings and configs):"
 if [[ "$PREFIX" == "${HOME}/.local" ]]; then
   echo "  $PREFIX/share/cadcraft/uninstall.sh"
 else

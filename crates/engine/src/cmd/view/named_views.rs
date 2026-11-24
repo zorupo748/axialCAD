@@ -91,7 +91,7 @@ fn run_view(s: &mut Session, p: &Value) -> Result<Value> {
             }
             Ok(json!({ "layerSnapshot": s.settings.view_layer_snapshot }))
         }
-        "orthographic" | "o" => Err(EngineError::Other("Orthographic views are not available yet: CADCraft views are 2D.".into())),
+        "orthographic" | "o" => Err(EngineError::Other("Orthographic views are not available yet: axialCAD views are 2D.".into())),
         "swiso" | "seiso" | "neiso" | "nwiso" | "top" | "bottom" | "left" | "right" | "front" | "back" => {
             super::run_view_preset(s, &option)
         }
@@ -327,7 +327,7 @@ impl Interactive for ViewM {
                         Ok(Step::Continue)
                     }
                     "orthographic" | "o" => {
-                        s.echo("Orthographic views are not available yet: CADCraft views are 2D.");
+                        s.echo("Orthographic views are not available yet: axialCAD views are 2D.");
                         Ok(Step::Done)
                     }
                     "swiso" | "seiso" | "neiso" | "nwiso" | "top" | "bottom" | "left" | "right" | "front" | "back" => {

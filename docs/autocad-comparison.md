@@ -1,6 +1,6 @@
-# Comparación Focalizada de Flujos Clave: CADcraft vs. Autodesk AutoCAD
+# Comparación Focalizada de Flujos Clave: axialCAD vs. Autodesk AutoCAD
 
-Este documento presenta una auditoría técnica y funcional verificable de seis flujos de trabajo críticos comparando la implementación real de **CADcraft** frente a **Autodesk AutoCAD** (versiones de referencia AutoCAD 2024 / 2025).
+Este documento presenta una auditoría técnica y funcional verificable de seis flujos de trabajo críticos comparando la implementación real de **axialCAD** frente a **Autodesk AutoCAD** (versiones de referencia AutoCAD 2024 / 2025).
 
 Cada flujo se clasifica según los criterios establecidos:
 - **Existe y funciona**
@@ -16,7 +16,7 @@ Cada flujo se clasifica según los criterios establecidos:
 - **Existe y funciona** (separación estricta de acciones, no creación de documento al configurar la predeterminada, guardado forzado a SAVEAS).
 - **Existe pero necesita mejora** (no lee metadatos descriptivos ni bloques incrustados de archivos binarios propietarios `.dwt` complejos).
 
-### Evidencia en CADcraft
+### Evidencia en axialCAD
 - **Archivos y funciones:**
   - `crates/engine/src/cmd/file/template.rs`: comandos `new`, `run_new`, `run_new_template`, `qnew_template`, `set_qnew_template`.
   - `crates/ui-egui/src/menus.rs`: comandos `ui.defaulttemplate.choose` (valida y fija la preferencia sin abrir documentos) y `ui.defaulttemplate.clear` (restablece a dibujo en blanco).
@@ -36,7 +36,7 @@ Cada flujo se clasifica según los criterios establecidos:
 - **Comportamiento documentado:** AutoCAD configura la plantilla por defecto a través de `Options ▸ Files ▸ Template Settings ▸ Default Template File Name for QNEW`. Al ejecutar `QNEW`, carga la plantilla configurada e inicializa `DrawingN.dwg` sin ruta de destino, requiriendo `SAVEAS` en el primer guardado.
 
 ### Inferencias y diferencias de diseño
-- *Inferencia / Diferencia:* En AutoCAD, las plantillas son archivos `.dwt` con marcas de cabecera binarias específicas. CADcraft admite cualquier archivo `.dwg` o `.dxf` válido como plantilla sin exigir una extensión exclusiva `.dwt`. Si la plantilla no se puede leer, CADcraft inicia con un dibujo en blanco seguro reportando un aviso informativo.
+- *Inferencia / Diferencia:* En AutoCAD, las plantillas son archivos `.dwt` con marcas de cabecera binarias específicas. axialCAD admite cualquier archivo `.dwg` o `.dxf` válido como plantilla sin exigir una extensión exclusiva `.dwt`. Si la plantilla no se puede leer, axialCAD inicia con un dibujo en blanco seguro reportando un aviso informativo.
 
 ---
 
@@ -45,7 +45,7 @@ Cada flujo se clasifica según los criterios establecidos:
 ### Clasificación
 - **Existe pero necesita mejora** (las miniaturas 2D capturan la vista guardada, pero existe el límite documentado de rasterización 2D frente a cámaras 3D; la fecha visualizada corresponde a la modificación del archivo en disco).
 
-### Evidencia en CADcraft
+### Evidencia en axialCAD
 - **Archivos y funciones:**
   - `crates/ui-egui/src/thumbnails.rs`: funciones `update_thumbnail` (con escala y centro derivados de la vista activa `st.view()`), `invalidate_thumbnail_texture`, `prune_disk_cache`, `load_thumbnail_texture`.
   - `crates/ui-egui/src/chrome.rs`: presentación de cuadrícula de tarjetas (`Card Grid`) y lista, filtrado interactivo, etiqueta explícita `Modified: {fecha}` y preservación de favoritos (`pinned_files`).
@@ -66,7 +66,7 @@ Cada flujo se clasifica según los criterios establecidos:
 - **Comportamiento documentado:** AutoCAD almacena la miniatura en una sección de mapa de bits (BMP/PNG) incrustada dentro del propio archivo DWG al guardar, que la pantalla de inicio lee directamente.
 
 ### Inferencias y diferencias de diseño
-- *Inferencia / Diferencia:* CADcraft almacena las miniaturas de forma desacoplada en el directorio de caché de usuario (`$XDG_CACHE_HOME/cadcraft/thumbnails/`) indexadas por hash FNV-1a de la ruta absoluta para evitar mutar los bytes de dibujos DWG de solo lectura o procedentes de clientes externos.
+- *Inferencia / Diferencia:* axialCAD almacena las miniaturas de forma desacoplada en el directorio de caché de usuario (`$XDG_CACHE_HOME/cadcraft/thumbnails/`) indexadas por hash FNV-1a de la ruta absoluta para evitar mutar los bytes de dibujos DWG de solo lectura o procedentes de clientes externos.
 
 ---
 
@@ -76,7 +76,7 @@ Cada flujo se clasifica según los criterios establecidos:
 - **Existe y funciona** (introducción de coordenadas cartesianas 2D y 3D, navegación con Tab/Shift+Tab, etiquetas de plano X/Y y X/Z, prefijos `@`, `#`, `*`, `@*`, preservación estricta de Z en coordenadas tecleadas y contención en bordes).
 - **Existe pero necesita mejora** (conmutación automática a campos polares distancia/ángulo durante comandos interactivos dinámicos).
 
-### Evidencia en CADcraft
+### Evidencia en axialCAD
 - **Archivos y funciones:**
   - `crates/ui-egui/src/dyninput.rs`: función `parse_cartesian`, soporte de prefijos `@`, `#`, `*`, `*@`, conteo de componentes y actualización de campos individuales.
   - `crates/ui-egui/src/cmdline.rs`: navegación interactiva `tab` y `tab_backward` (Shift+Tab), edición de componentes individuales con Backspace y confirmación en canvas.
@@ -96,7 +96,7 @@ Cada flujo se clasifica según los criterios establecidos:
 - **Comportamiento documentado:** AutoCAD presenta campos de entrada dinámica donde Tab conmuta entre coordenadas o entre distancia y ángulo. Al escribir comas, se pasa de X a Y y a Z.
 
 ### Inferencias y diferencias de diseño
-- *Inferencia / Regla geométrica 2D/3D:* En clics libres con ratón en vista oblicua 3D sin referencia OSNAP, CADcraft proyecta sobre el plano de construcción Z=0. Sin embargo, **toda coordenada introducida mediante teclado con Z explícito (absoluto o relativo) conserva su cota Z exacta en el modelo 3D**, sin forzarse a cero.
+- *Inferencia / Regla geométrica 2D/3D:* En clics libres con ratón en vista oblicua 3D sin referencia OSNAP, axialCAD proyecta sobre el plano de construcción Z=0. Sin embargo, **toda coordenada introducida mediante teclado con Z explícito (absoluto o relativo) conserva su cota Z exacta en el modelo 3D**, sin forzarse a cero.
 
 ---
 
@@ -105,7 +105,7 @@ Cada flujo se clasifica según los criterios establecidos:
 ### Clasificación
 - **Existe pero necesita mejora** (selección por ventana, cruce y comandos de transformación implementados; falta selección por lazo y menú contextual de pinzamientos).
 
-### Evidencia en CADcraft
+### Evidencia en axialCAD
 - **Archivos y funciones:**
   - `crates/ui-egui/src/canvas.rs`: lógica de ventana rectangular (`pick_rect`), ventana inclusiva (azul) y ventana de cruce (verde), pinzamientos interactivos (`draw_grips`).
   - `crates/engine/src/cmd/modify/`: comandos `move.rs`, `copy.rs`, `rotate.rs`, `scale.rs`, `mirror.rs`, `erase.rs`, `trim.rs`, `extend.rs`, `fillet.rs`.
@@ -127,7 +127,7 @@ Cada flujo se clasifica según los criterios establecidos:
 ### Clasificación
 - **Existe y funciona** (`QSAVE`, `SAVEAS`, control de cambios pendientes al cerrar, regeneración e invalidación de miniatura tras guardado exitoso).
 
-### Evidencia en CADcraft
+### Evidencia en axialCAD
 - **Archivos y funciones:**
   - `crates/engine/src/cmd/file/save.rs`: comandos `qsave`, `saveas`.
   - `crates/ui-egui/src/menus.rs`: `ui.saveas`.
@@ -150,7 +150,7 @@ Cada flujo se clasifica según los criterios establecidos:
 ### Clasificación
 - **Existe pero necesita mejora** (exportación directa a PDF y trazado desde espacio modelo disponibles; espacio papel / layouts avanzados en desarrollo).
 
-### Evidencia en CADcraft
+### Evidencia en axialCAD
 - **Archivos y funciones:**
   - `crates/engine/src/cmd/plot.rs`: comandos `plot`, `exportpdf`.
   - `crates/render/src/plot/`: pipeline de vectorización de trazado a PDF.
@@ -171,7 +171,7 @@ Cada flujo se clasifica según los criterios establecidos:
 ### Clasificación
 - **Existe pero necesita mejora** (recorrido 3D básico y exportación STL de sólidos simples plenamente validados en slicer; la discretización de intersecciones con curvas a tolerancia fina de 0.05 mm permanece como limitación abierta).
 
-### Evidencia en CADcraft
+### Evidencia en axialCAD
 - **Archivos y funciones:**
   - `crates/engine/src/cmd/solids.rs`: comando `EXTRUDE` con activación automática del modo de visualización Conceptual.
   - `crates/engine/src/cmd/exchange.rs`: comando `STLOUT` con validación estricta de manifoldness de malla binaria STL.

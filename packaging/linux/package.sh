@@ -42,7 +42,7 @@ esac
 export CADCRAFT_MAINTAINER="${CADCRAFT_MAINTAINER:-CADCraft maintainers <cadcraft@storyteller.ai>}"
 BASENAME="cadcraft-$VERSION-linux-$ARCH"
 
-echo "==> CADCraft $VERSION for Linux $ARCH ($FORMATS)"
+echo "==> axialCAD $VERSION for Linux $ARCH ($FORMATS)"
 
 if [[ "$SKIP_BUILD" = 0 ]]; then
   if [[ -n "${CROSS_TARGET:-}" ]]; then
@@ -95,7 +95,7 @@ CADCRAFT_ARCH="$ARCH"
 EOF
 
   cat > "$TAR_DIR/README.txt" <<EOF
-CADCraft for Linux ($ARCH)
+axialCAD for Linux ($ARCH)
 Version: $VERSION ($CADCRAFT_BUILD_SHA)
 Date:    $CADCRAFT_BUILD_DATE
 
@@ -115,13 +115,13 @@ INSTALLATION (Per-User, No Root Required):
      ./install.sh --prefix /path/to/custom/prefix
 
 LAUNCHING:
-- Desktop Menu: Search for "CADCraft" in your desktop application menu.
-- File Manager: Right-click any DWG or DXF file and choose "Open With -> CADCraft".
+- Desktop Menu: Search for "axialCAD" in your desktop application menu.
+- File Manager: Right-click any DWG or DXF file and choose "Open With -> axialCAD".
 - Terminal:     ~/.local/bin/cadcraft [drawing.dwg|drawing.dxf]
   (Ensure ~/.local/bin is in your PATH to run 'cadcraft' directly)
 
 UPDATING:
-To update CADCraft while keeping all your drawings, templates, and preferences intact:
+To update axialCAD while keeping all your drawings, templates, and preferences intact:
 1. Extract the new version package.
 2. Run:
      ./install.sh --update

@@ -1030,12 +1030,12 @@ fn oversized_dwg_and_dxf_are_rejected_early() {
 
     let limits = cadcraft_dwg::Limits { max_dwg_bytes: 100_000, ..cadcraft_dwg::Limits::DEFAULT };
     let e = cadcraft_dwg::dwg_to_dxf_with(&dwg, limits).unwrap_err();
-    assert!(e.starts_with("DWG: the file is 0.") && e.ends_with("MB, larger than the 0.1 MB CADCraft opens"), "{e}");
+    assert!(e.starts_with("DWG: the file is 0.") && e.ends_with("MB, larger than the 0.1 MB axialCAD opens"), "{e}");
 
     // Lines that aren't even group codes: the size is reported before anything is parsed.
     let text = "not a group code\nx\n".repeat(60);
     let e = cadcraft_dxf::parse_with_limit(text.as_bytes(), 50).unwrap_err();
-    assert_eq!(e.to_string(), "drawing too large: 60 DXF group codes, more than the 50 CADCraft reads");
+    assert_eq!(e.to_string(), "drawing too large: 60 DXF group codes, more than the 50 axialCAD reads");
 }
 
 /// Issue #800: one unreadable object record doesn't fail the whole DWG. The reader skips it, the
@@ -2351,7 +2351,7 @@ fn svg_left_out_content_is_noted() {
     assert_eq!(kinds(&d), ["Polyline", "Polyline"]);
     assert_eq!(
         d.read_notes,
-        ["SVG: CADCraft doesn't read these yet, so they were left out: 2 texts, 1 raster image, 2 `<use>` copies, \
+        ["SVG: axialCAD doesn't read these yet, so they were left out: 2 texts, 1 raster image, 2 `<use>` copies, \
           1 `<style>` sheet (its class rules aren't applied), 1 rectangle with rounded corners (drawn square)"]
     );
     let plain = read(format!("{SVG_PAGE}<rect x=\"1\" y=\"1\" width=\"4\" height=\"3\"/></svg>").as_bytes(), "a.svg").unwrap();

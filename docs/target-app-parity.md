@@ -1,8 +1,8 @@
-# Target-app parity: CADCraft vs AutoCAD 2027
+# Target-app parity: axialCAD vs AutoCAD 2027
 
 > **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-22 · **Change:** minor (RECTANG centre construction mode, #1127; numbers not re-measured) · **Target:** Autodesk AutoCAD 2027
 
-The authoritative assessment of how close CADCraft is to AutoCAD, and how much Opus 5.5 work
+The authoritative assessment of how close axialCAD is to AutoCAD, and how much Opus 5.5 work
 remains. [ROADMAP.md](../ROADMAP.md) summarises it, [gaps.md](gaps.md) lists every shortfall,
 and the deep checklists are [geometry-parity.md](geometry-parity.md),
 [ui-parity.md](ui-parity.md), [file-format-parity.md](file-format-parity.md),

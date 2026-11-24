@@ -1,9 +1,9 @@
-# Customizing and automating CADCraft
+# Customizing and automating axialCAD
 
-What you can use today to automate CADCraft or bring over add-ons written for other CAD programs,
+What you can use today to automate axialCAD or bring over add-ons written for other CAD programs,
 and what is not there yet.
 
-| You have | In CADCraft | More |
+| You have | In axialCAD | More |
 |---|---|---|
 | LISP routines (`.lsp`) | Run with APPLOAD or `(load "name")`. The core language, `command`, entity lists, selection sets, `get…` input and `c:` commands work. | [autolisp.md](autolisp.md) |
 | Startup LISP (`acad.lsp`, `acaddoc.lsp`) | Loaded from the support folder at startup and for each drawing. | [autolisp.md](autolisp.md#at-startup) |
