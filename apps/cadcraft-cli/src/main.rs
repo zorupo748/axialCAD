@@ -56,15 +56,16 @@ fn stdout_failed(e: std::io::Error) {
 }
 
 const USAGE: &str = "usage:
-  cadcraft-cli info FILE.dxf
-  cadcraft-cli convert IN.dxf OUT.(dxf|dwg|svg|png|pdf) [FRAMING]
-  cadcraft-cli run [FILE | --sample | --metric] [--script TEXT] [--script-file F.scr] [--cmd 'id {json}']... [--save OUT.dxf] [--export OUT.(png|svg|pdf)] [FRAMING]
-  cadcraft-cli commands [FILTER]
-  cadcraft-cli mcp [--read-only] [--connect HOST:PORT [--lazy] [--launch]]
-  cadcraft-cli mcp-gateway [--port PORT] --connect HOST:PORT [--token-env VAR | --token-file PATH]
-  cadcraft-cli perf [N | FILE]
-  cadcraft-cli sample (bracket|floorplan) OUT.(dxf|dwg|svg|png)
-  cadcraft-cli --version
+  axialcad-cli info FILE.dxf
+  axialcad-cli convert IN.dxf OUT.(dxf|dwg|svg|png|pdf) [FRAMING]
+  axialcad-cli run [FILE | --sample | --metric] [--script TEXT] [--script-file F.scr] [--cmd 'id {json}']... [--save OUT.dxf] [--export OUT.(png|svg|pdf)] [FRAMING]
+  axialcad-cli commands [FILTER]
+  axialcad-cli mcp [--read-only] [--connect HOST:PORT [--lazy] [--launch]]
+  axialcad-cli mcp-gateway [--port PORT] --connect HOST:PORT [--token-env VAR | --token-file PATH]
+  axialcad-cli perf [N | FILE]
+  axialcad-cli sample (bracket|floorplan) OUT.(dxf|dwg|svg|png)
+  axialcad-cli --version
+  legacy alias: cadcraft-cli remains available for compatibility.
 
 image framing (png 2400x1600, svg, pdf; always model space):
   default                  convert: fit the drawing extents.
@@ -930,9 +931,9 @@ fn cli() -> ExitCode {
         Some("--version" | "-V") => {
             let sha = option_env!("CADCRAFT_BUILD_SHA");
             if let Some(s) = sha {
-                outln!("cadcraft-cli {} ({s})", env!("CARGO_PKG_VERSION"));
+                outln!("axialCAD CLI {} ({s})", env!("CARGO_PKG_VERSION"));
             } else {
-                outln!("cadcraft-cli {}", env!("CARGO_PKG_VERSION"));
+                outln!("axialCAD CLI {}", env!("CARGO_PKG_VERSION"));
             }
             Ok(())
         }
