@@ -147,24 +147,114 @@ fn render_window(p: &Value) -> Option<cadcraft_engine::geom::Bounds2> {
     (b.width() > 0.0 && b.height() > 0.0).then_some(b)
 }
 
+/// The outcome of an attempt to launch an application bundle.
+#[derive(Debug, PartialEq, Eq, Clone)]
+#[allow(dead_code)]
+pub enum LaunchOutcome {
+    /// The application was found and successfully dispatched for opening.
+    Success,
+    /// The application is not installed or could not be found.
+    AppNotFound,
+    /// The application was located or an attempt was made, but launching failed with an error.
+    Failed(String),
+}
+
 /// The error for an app that doesn't answer: what to do about it.
 fn not_open(addr: &str, e: std::io::Error) -> std::io::Error {
     std::io::Error::new(
         e.kind(),
         format!(
-            "axialCAD is not answering at {addr} ({e}). Open axialCAD with its control port (`--control PORT` or CADCRAFT_CONTROL_PORT), then try again"
+            "axialCAD is not answering at {addr} ({e}). Open axialCAD with its control port (`--control PORT`, AXIALCAD_CONTROL_PORT, or CADCRAFT_CONTROL_PORT), then try again"
         ),
     )
 }
 
-/// Open the app with the control port of `addr` (macOS: `open -a CADCraft`).
-fn launch_app(addr: &str) -> std::io::Result<()> {
-    let port = addr.rsplit(':').next().filter(|p| p.parse::<u16>().is_ok()).ok_or_else(|| std::io::Error::other(format!("no port in {addr}")))?;
-    if cfg!(target_os = "macos") {
-        let ok = std::process::Command::new("open").args(["-a", "CADCraft", "--args", "--control", port]).status()?.success();
-        if ok { Ok(()) } else { Err(std::io::Error::other("could not open axialCAD (is it in Applications?)")) }
+/// Classify the result of a macOS `/usr/bin/open -a` invocation.
+///
+/// Because `/usr/bin/open` does not reliably distinguish application absence from other
+/// launch failures via exit status, and checking select directories does not authoritatively
+/// prove absence on macOS, any non-zero exit status is classified as [`LaunchOutcome::Failed`].
+/// This preserves the observable error and prevents unwarranted fallback on unproven absence.
+#[allow(dead_code)]
+pub fn classify_macos_open_result(status_success: bool, stderr: &str) -> LaunchOutcome {
+    if status_success {
+        LaunchOutcome::Success
     } else {
-        Err(std::io::Error::other(format!("axialCAD is not running; start it with `cadcraft --control {port}`")))
+        let trimmed = stderr.trim();
+        LaunchOutcome::Failed(if trimmed.is_empty() {
+            "application failed to open".to_string()
+        } else {
+            trimmed.to_string()
+        })
+    }
+}
+
+/// Dispatch opening on macOS using a pluggable launcher function.
+///
+/// Tries `axialCAD` first. If and only if `axialCAD` is not installed or found ([`LaunchOutcome::AppNotFound`]),
+/// falls back to `CADCraft`. If `axialCAD` fails for another reason ([`LaunchOutcome::Failed`]),
+/// no fallback occurs and the error is preserved observably.
+pub fn launch_on_macos_with(port: u16, mut launcher: impl FnMut(&str, u16) -> LaunchOutcome) -> std::io::Result<()> {
+    match launcher("axialCAD", port) {
+        LaunchOutcome::Success => Ok(()),
+        LaunchOutcome::Failed(err) => Err(std::io::Error::other(format!("could not open axialCAD: {err}"))),
+        LaunchOutcome::AppNotFound => match launcher("CADCraft", port) {
+            LaunchOutcome::Success => Ok(()),
+            LaunchOutcome::Failed(err) => Err(std::io::Error::other(format!("could not open CADCraft: {err}"))),
+            LaunchOutcome::AppNotFound => Err(std::io::Error::other(
+                "could not open axialCAD or CADCraft (neither application was found; are they in Applications?)",
+            )),
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn default_macos_launcher(app_name: &str, port: u16) -> LaunchOutcome {
+    let port_str = port.to_string();
+    let res = std::process::Command::new("open")
+        .args(["-a", app_name, "--args", "--control", &port_str])
+        .output();
+    match res {
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            classify_macos_open_result(out.status.success(), &stderr)
+        }
+        Err(e) => LaunchOutcome::Failed(e.to_string()),
+    }
+}
+
+fn default_launcher(app_name: &str, port: u16) -> LaunchOutcome {
+    #[cfg(target_os = "macos")]
+    {
+        default_macos_launcher(app_name, port)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app_name, port);
+        LaunchOutcome::AppNotFound
+    }
+}
+
+/// Open the app with the control port of `addr`.
+pub fn launch_app(addr: &str) -> std::io::Result<()> {
+    launch_app_with(addr, default_launcher)
+}
+
+/// Open the app with the control port of `addr`, using the given launcher implementation for macOS.
+pub fn launch_app_with(addr: &str, launcher: impl FnMut(&str, u16) -> LaunchOutcome) -> std::io::Result<()> {
+    let port = addr
+        .rsplit(':')
+        .next()
+        .filter(|p| p.parse::<u16>().is_ok())
+        .ok_or_else(|| std::io::Error::other(format!("no port in {addr}")))?;
+    let port_num = port.parse::<u16>().map_err(|e| std::io::Error::other(e.to_string()))?;
+
+    if cfg!(target_os = "macos") {
+        launch_on_macos_with(port_num, launcher)
+    } else {
+        Err(std::io::Error::other(format!(
+            "axialCAD is not running; start it with `cadcraft --control {port}`"
+        )))
     }
 }
 
@@ -498,5 +588,118 @@ mod tests {
         assert!(error.contains("may or may not have been applied"));
         assert!(!server.join().unwrap(), "a failed mutation write was retried");
         assert!(remote.token.is_none());
+    }
+
+    #[test]
+    fn macos_launch_attempts_axialcad_first_and_succeeds() {
+        let mut attempts = Vec::new();
+        let launcher = |app: &str, port: u16| {
+            attempts.push((app.to_string(), port));
+            super::LaunchOutcome::Success
+        };
+        let res = super::launch_on_macos_with(4711, launcher);
+        assert!(res.is_ok());
+        assert_eq!(attempts, vec![("axialCAD".to_string(), 4711)]);
+    }
+
+    #[test]
+    fn macos_launch_falls_back_to_cadcraft_when_axialcad_not_found() {
+        let mut attempts = Vec::new();
+        let launcher = |app: &str, port: u16| {
+            attempts.push((app.to_string(), port));
+            if app == "axialCAD" {
+                super::LaunchOutcome::AppNotFound
+            } else if app == "CADCraft" {
+                super::LaunchOutcome::Success
+            } else {
+                super::LaunchOutcome::Failed("unexpected app".to_string())
+            }
+        };
+        let res = super::launch_on_macos_with(4711, launcher);
+        assert!(res.is_ok());
+        assert_eq!(attempts, vec![("axialCAD".to_string(), 4711), ("CADCraft".to_string(), 4711)]);
+    }
+
+    #[test]
+    fn macos_launch_fails_observably_without_fallback_when_axialcad_errors() {
+        let mut attempts = Vec::new();
+        let launcher = |app: &str, port: u16| {
+            attempts.push((app.to_string(), port));
+            if app == "axialCAD" {
+                super::LaunchOutcome::Failed("Gatekeeper signature check failed".to_string())
+            } else {
+                super::LaunchOutcome::Success
+            }
+        };
+        let res = super::launch_on_macos_with(4711, launcher);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("could not open axialCAD: Gatekeeper signature check failed"), "{err}");
+        assert_eq!(attempts, vec![("axialCAD".to_string(), 4711)], "must NOT fall back to CADCraft on non-NotFound error");
+    }
+
+    #[test]
+    fn macos_launch_reports_informative_error_when_both_missing() {
+        let mut attempts = Vec::new();
+        let launcher = |app: &str, port: u16| {
+            attempts.push((app.to_string(), port));
+            super::LaunchOutcome::AppNotFound
+        };
+        let res = super::launch_on_macos_with(4711, launcher);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("neither application was found"), "{err}");
+        assert_eq!(attempts, vec![("axialCAD".to_string(), 4711), ("CADCraft".to_string(), 4711)]);
+    }
+
+    #[test]
+    fn linux_and_windows_launch_error_preserves_real_cadcraft_command() {
+        let launcher = |_app: &str, _port: u16| super::LaunchOutcome::Success;
+        let res = super::launch_app_with("127.0.0.1:8989", launcher);
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(res.is_err());
+            let err = res.unwrap_err().to_string();
+            assert_eq!(err, "axialCAD is not running; start it with `cadcraft --control 8989`");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(res.is_ok());
+        }
+    }
+
+    #[test]
+    fn not_open_error_message_explains_control_port_options() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+        let err = super::not_open("127.0.0.1:54321", io_err);
+        let msg = err.to_string();
+        assert!(msg.contains("axialCAD is not answering at 127.0.0.1:54321"), "{msg}");
+        assert!(msg.contains("AXIALCAD_CONTROL_PORT"), "{msg}");
+        assert!(msg.contains("CADCRAFT_CONTROL_PORT"), "{msg}");
+        assert!(msg.contains("--control PORT"), "{msg}");
+    }
+
+    #[test]
+    fn macos_classifier_preserves_error_without_assuming_absence() {
+        // 1. Success exit status always yields Success
+        assert_eq!(
+            super::classify_macos_open_result(true, ""),
+            super::LaunchOutcome::Success
+        );
+
+        // 2. Failure with error message -> Failed preserving observable error
+        let failure_err = super::classify_macos_open_result(false, "Gatekeeper blocked app");
+        assert_eq!(
+            failure_err,
+            super::LaunchOutcome::Failed("Gatekeeper blocked app".to_string())
+        );
+
+        // 3. Failure with empty or generic stderr -> Failed preserving observable error
+        // (Never converts failure into AppNotFound because absence across system is not authoritatively demonstrated)
+        let failure_generic = super::classify_macos_open_result(false, "");
+        assert_eq!(
+            failure_generic,
+            super::LaunchOutcome::Failed("application failed to open".to_string())
+        );
     }
 }
