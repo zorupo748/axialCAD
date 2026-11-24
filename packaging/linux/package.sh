@@ -39,8 +39,8 @@ case "$ARCH" in
   aarch64 | arm64) ARCH=aarch64; DEB_ARCH=arm64 ;;
   *) echo "unsupported architecture $ARCH" >&2; exit 2 ;;
 esac
-export CADCRAFT_MAINTAINER="${CADCRAFT_MAINTAINER:-CADCraft maintainers <cadcraft@storyteller.ai>}"
-BASENAME="cadcraft-$VERSION-linux-$ARCH"
+export CADCRAFT_MAINTAINER="${CADCRAFT_MAINTAINER:-axialCAD contributors}"
+BASENAME="axialcad-$VERSION-linux-$ARCH"
 
 echo "==> axialCAD $VERSION for Linux $ARCH ($FORMATS)"
 
@@ -129,13 +129,13 @@ To update axialCAD while keeping all your drawings, templates, and preferences i
 ROLLBACK:
 To roll back to the previously installed version at any time:
      ~/.local/share/cadcraft/install.sh --rollback
-   or run './install.sh --rollback' from any extracted CADCraft package.
+   or run './install.sh --rollback' from any extracted axialCAD package.
 
    Notice: Rolling back the binary executable does not revert configuration
    or drawing schema migrations made by a newer version.
 
 UNINSTALLATION:
-To cleanly remove CADCraft (preserving personal preferences and drawings):
+To cleanly remove axialCAD (preserving personal preferences and drawings):
      ~/.local/share/cadcraft/uninstall.sh
    or run './uninstall.sh' from this package directory.
 EOF
@@ -189,8 +189,8 @@ if has appimage; then
   # fetch only the blocks that changed in a newer release, through the .zsync published next to
   # each AppImage on GitHub Releases. `latest` is the newest published release that is not a
   # pre-release. A fork's builds point at its own releases through GITHUB_REPOSITORY.
-  REPO="${GITHUB_REPOSITORY:-storytold/cadcraft}"
-  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|cadcraft-*-linux-$ARCH.AppImage.zsync"
+  REPO="${GITHUB_REPOSITORY:-zorupo748/axialCAD}"
+  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|axialcad-*-linux-$ARCH.AppImage.zsync"
   # Extract-and-run: works without FUSE (containers, CI). The output embeds the static runtime,
   # so users don't need libfuse2 either. With zsyncmake on the host (CI installs the zsync
   # package) appimagetool also writes the .zsync, into its working directory, hence the cd.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uninstall.sh — Cleanly uninstalls CADCraft from a user prefix.
+# uninstall.sh — Cleanly uninstalls axialCAD from a user prefix.
 # Preserves user settings (~/.config/cadcraft), session data, and user drawings.
 #
 # Usage:

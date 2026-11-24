@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — Installs, updates, or rolls back CADCraft for the current Linux user.
+# install.sh — Installs, updates, or rolls back axialCAD for the current Linux user.
 #
 # Default installation prefix: $HOME/.local (no root privileges needed)
 #
