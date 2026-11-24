@@ -607,7 +607,12 @@ fn page_rows(
     let dev_label = if is_external_device {
         "Exportador PDF de axialCAD".to_string()
     } else {
-        device_label(page).to_string()
+        let raw = device_label(page);
+        if raw.eq_ignore_ascii_case("None") {
+            "None".to_string()
+        } else {
+            cadcraft_engine::cmd::plotters::display_device_name(raw).to_string()
+        }
     };
     egui::ComboBox::from_id_salt(salt.with("device")).selected_text(dev_label).width(190.0).show_ui(ui, |ui| {
         if is_external_device {
@@ -632,7 +637,8 @@ fn page_rows(
         }
         for dev in choices.devices.iter() {
             let on = dev.name.eq_ignore_ascii_case(&page.device);
-            if ui.selectable_label(on, &dev.name).on_hover_text(format!("{} ({})", dev.description, dev.output.as_str().to_uppercase())).clicked()
+            let label = cadcraft_engine::cmd::plotters::display_device_name(&dev.name);
+            if ui.selectable_label(on, label).on_hover_text(format!("{} ({})", dev.description, dev.output.as_str().to_uppercase())).clicked()
                 && !on
             {
                 change = Some(("device", json!(dev.name)));
@@ -1261,6 +1267,15 @@ mod plot_dialog_tests {
         assert_eq!((p["device"].as_str(), p["paper"].as_str()), (Some("None"), Some(a3)));
         apply_page_change(&mut st.page, "plotStyleTable", &json!("None"));
         assert!(plot_params(&st, None).get("plotStyleTable").is_none());
+    }
+
+    #[test]
+    fn axialcad_device_label_normalizes_to_canonical_device() {
+        let mut st = state("Model");
+        apply_page_change(&mut st.page, "device", &json!("axialCAD PNG"));
+        assert_eq!(st.page.device, "CADCraft PNG", "axialCAD PNG input alias normalizes to canonical CADCraft PNG");
+        let dev = cadcraft_engine::cmd::plotters::find_device(&st.page.device).unwrap();
+        assert_eq!(cadcraft_engine::cmd::plotters::display_device_name(&dev.name), "axialCAD PNG");
     }
 
     #[test]

@@ -263,3 +263,95 @@ fn polyface_and_polygon_mesh_polylines_become_faces_not_bogus_vertices() {
     let d = read_dxf(dxf(&refs).as_bytes()).expect("read hostile mesh");
     assert_eq!(d.model.iter().count(), 0);
 }
+
+#[test]
+fn stroke_font_alias_persists_and_reimports_as_canonical() {
+    let mut d = Drawing::new_metric();
+
+    // 1. Style using historical CADCraft Stroke
+    d.text_styles.push(TextStyle {
+        name: "HistoricStyle".into(),
+        font: "CADCraft Stroke".into(),
+        ..TextStyle::default()
+    });
+
+    // 2. Style using new axialCAD Stroke alias directly in the model
+    d.text_styles.push(TextStyle {
+        name: "AliasStyle".into(),
+        font: "axialCAD Stroke".into(),
+        ..TextStyle::default()
+    });
+
+    // 3. Controls: foreign fonts should NOT be normalized
+    d.text_styles.push(TextStyle {
+        name: "ForeignStyle".into(),
+        font: "Arial".into(),
+        ..TextStyle::default()
+    });
+    d.text_styles.push(TextStyle {
+        name: "ShxStyle".into(),
+        font: "romans.shx".into(),
+        ..TextStyle::default()
+    });
+
+    let dxf = write_dxf(&d);
+    let groups = groups(&dxf);
+
+    // Verify STYLE table entries
+    let table = groups.iter().position(|(c, v)| *c == 2 && v == "STYLE").expect("STYLE table");
+
+    // Helper to extract font file (group 3) and xdata for a style name
+    let style_font_and_xdata = |name: &str| {
+        let start = table + groups.iter().skip(table).position(|(c, v)| *c == 2 && v == name).expect(name);
+        let file = groups.iter().skip(start).find(|(c, _)| *c == 3).map(|(_, v)| v.as_str());
+        // Look for xdata after the style record: (1001, "CADCRAFT") (1000, "FONT") (1000, "CADCraft Stroke")
+        let mut xdata_font = None;
+        let mut i = start;
+        while i + 2 < groups.len() {
+            if groups[i].0 == 1001 && groups[i].1 == "CADCRAFT"
+                && groups[i + 1].0 == 1000 && groups[i + 1].1 == "FONT"
+                && groups[i + 2].0 == 1000 {
+                xdata_font = Some(groups[i + 2].1.as_str());
+                break;
+            }
+            if groups[i].0 == 0 && groups[i].1 != "STYLE" {
+                break;
+            }
+            i += 1;
+        }
+        (file, xdata_font)
+    };
+
+    // Both CADCraft Stroke and axialCAD Stroke must export as group 3 "txt" + xdata "CADCraft Stroke"
+    let (hist_file, hist_xdata) = style_font_and_xdata("HistoricStyle");
+    assert_eq!(hist_file, Some("txt"), "CADCraft Stroke -> group 3 txt");
+    assert_eq!(hist_xdata, Some("CADCraft Stroke"), "CADCraft Stroke -> xdata FONT CADCraft Stroke");
+
+    let (alias_file, alias_xdata) = style_font_and_xdata("AliasStyle");
+    assert_eq!(alias_file, Some("txt"), "axialCAD Stroke -> group 3 txt");
+    assert_eq!(alias_xdata, Some("CADCraft Stroke"), "axialCAD Stroke -> xdata FONT CADCraft Stroke");
+
+    // Foreign fonts must NOT get the CADCRAFT xdata
+    let (foreign_file, foreign_xdata) = style_font_and_xdata("ForeignStyle");
+    assert_eq!(foreign_file, Some("Arial"), "Arial -> group 3 Arial");
+    assert_eq!(foreign_xdata, None, "Arial -> no CADCRAFT xdata");
+
+    let (shx_file, shx_xdata) = style_font_and_xdata("ShxStyle");
+    assert_eq!(shx_file, Some("romans.shx"), "romans.shx -> group 3 romans.shx");
+    assert_eq!(shx_xdata, None, "romans.shx -> no CADCRAFT xdata");
+
+    // Reimport and verify all resolve correctly
+    let r = read_dxf(dxf.as_bytes()).expect("reopen");
+    let font = |n: &str| r.text_styles.iter().find(|s| s.name == n).map(|s| s.font.clone());
+
+    assert_eq!(font("HistoricStyle").as_deref(), Some("CADCraft Stroke"), "reimport CADCraft Stroke");
+    assert_eq!(font("AliasStyle").as_deref(), Some("CADCraft Stroke"), "reimport axialCAD Stroke normalizes to canonical");
+    assert_eq!(font("ForeignStyle").as_deref(), Some("Arial"), "reimport Arial unchanged");
+    assert_eq!(font("ShxStyle").as_deref(), Some("romans.shx"), "reimport romans.shx unchanged");
+
+    // Verify TextFont resolution: both built-in names resolve to the stroke font
+    use cadcraft_fonts::TextFont;
+    assert!(!TextFont::resolve("CADCraft Stroke").is_outline(), "CADCraft Stroke -> Stroke");
+    assert!(!TextFont::resolve("axialCAD Stroke").is_outline(), "axialCAD Stroke -> Stroke");
+    assert!(!TextFont::resolve("romans.shx").is_outline(), "romans.shx -> Stroke");
+}

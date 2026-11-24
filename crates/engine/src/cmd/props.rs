@@ -668,7 +668,7 @@ fn run_style(s: &mut Session, p: &Value) -> Result<Value> {
     let num = |k: &str| p.get(k).and_then(Value::as_f64).filter(|v| v.is_finite());
     if let Some(st) = d.text_styles.get_mut(idx) {
         if let Some(f) = str_param(p, "font").map(str::trim).filter(|f| !f.is_empty()) {
-            st.font = f.to_string();
+            st.font = cadcraft_fonts::canonical_font_name(f).to_string();
         }
         if let Some(f) = str_param(p, "bigFont") {
             st.big_font = f.to_string();

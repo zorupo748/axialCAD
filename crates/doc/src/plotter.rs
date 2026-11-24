@@ -206,6 +206,32 @@ impl PlotterConfig {
     }
 }
 
+/// User-facing display name for a built-in device. Maps internal built-in names ("CADCraft PDF")
+/// to their brand-facing labels ("axialCAD PDF"), preserving all user and custom device names.
+pub fn display_device_name(name: &str) -> &str {
+    match name {
+        "CADCraft PDF" => "axialCAD PDF",
+        "CADCraft PNG" => "axialCAD PNG",
+        "CADCraft SVG" => "axialCAD SVG",
+        other => other,
+    }
+}
+
+/// Canonical internal identifier for a device name or user-facing alias.
+/// Normalizes "axialCAD PDF" -> "CADCraft PDF", etc. Preserves all other device names.
+pub fn canonical_device_name(name: &str) -> &str {
+    let n = name.trim();
+    if n.eq_ignore_ascii_case("axialCAD PDF") || n.eq_ignore_ascii_case("CADCraft PDF") {
+        "CADCraft PDF"
+    } else if n.eq_ignore_ascii_case("axialCAD PNG") || n.eq_ignore_ascii_case("CADCraft PNG") {
+        "CADCraft PNG"
+    } else if n.eq_ignore_ascii_case("axialCAD SVG") || n.eq_ignore_ascii_case("CADCraft SVG") {
+        "CADCraft SVG"
+    } else {
+        n
+    }
+}
+
 /// The file name a device is kept under: its name with characters that can't appear in file
 /// names replaced by `_`, plus [`PLOTTER_FILE_EXT`]. `None` for an empty name.
 pub fn plotter_file_name(name: &str) -> Option<String> {

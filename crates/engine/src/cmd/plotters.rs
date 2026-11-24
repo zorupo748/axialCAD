@@ -166,8 +166,11 @@ fn builtins() -> Vec<PlotterConfig> {
     BUILTIN.iter().map(|(n, o, d)| builtin(n, *o, d)).collect()
 }
 
+pub use cadcraft_doc::{canonical_device_name, display_device_name};
+
 fn is_builtin(name: &str) -> bool {
-    BUILTIN.iter().any(|(n, _, _)| n.eq_ignore_ascii_case(name.trim()))
+    let canon = canonical_device_name(name);
+    BUILTIN.iter().any(|(n, _, _)| n.eq_ignore_ascii_case(canon))
 }
 
 /// The user's devices (unreadable files are skipped), sorted by name.
@@ -204,12 +207,13 @@ pub fn find_device(name: &str) -> Option<PlotterConfig> {
     if n.is_empty() || n.eq_ignore_ascii_case(NO_DEVICE) {
         return None;
     }
-    if let Some((b, o, d)) = BUILTIN.iter().find(|(b, _, _)| b.eq_ignore_ascii_case(n)) {
+    let canon = canonical_device_name(n);
+    if let Some((b, o, d)) = BUILTIN.iter().find(|(b, _, _)| b.eq_ignore_ascii_case(canon)) {
         return Some(builtin(b, *o, d));
     }
     let st = store();
-    let direct = cadcraft_doc::plotter_file_name(n).and_then(|f| PlotterConfig::from_file_text(&(st.read)(&f).ok()?).ok());
-    direct.filter(|c| c.name.eq_ignore_ascii_case(n)).or_else(|| user_devices().into_iter().find(|c| c.name.eq_ignore_ascii_case(n)))
+    let direct = cadcraft_doc::plotter_file_name(canon).and_then(|f| PlotterConfig::from_file_text(&(st.read)(&f).ok()?).ok());
+    direct.filter(|c| c.name.eq_ignore_ascii_case(canon)).or_else(|| user_devices().into_iter().find(|c| c.name.eq_ignore_ascii_case(canon)))
 }
 
 /// The paper of `dev` called `name`, also by a standard size's short name (`A3`, `Letter`…).
@@ -239,7 +243,7 @@ pub fn is_explicit_pdf_equivalent(p: &Value, name: &str) -> bool {
 fn make_equivalent_device(name: &str, layout: Option<&PageSetup>) -> PlotterConfig {
     PlotterConfig {
         name: name.to_string(),
-        description: format!("CADCraft PDF equivalent for `{name}`"),
+        description: format!("axialCAD PDF equivalent for `{name}`"),
         output: PlotOutput::Pdf,
         resolution: 300,
         orientation: if layout.map_or(false, |l| l.landscape) { Orientation::Landscape } else { Orientation::Portrait },

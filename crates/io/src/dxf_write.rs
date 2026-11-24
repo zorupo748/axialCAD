@@ -2257,15 +2257,22 @@ fn tags_for(d: &Drawing, version: Version, target: Version) -> Vec<Tag> {
         w.f(50, s.oblique.to_degrees());
         w.i(71, if s.backwards { 2 } else { 0 } | if s.upside_down { 4 } else { 0 });
         w.f(42, 0.2);
-        // The built-in font goes out as `txt`, which every reader has; CADCraft's own name
-        // travels in `CADCRAFT` xdata (`1000 FONT`, name) so the style reopens with it.
-        let file = if s.font == cadcraft_fonts_name() { "txt" } else { s.font.as_str() };
+        // The built-in font goes out as `txt`, which every reader has; the canonical name
+        // ("CADCraft Stroke") travels in `CADCRAFT` xdata (`1000 FONT`, name) so the style
+        // reopens with it. Built-in aliases like "axialCAD Stroke" are normalized to the canonical name.
+        let canon_font = cadcraft_fonts::canonical_font_name(&s.font);
+        let is_builtin = canon_font.eq_ignore_ascii_case(cadcraft_fonts_name());
+        let file = if is_builtin { "txt" } else { s.font.as_str() };
         w.s(3, file);
         w.s(4, &s.big_font);
         if s.annotative {
             annotative_xdata(&mut w);
         }
-        if file != s.font {
+        if is_builtin {
+            w.s(1001, dxf_ext::APP);
+            w.s(1000, "FONT");
+            w.s(1000, dxf_ext::xdata_str(cadcraft_fonts_name()));
+        } else if file != s.font {
             w.s(1001, dxf_ext::APP);
             w.s(1000, "FONT");
             w.s(1000, dxf_ext::xdata_str(&s.font));
@@ -2703,7 +2710,7 @@ fn tags_for(d: &Drawing, version: Version, target: Version) -> Vec<Tag> {
         w.s(330, layout_dict.clone());
         w.s(100, "AcDbPlotSettings");
         w.s(1, "");
-        let device = page.device.trim();
+        let device = cadcraft_doc::canonical_device_name(page.device.trim());
         w.s(2, if device.is_empty() || device.eq_ignore_ascii_case("None") { "none_device" } else { device });
         w.s(4, page.paper.replace(' ', "_"));
         w.s(6, "");

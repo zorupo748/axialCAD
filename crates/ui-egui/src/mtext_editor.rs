@@ -194,10 +194,13 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State, base_h: f64) {
         ui.add_space(4.0);
         // Font
         let shown = cur.font.clone().unwrap_or_else(|| st.fmt.base_font.clone());
-        egui::ComboBox::from_id_salt("mtext_font").width(120.0).selected_text(shown.clone()).show_ui(ui, |ui| {
+        let shown_label = cadcraft_fonts::display_font_name(&shown).to_string();
+        egui::ComboBox::from_id_salt("mtext_font").width(120.0).selected_text(shown_label).show_ui(ui, |ui| {
             for fam in FAMILIES.iter().map(|s| s.to_string()).chain(cur.font.clone().filter(|f| !FAMILIES.contains(&f.as_str()))) {
-                if ui.selectable_label(shown == fam, &fam).clicked() {
-                    change(st, |c| c.font = Some(fam.clone()));
+                let fam_label = cadcraft_fonts::display_font_name(&fam);
+                if ui.selectable_label(shown == fam, fam_label).clicked() {
+                    let canon = cadcraft_fonts::canonical_font_name(&fam);
+                    change(st, |c| c.font = Some(canon.to_string()));
                     refocus = true;
                 }
             }

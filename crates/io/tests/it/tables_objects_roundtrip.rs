@@ -107,6 +107,69 @@ fn layout_page_setup_and_paper_view_round_trip() {
 }
 
 #[test]
+fn plot_device_alias_persists_and_reimports_as_canonical() {
+    let mut d = Drawing::new_imperial();
+
+    // 1. Layouts with historical names
+    let l1 = d.layouts.get_mut(0).expect("Layout1");
+    l1.page.device = "CADCraft PDF".into();
+
+    let l2 = d.layouts.get_mut(1).expect("Layout2");
+    l2.page.device = "CADCraft PNG".into();
+
+    // 2. Layouts with new axialCAD aliases directly in the model (PDF, PNG, SVG)
+    d.layouts.push(cadcraft_doc::Layout::new("AxialPdfLayout", 3));
+    let l3 = d.layouts.get_mut(2).expect("AxialPdfLayout");
+    l3.page.device = "axialCAD PDF".into();
+
+    d.layouts.push(cadcraft_doc::Layout::new("AxialPngLayout", 4));
+    let l4 = d.layouts.get_mut(3).expect("AxialPngLayout");
+    l4.page.device = "axialCAD PNG".into();
+
+    d.layouts.push(cadcraft_doc::Layout::new("AxialSvgLayout", 5));
+    let l5 = d.layouts.get_mut(4).expect("AxialSvgLayout");
+    l5.page.device = "axialCAD SVG".into();
+
+    // 3. Control: custom device must NOT be normalized
+    d.layouts.push(cadcraft_doc::Layout::new("CustomLayout", 6));
+    let l6 = d.layouts.get_mut(5).expect("CustomLayout");
+    l6.page.device = "Office Plotter.pc3".into();
+
+    let dxf = write_dxf(&d);
+
+    // Verify LAYOUT objects in OBJECTS section have group 2 = canonical device name
+    let tags = cadcraft_dxf::parse(dxf.as_bytes()).expect("parse written DXF");
+    let objects = cadcraft_dxf::sections(&tags).into_iter().find(|s| s.name == "OBJECTS").expect("OBJECTS");
+
+    // Find group 2 (device) for each layout by looking backward from AcDbLayout (1, name) to AcDbPlotSettings (2, device)
+    let get_device_for = |name: &str| {
+        let pos = objects.tags.iter().position(|t| t.code == 1 && t.str() == name).expect(name);
+        objects.tags[..pos].iter().rev().find(|t| t.code == 2).map(|t| t.str()).expect("device group 2")
+    };
+
+    // Built-ins (both historical and alias) must persist with canonical "CADCraft *" names
+    assert_eq!(get_device_for("Layout1"), "CADCraft PDF");
+    assert_eq!(get_device_for("Layout2"), "CADCraft PNG");
+    assert_eq!(get_device_for("AxialPdfLayout"), "CADCraft PDF");
+    assert_eq!(get_device_for("AxialPngLayout"), "CADCraft PNG");
+    assert_eq!(get_device_for("AxialSvgLayout"), "CADCraft SVG");
+
+    // Custom device must persist unchanged
+    assert_eq!(get_device_for("CustomLayout"), "Office Plotter.pc3");
+
+    // Reimport and verify canonical names are recovered
+    let r = read_dxf(dxf.as_bytes()).expect("reopen");
+    let dev_of = |name: &str| r.layouts.iter().find(|l| l.name == name).map(|l| l.page.device.as_str());
+
+    assert_eq!(dev_of("Layout1"), Some("CADCraft PDF"));
+    assert_eq!(dev_of("Layout2"), Some("CADCraft PNG"));
+    assert_eq!(dev_of("AxialPdfLayout"), Some("CADCraft PDF"));
+    assert_eq!(dev_of("AxialPngLayout"), Some("CADCraft PNG"));
+    assert_eq!(dev_of("AxialSvgLayout"), Some("CADCraft SVG"));
+    assert_eq!(dev_of("CustomLayout"), Some("Office Plotter.pc3"));
+}
+
+#[test]
 fn named_views_ucss_and_groups_round_trip() {
     let mut d = Drawing::new_imperial();
     let line = d.add(&Space::Model, Common::default(), EntityKind::Line(Line { a: Vec3::ZERO, b: Vec3::new(10.0, 0.0, 0.0) })).expect("line");

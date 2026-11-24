@@ -250,3 +250,49 @@ fn explicit_device_equivalence_and_property_preservation() {
     assert_eq!(updated.landscape, false, "portrait must not be flipped to landscape");
     assert_eq!(updated.margins_mm, [0.0, 0.0, 0.0, 0.0], "custom 0 margins must be preserved");
 }
+
+#[test]
+fn axialcad_devices_and_stroke_font_aliases() {
+    use cadcraft_engine::cmd::plotters::{canonical_device_name, display_device_name, find_device};
+
+    // 1. Devices: Display name vs canonical identifier
+    assert_eq!(display_device_name("CADCraft PDF"), "axialCAD PDF");
+    assert_eq!(display_device_name("CADCraft PNG"), "axialCAD PNG");
+    assert_eq!(display_device_name("CADCraft SVG"), "axialCAD SVG");
+    assert_eq!(display_device_name("Custom Plotter"), "Custom Plotter");
+
+    assert_eq!(canonical_device_name("axialCAD PDF"), "CADCraft PDF");
+    assert_eq!(canonical_device_name("axialCAD PNG"), "CADCraft PNG");
+    assert_eq!(canonical_device_name("axialCAD SVG"), "CADCraft SVG");
+    assert_eq!(canonical_device_name("CADCraft PDF"), "CADCraft PDF");
+    assert_eq!(canonical_device_name("Custom Plotter"), "Custom Plotter");
+
+    // 2. Both new aliases and historical names resolve to the canonical built-in device
+    let dev_alias = find_device("axialCAD PDF").expect("alias resolves");
+    let dev_canon = find_device("CADCraft PDF").expect("canonical resolves");
+    assert_eq!(dev_alias.name, "CADCraft PDF");
+    assert_eq!(dev_canon.name, "CADCraft PDF");
+    assert_eq!(dev_alias.output, dev_canon.output);
+
+    // 3. Selection of axialCAD label normalizes to historical identifier in page setup
+    let mut s = session();
+    s.execute("pagesetup", &json!({"layout": "Layout1", "device": "axialCAD PDF"})).unwrap();
+    let p = s.doc().unwrap().layout("Layout1").unwrap().page.clone();
+    assert_eq!(p.device, "CADCraft PDF", "historical identifier preserved in drawing model");
+
+    // 4. Font: Display name vs canonical identifier
+    assert_eq!(cadcraft_fonts::display_font_name("CADCraft Stroke"), "axialCAD Stroke");
+    assert_eq!(cadcraft_fonts::canonical_font_name("axialCAD Stroke"), "CADCraft Stroke");
+    assert_eq!(cadcraft_fonts::canonical_font_name("CADCraft Stroke"), "CADCraft Stroke");
+    assert_eq!(cadcraft_fonts::display_font_name("Arial"), "Arial");
+
+    // 5. TextFont::resolve resolves both to stroke font
+    assert!(!cadcraft_fonts::TextFont::resolve("axialCAD Stroke").is_outline());
+    assert!(!cadcraft_fonts::TextFont::resolve("CADCraft Stroke").is_outline());
+
+    // 6. Style command with axialCAD Stroke alias sets canonical font name
+    s.execute("style", &json!({"name": "BrandStyle", "font": "axialCAD Stroke"})).unwrap();
+    let d = s.doc().unwrap();
+    let st = d.text_styles.iter().find(|t| t.name == "BrandStyle").expect("style created");
+    assert_eq!(st.font, "CADCraft Stroke", "canonical font name stored in TextStyle");
+}
