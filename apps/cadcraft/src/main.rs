@@ -1,6 +1,6 @@
 //! axialCAD desktop app.
 //!
-//! Usage: `cadcraft [--control <port>] [--sample] [files…]`
+//! Usage: `axialcad [--control <port>] [--sample] [files…]`
 //!
 //! `--control <port>` (or `CADCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server:
 //! `{"id":1,"method":"cmdline.input","params":{"text":"circle 0,0 5"}}` → `{"id":1,"ok":true,…}`.
@@ -368,7 +368,7 @@ fn app_icon() -> Option<egui::IconData> {
 
 fn version_string() -> String {
     let sha = option_env!("CADCRAFT_BUILD_SHA").unwrap_or("dev");
-    format!("cadcraft {} ({sha})", env!("CARGO_PKG_VERSION"))
+    format!("axialCAD {} ({sha})", env!("CARGO_PKG_VERSION"))
 }
 
 /// The control port from `--control <port>`, `AXIALCAD_CONTROL_PORT`, or `CADCRAFT_CONTROL_PORT` (`source`);
@@ -612,7 +612,9 @@ pub(crate) fn should_create_initial_drawing(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_startup, config_dir_from, control_flag, control_port_from, filters_for_save, follow_desktop, should_create_initial_drawing};
+    use super::{
+        apply_startup, config_dir_from, control_flag, control_port_from, filters_for_save, follow_desktop, should_create_initial_drawing, version_string,
+    };
     use cadcraft_engine::Session;
     use cadcraft_ui_egui::{CadApp, Services};
     use std::ffi::OsString;
@@ -879,5 +881,11 @@ mod tests {
         assert_eq!(app.pending_lisp.len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn version_string_uses_axialcad_brand_and_preserves_version_and_sha() {
+        let sha = option_env!("CADCRAFT_BUILD_SHA").unwrap_or("dev");
+        assert_eq!(version_string(), format!("axialCAD {} ({sha})", env!("CARGO_PKG_VERSION")));
     }
 }
