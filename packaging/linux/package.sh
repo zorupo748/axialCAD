@@ -57,9 +57,11 @@ STAGE="$WORK/root"
 rm -rf "$WORK"
 
 # ---- stage an FHS tree (shared by every format) -------------------------------------------------
-install -Dm755 "$BIN/cadcraft" "$STAGE/usr/bin/cadcraft"
-install -Dm755 "$BIN/cadcraft-cli" "$STAGE/usr/bin/cadcraft-cli"
-"${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/cadcraft" "$STAGE/usr/bin/cadcraft-cli" 2>/dev/null || true
+install -Dm755 "$BIN/cadcraft" "$STAGE/usr/bin/axialcad"
+install -Dm755 "$BIN/cadcraft-cli" "$STAGE/usr/bin/axialcad-cli"
+ln -s axialcad "$STAGE/usr/bin/cadcraft"
+ln -s axialcad-cli "$STAGE/usr/bin/cadcraft-cli"
+"${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/axialcad" "$STAGE/usr/bin/axialcad-cli" 2>/dev/null || true
 install -Dm644 "$HERE/$APP_ID.desktop" "$STAGE/usr/share/applications/$APP_ID.desktop"
 install -Dm644 "$HERE/$APP_ID.mime.xml" "$STAGE/usr/share/mime/packages/$APP_ID.xml"
 mkdir -p "$STAGE/usr/share/metainfo"
@@ -105,7 +107,7 @@ INSTALLATION (Per-User, No Root Required):
      ./install.sh
 
    By default, this installs to: \$HOME/.local
-   - Binaries: ~/.local/bin/cadcraft, ~/.local/bin/cadcraft-cli
+   - Binaries: ~/.local/bin/axialcad, ~/.local/bin/axialcad-cli (and compatibility symlinks cadcraft, cadcraft-cli)
    - Desktop launcher: ~/.local/share/applications/$APP_ID.desktop
    - Icons: ~/.local/share/icons/hicolor/...
    - MIME / file associations: ~/.local/share/mime/packages/...
@@ -117,8 +119,8 @@ INSTALLATION (Per-User, No Root Required):
 LAUNCHING:
 - Desktop Menu: Search for "axialCAD" in your desktop application menu.
 - File Manager: Right-click any DWG or DXF file and choose "Open With -> axialCAD".
-- Terminal:     ~/.local/bin/cadcraft [drawing.dwg|drawing.dxf]
-  (Ensure ~/.local/bin is in your PATH to run 'cadcraft' directly)
+- Terminal:     ~/.local/bin/axialcad [drawing.dwg|drawing.dxf]
+  (Ensure ~/.local/bin is in your PATH to run 'axialcad' directly; 'cadcraft' also works)
 
 UPDATING:
 To update axialCAD while keeping all your drawings, templates, and preferences intact:
@@ -128,7 +130,7 @@ To update axialCAD while keeping all your drawings, templates, and preferences i
 
 ROLLBACK:
 To roll back to the previously installed version at any time:
-     ~/.local/share/cadcraft/install.sh --rollback
+     ~/.local/share/axialcad/install.sh --rollback
    or run './install.sh --rollback' from any extracted axialCAD package.
 
    Notice: Rolling back the binary executable does not revert configuration
@@ -136,7 +138,7 @@ To roll back to the previously installed version at any time:
 
 UNINSTALLATION:
 To cleanly remove axialCAD (preserving personal preferences and drawings):
-     ~/.local/share/cadcraft/uninstall.sh
+     ~/.local/share/axialcad/uninstall.sh
    or run './uninstall.sh' from this package directory.
 EOF
 
@@ -165,7 +167,7 @@ if has appimage; then
   APPDIR="$WORK/CADCraft.AppDir"
   cp -R "$STAGE" "$APPDIR"
   mv "$APPDIR/usr/share/doc" "$WORK/doc-unused"
-  ln -s usr/bin/cadcraft "$APPDIR/AppRun"
+  ln -s usr/bin/axialcad "$APPDIR/AppRun"
   cp "$HERE/$APP_ID.desktop" "$APPDIR/$APP_ID.desktop"
   cp "$ROOT/assets/app-icon/hicolor/256x256/apps/$APP_ID.png" "$APPDIR/$APP_ID.png"
   ln -s "$APP_ID.png" "$APPDIR/.DirIcon"
@@ -206,9 +208,9 @@ if has appimage; then
 fi
 
 if [[ -z "${CROSS_TARGET:-}" ]]; then
-  "$STAGE/usr/bin/cadcraft-cli" --version
+  "$STAGE/usr/bin/axialcad-cli" --version
 elif [[ -n "${EMULATOR:-}" ]]; then
-  "$EMULATOR" "$STAGE/usr/bin/cadcraft-cli" --version
+  "$EMULATOR" "$STAGE/usr/bin/axialcad-cli" --version
 fi
 echo "==> done"
 ls -lh "$DIST"

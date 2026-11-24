@@ -15,8 +15,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Auto-detect PREFIX if run from <prefix>/share/cadcraft/uninstall.sh
-if [[ "$SCRIPT_DIR" == */share/cadcraft ]]; then
+# Auto-detect PREFIX if run from <prefix>/share/axialcad/uninstall.sh or <prefix>/share/cadcraft/uninstall.sh
+if [[ "$SCRIPT_DIR" == */share/axialcad || "$SCRIPT_DIR" == */share/cadcraft ]]; then
   AUTO_PREFIX="$(cd "$SCRIPT_DIR/../.." && pwd)"
 else
   AUTO_PREFIX="${HOME}/.local"
@@ -66,12 +66,23 @@ if [[ -z "$PREFIX" || "$PREFIX" == "/" ]]; then
 fi
 
 TARGET_ROOT="${DESTDIR}${PREFIX}"
-TARGET_CADCRAFT="${TARGET_ROOT}/share/cadcraft"
-MANIFEST="${TARGET_CADCRAFT}/install-manifest.txt"
-LOCK_FILE="${TARGET_CADCRAFT}/.install.lock"
+TARGET_AXIALCAD="${TARGET_ROOT}/share/axialcad"
+TARGET_LEGACY_CADCRAFT="${TARGET_ROOT}/share/cadcraft"
 
-if [[ ! -f "$MANIFEST" ]]; then
-  echo "error: axialCAD installation manifest not found at: $MANIFEST" >&2
+MANIFEST=""
+LOCK_FILE=""
+TARGET_MANAGED=""
+
+if [[ -f "${TARGET_AXIALCAD}/install-manifest.txt" ]]; then
+  MANIFEST="${TARGET_AXIALCAD}/install-manifest.txt"
+  LOCK_FILE="${TARGET_AXIALCAD}/.install.lock"
+  TARGET_MANAGED="$TARGET_AXIALCAD"
+elif [[ -f "${TARGET_LEGACY_CADCRAFT}/install-manifest.txt" ]]; then
+  MANIFEST="${TARGET_LEGACY_CADCRAFT}/install-manifest.txt"
+  LOCK_FILE="${TARGET_LEGACY_CADCRAFT}/.install.lock"
+  TARGET_MANAGED="$TARGET_LEGACY_CADCRAFT"
+else
+  echo "error: axialCAD installation manifest not found at: ${TARGET_AXIALCAD}/install-manifest.txt" >&2
   echo "axialCAD does not appear to be installed in: $PREFIX" >&2
   exit 1
 fi
@@ -101,8 +112,8 @@ verify_parent_boundaries() {
 
 verify_parent_boundaries "${TARGET_ROOT}/bin"
 verify_parent_boundaries "${TARGET_ROOT}/share"
-verify_parent_boundaries "$TARGET_CADCRAFT"
-verify_parent_boundaries "${TARGET_CADCRAFT}/versions"
+verify_parent_boundaries "$TARGET_MANAGED"
+verify_parent_boundaries "${TARGET_MANAGED}/versions"
 
 LOCK_FD=200
 LOCK_ACQUIRED=0
@@ -111,7 +122,7 @@ acquire_lock() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return 0
   fi
-  mkdir -p "$TARGET_CADCRAFT" 2>/dev/null || true
+  mkdir -p "$TARGET_MANAGED" 2>/dev/null || true
   eval "exec ${LOCK_FD}>\"\$LOCK_FILE\""
   if ! flock -n "$LOCK_FD"; then
     echo "error: another axialCAD operation is currently running in $TARGET_ROOT." >&2
@@ -132,7 +143,7 @@ trap release_lock EXIT
 acquire_lock
 
 # -----------------------------------------------------------------------------
-# Check if CADCraft or CADCraft CLI is running from target
+# Check if axialCAD or CADCraft CLI is running from target
 # -----------------------------------------------------------------------------
 if [[ "$DRY_RUN" -eq 0 ]]; then
   if ! command -v pgrep >/dev/null 2>&1 || ! command -v readlink >/dev/null 2>&1; then
@@ -140,36 +151,45 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     exit 1
   fi
 
+  PIDS_AXIAL="$(pgrep -x axialcad 2>/dev/null || true)"
+  PIDS_AXIAL_CLI="$(pgrep -x axialcad-cli 2>/dev/null || true)"
   PIDS_CADCRAFT="$(pgrep -x cadcraft 2>/dev/null || true)"
   PIDS_CLI="$(pgrep -x cadcraft-cli 2>/dev/null || true)"
-  RUNNING_PIDS="$(echo "$PIDS_CADCRAFT $PIDS_CLI" | tr ' ' '\n' | grep -v '^$' | sort -u || true)"
+  RUNNING_PIDS="$(echo "$PIDS_AXIAL $PIDS_AXIAL_CLI $PIDS_CADCRAFT $PIDS_CLI" | tr ' ' '\n' | grep -v '^$' | sort -u || true)"
 
   if [[ -n "$RUNNING_PIDS" ]]; then
+    CANON_BIN_AXIAL=""
+    [[ -e "${TARGET_ROOT}/bin/axialcad" ]] && CANON_BIN_AXIAL="$(readlink -f "${TARGET_ROOT}/bin/axialcad" 2>/dev/null || true)"
+    CANON_BIN_AXIAL_CLI=""
+    [[ -e "${TARGET_ROOT}/bin/axialcad-cli" ]] && CANON_BIN_AXIAL_CLI="$(readlink -f "${TARGET_ROOT}/bin/axialcad-cli" 2>/dev/null || true)"
     CANON_BIN_CADCRAFT=""
-    if [[ -e "${TARGET_ROOT}/bin/cadcraft" ]]; then
-      CANON_BIN_CADCRAFT="$(readlink -f "${TARGET_ROOT}/bin/cadcraft" 2>/dev/null || true)"
-    fi
+    [[ -e "${TARGET_ROOT}/bin/cadcraft" ]] && CANON_BIN_CADCRAFT="$(readlink -f "${TARGET_ROOT}/bin/cadcraft" 2>/dev/null || true)"
     CANON_BIN_CLI=""
-    if [[ -e "${TARGET_ROOT}/bin/cadcraft-cli" ]]; then
-      CANON_BIN_CLI="$(readlink -f "${TARGET_ROOT}/bin/cadcraft-cli" 2>/dev/null || true)"
-    fi
+    [[ -e "${TARGET_ROOT}/bin/cadcraft-cli" ]] && CANON_BIN_CLI="$(readlink -f "${TARGET_ROOT}/bin/cadcraft-cli" 2>/dev/null || true)"
+
+    CANON_AXIAL_SHARE=""
+    [[ -d "$TARGET_AXIALCAD" ]] && CANON_AXIAL_SHARE="$(readlink -f "$TARGET_AXIALCAD" 2>/dev/null || true)"
     CANON_CADCRAFT_SHARE=""
-    if [[ -d "$TARGET_CADCRAFT" ]]; then
-      CANON_CADCRAFT_SHARE="$(readlink -f "$TARGET_CADCRAFT" 2>/dev/null || true)"
-    fi
+    [[ -d "$TARGET_LEGACY_CADCRAFT" ]] && CANON_CADCRAFT_SHARE="$(readlink -f "$TARGET_LEGACY_CADCRAFT" 2>/dev/null || true)"
 
     MATCHED_PIDS=()
     for pid in $RUNNING_PIDS; do
       if [[ -e "/proc/$pid/exe" ]]; then
         EXE_PATH="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
         IS_MATCH=0
-        if [[ -n "$CANON_BIN_CADCRAFT" && "$EXE_PATH" == "$CANON_BIN_CADCRAFT" ]]; then
+        if [[ -n "$CANON_BIN_AXIAL" && "$EXE_PATH" == "$CANON_BIN_AXIAL" ]]; then
+          IS_MATCH=1
+        elif [[ -n "$CANON_BIN_AXIAL_CLI" && "$EXE_PATH" == "$CANON_BIN_AXIAL_CLI" ]]; then
+          IS_MATCH=1
+        elif [[ -n "$CANON_BIN_CADCRAFT" && "$EXE_PATH" == "$CANON_BIN_CADCRAFT" ]]; then
           IS_MATCH=1
         elif [[ -n "$CANON_BIN_CLI" && "$EXE_PATH" == "$CANON_BIN_CLI" ]]; then
           IS_MATCH=1
+        elif [[ -n "$CANON_AXIAL_SHARE" && "$EXE_PATH" == "${CANON_AXIAL_SHARE}/"* ]]; then
+          IS_MATCH=1
         elif [[ -n "$CANON_CADCRAFT_SHARE" && "$EXE_PATH" == "${CANON_CADCRAFT_SHARE}/"* ]]; then
           IS_MATCH=1
-        elif [[ "$EXE_PATH" == "${TARGET_ROOT}/"* && ( "$EXE_PATH" == */cadcraft || "$EXE_PATH" == */cadcraft-cli ) ]]; then
+        elif [[ "$EXE_PATH" == "${TARGET_ROOT}/"* && ( "$EXE_PATH" == */axialcad || "$EXE_PATH" == */axialcad-cli || "$EXE_PATH" == */cadcraft || "$EXE_PATH" == */cadcraft-cli ) ]]; then
           IS_MATCH=1
         fi
         if [[ "$IS_MATCH" -eq 1 ]]; then
@@ -247,23 +267,40 @@ while IFS= read -r rel_file; do
 done < "$MANIFEST"
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
-  rm -f "${TARGET_CADCRAFT}/current" 2>/dev/null || true
-  rm -f "${TARGET_CADCRAFT}/previous" 2>/dev/null || true
-  rm -f "${TARGET_CADCRAFT}/install.sh" 2>/dev/null || true
-  rm -f "${TARGET_CADCRAFT}/uninstall.sh" 2>/dev/null || true
-  rm -f "${TARGET_CADCRAFT}/version.env" 2>/dev/null || true
-  rm -f "${TARGET_CADCRAFT}/install-manifest.txt" 2>/dev/null || true
+  for managed_dir in "$TARGET_AXIALCAD" "$TARGET_LEGACY_CADCRAFT"; do
+    if [[ -d "$managed_dir" ]]; then
+      rm -f "${managed_dir}/current" 2>/dev/null || true
+      rm -f "${managed_dir}/previous" 2>/dev/null || true
+      rm -f "${managed_dir}/install.sh" 2>/dev/null || true
+      rm -f "${managed_dir}/uninstall.sh" 2>/dev/null || true
+      rm -f "${managed_dir}/version.env" 2>/dev/null || true
+      rm -f "${managed_dir}/install-manifest.txt" 2>/dev/null || true
 
-  # Prune only completely empty directories; preserve any unmanaged foreign files
-  if [[ -d "${TARGET_CADCRAFT}/versions" ]]; then
-    find "${TARGET_CADCRAFT}/versions" -depth -type d -empty -delete 2>/dev/null || true
-    rmdir "${TARGET_CADCRAFT}/versions" 2>/dev/null || true
-  fi
+      # Prune only completely empty directories; preserve any unmanaged foreign files
+      if [[ -d "${managed_dir}/versions" ]]; then
+        find "${managed_dir}/versions" -depth -type d -empty -delete 2>/dev/null || true
+        rmdir "${managed_dir}/versions" 2>/dev/null || true
+      fi
+    fi
+  done
 
-  # Release the lock without unlinking the lockfile to prevent inode races with concurrent processes
+  # Also check entry binaries in TARGET_ROOT/bin
+  for b_name in "axialcad" "axialcad-cli" "cadcraft" "cadcraft-cli"; do
+    b_path="${TARGET_ROOT}/bin/${b_name}"
+    if [[ -L "$b_path" ]]; then
+      b_target="$(readlink "$b_path" 2>/dev/null || true)"
+      if [[ "$b_target" == *"axialcad"* || "$b_target" == *"cadcraft"* ]]; then
+        rm -f "$b_path" 2>/dev/null || true
+      fi
+    fi
+  done
+
+  # Release lock and remove lockfiles so clean empty directory pruning succeeds
   release_lock
+  rm -f "$LOCK_FILE" "${TARGET_AXIALCAD}/.install.lock" "${TARGET_LEGACY_CADCRAFT}/.install.lock" 2>/dev/null || true
 
-  rmdir "${TARGET_CADCRAFT}" 2>/dev/null || true
+  rmdir "${TARGET_AXIALCAD}" 2>/dev/null || true
+  rmdir "${TARGET_LEGACY_CADCRAFT}" 2>/dev/null || true
   rmdir "${TARGET_ROOT}/share/doc/cadcraft" 2>/dev/null || true
 
   if [[ -d "${TARGET_ROOT}/share/icons/hicolor" ]]; then
