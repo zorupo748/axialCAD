@@ -2632,14 +2632,39 @@ fn effective_point(app: &mut CadApp, raw: Vec2, xf: &Xf, ctx: &egui::Context) ->
     let (now, shift) = ctx.input(|i| (i.time, i.modifiers.shift));
     let q =
         snap::tracking::CursorQuery { base, deferred, corner, aperture: app.session.settings.aperture / xf.scale, tol: 6.0 / xf.scale, now, shift };
-    let non_xy_line = app.session.running.as_ref().is_some_and(|r| r.id == "line") && app.session.drawing_plane() != cadcraft_geom::DrawingPlane::XY;
-    let r = if non_xy_line { app.session.snap_cursor_without_object_snaps(raw, &q) } else { app.session.snap_cursor(raw, &q) };
+    let line = app.session.running.as_ref().is_some_and(|r| r.id == "line");
+    let r = if line && app.session.drawing_plane() != cadcraft_geom::DrawingPlane::XY {
+        app.session.snap_cursor_without_object_snaps(raw, &q)
+    } else if line && prompt.is_some_and(|p| p.base3.is_some()) {
+        app.session.snap_cursor_without_apparent_intersection(raw, &q)
+    } else {
+        app.session.snap_cursor(raw, &q)
+    };
     if r.wait {
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(snap::tracking::DWELL / 4.0));
     }
     app.canvas.snap = r.snap;
     app.canvas.track = r.track;
     r.point
+}
+
+fn submit_canvas_point(app: &mut CadApp, point: Vec3) -> cadcraft_engine::Result<()> {
+    if let Some(hit) = app.canvas.snap {
+        return app.session.input_snapped(hit);
+    }
+    if app.session.snap_override() == Some(snap::mode::APP)
+        && app.session.running.as_ref().is_some_and(|r| r.id == "line")
+        && app.session.current_prompt().is_some_and(|p| p.base3.is_some() && !p.global_xy_zero)
+    {
+        app.session.echo("No Apparent Intersection found for specified point.");
+        return Ok(());
+    }
+    if point.is_finite() {
+        app.session.input(Input::Point3(point))
+    } else {
+        app.session.echo("Point coordinates must be finite.");
+        Ok(())
+    }
 }
 
 fn store_cursor_resolution(app: &mut CadApp, point: Option<(Vec2, Vec3)>) {
@@ -2817,9 +2842,54 @@ fn soft_axis_track(
 ///    continuation height of previous vertex for subsequent points).
 ///
 /// A parallel free-plane ray has no point: it clears the cursor and cannot confirm a click.
-/// Explicit 3D endpoint snaps remain WCS points; ordinary 2D snap coordinates are embedded in
-/// the active plane by LINE's `Input::Point` contract.
+/// At a LINE continuation APP tests the resulting drafting ray after existing object snaps.
+/// Spatial snaps remain WCS points. LINE embeds ordinary 2D snaps in the active plane.
 fn resolve_effective_point(
+    app: &mut CadApp,
+    hp: Pos2,
+    xf: &Xf,
+    ctx: &egui::Context,
+    prompt_base: Option<Vec2>,
+    dyn_frame: Option<crate::dyninput::Frame>,
+) -> Option<(Vec2, Vec3)> {
+    let result = resolve_point_before_apparent_snap(app, hp, xf, ctx, prompt_base, dyn_frame)?;
+    let over = app.session.snap_override();
+    let osmode = over.unwrap_or(app.session.settings.osmode);
+    if osmode & snap::mode::APP == 0
+        || osmode & snap::mode::OFF != 0
+        || app.canvas.snap.is_some()
+        || app.session.pending_window.is_some()
+        || !app.session.running.as_ref().is_some_and(|r| r.id == "line")
+        || (!app.session.point_mods.is_empty() && over != Some(snap::mode::APP))
+        || dyn_frame.and_then(|f| crate::dyninput::parse(&app.cmd.buffer, &f)).is_some_and(|e| e.first_locked().is_some())
+    {
+        return Some(result);
+    }
+    let Some(base) = app.session.current_prompt().filter(|p| !p.global_xy_zero).and_then(|p| p.base3) else { return Some(result) };
+    let Some(camera) = xf.camera.as_ref() else { return Some(result) };
+    let delta = hp - xf.rect.center();
+    let cursor = Vec2::new(f64::from(delta.x) / xf.scale, -f64::from(delta.y) / xf.scale);
+    let Ok(st) = app.session.state() else { return Some(result) };
+    let Some(hit) = snap::projected_apparent_line_intersection(
+        &st.doc,
+        &st.edit_space(),
+        camera,
+        cursor,
+        app.session.settings.aperture / xf.scale,
+        base,
+        result.1,
+    ) else {
+        return Some(result);
+    };
+    let Some(point) = hit.point3 else { return Some(result) };
+    let ucs = app.session.ucs();
+    let point2 = if ucs.is_world() { app.session.drawing_plane().coordinates(point) } else { ucs.to_local(point).xy() };
+    app.canvas.snap = Some(hit);
+    app.canvas.track = None;
+    Some((point2, point))
+}
+
+fn resolve_point_before_apparent_snap(
     app: &mut CadApp,
     hp: Pos2,
     xf: &Xf,
@@ -3710,14 +3780,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 let Some((_, pt3)) = resolve_effective_point(app, *pos, &xf, ui.ctx(), loop_base, loop_dyn_frame) else {
                     continue;
                 };
-                if !pt3.is_finite() {
-                    app.session.echo("Point coordinates must be finite.");
-                    continue;
-                }
-                let result = match app.canvas.snap {
-                    Some(hit) => app.session.input_snapped(hit),
-                    None => app.session.input(Input::Point3(pt3)),
-                };
+                let result = submit_canvas_point(app, pt3);
                 match result {
                     Ok(_) => {
                         app.canvas.active_axis_3d = None;
@@ -3859,18 +3922,8 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             let result = if let Some(handle) = spatial_pick {
                 app.session.pick_cycled(handle, false)
             } else {
-                match app.canvas.snap {
-                    Some(hit) => app.session.input_snapped(hit),
-                    None => {
-                        let pt3 = app.canvas.cursor3.unwrap_or_else(|| point_on_plane(p, plane, plane_offset));
-                        if pt3.is_finite() {
-                            app.session.input(Input::Point3(pt3))
-                        } else {
-                            app.session.echo("Point coordinates must be finite.");
-                            Ok(())
-                        }
-                    }
-                }
+                let pt3 = app.canvas.cursor3.unwrap_or_else(|| point_on_plane(p, plane, plane_offset));
+                submit_canvas_point(app, pt3)
             };
 
             match result {
@@ -4750,7 +4803,10 @@ fn override_cursor(app: &mut CadApp, raw: Vec2, xf: &Xf) {
     let base = prompt.as_ref().and_then(|p| p.base);
     let deferred = prompt.as_ref().is_some_and(|p| p.deferred);
     let s = &app.session.settings;
-    let osmode = over.unwrap_or(s.osmode) | if s.osnaphatch { snap::mode::HATCH } else { 0 };
+    let mut osmode = over.unwrap_or(s.osmode) | if s.osnaphatch { snap::mode::HATCH } else { 0 };
+    if app.session.running.as_ref().is_some_and(|r| r.id == "line") && prompt.as_ref().is_some_and(|p| p.base3.is_some()) {
+        osmode &= !snap::mode::APP;
+    }
     let Ok(st) = app.session.state() else { return };
     let hit = match cycle {
         Some(i) => {
@@ -5868,6 +5924,146 @@ mod hatch_pick_tests {
             app.session.cmdline("line").unwrap();
             app.session.input(Input::Point3(base)).unwrap();
             app
+        }
+
+        #[test]
+        fn apparent_snap_follows_the_45_degree_polar_ray_at_a_different_height() {
+            use cadcraft_engine::snap::mode;
+
+            let mut app = CadApp::new(Session::new(), Services::default());
+            app.session.settings.osmode = mode::APP;
+            app.session.settings.aperture = 10.0;
+            app.session.settings.orthomode = false;
+            app.session.execute("polar", &json!({ "on": true })).unwrap();
+            app.session.execute("setvar", &json!({ "name": "POLARANG", "value": 45 })).unwrap();
+            app.session.execute("line", &json!({ "points": [[5.0, 3.0, 20.0], [5.0, 7.0, 20.0]] })).unwrap();
+            app.session.start("line").unwrap();
+            app.session.input(Input::Point3(Vec3::new(0.0, 0.0, 10.0))).unwrap();
+
+            let target = Vec3::new(5.0, 5.0, 20.0);
+            let xf = test_xf(&app);
+            let pointer = xf.to_screen3(target) + vec2(0.0, 4.0);
+            let (_, endpoint) = resolve_at_screen(&mut app, pointer).unwrap();
+            assert_eq!(app.canvas.snap.map(|hit| hit.mode), Some(mode::APP));
+            assert!(endpoint.near(target, 1e-6), "APP follows the polar guide: {endpoint:?}");
+        }
+
+        #[test]
+        fn apparent_snap_uses_the_current_horizontal_ortho_direction() {
+            use cadcraft_engine::snap::mode;
+            use cadcraft_geom::OrbitCamera;
+
+            for (elevation, y, z) in [(std::f64::consts::FRAC_PI_4, 2.0, 8.0), (std::f64::consts::FRAC_PI_2, 0.0, 10.0)] {
+                let mut app = CadApp::new(Session::new(), Services::default());
+                app.session.set_camera(OrbitCamera { elevation, height: 30.0, ..OrbitCamera::default() });
+                app.session.settings.osmode = mode::APP;
+                app.session.settings.orthomode = true;
+                app.session.settings.axistrack = false;
+                app.session.settings.zlock = false;
+                app.session.execute("line", &json!({ "points": [[0.0, y - 5.0, z], [0.0, y + 5.0, z]] })).unwrap();
+                app.session.start("line").unwrap();
+                app.session.input(Input::Point3(Vec3::new(-5.0, 0.0, 10.0))).unwrap();
+                let target = Vec3::new(0.0, y, z);
+                // Approach across the horizontal guide to distinguish the ortho ray from a free ray.
+                let xf = test_xf(&app);
+                let pointer = xf.to_screen3(target) + vec2(0.0, 2.0);
+                let (_, endpoint) = resolve_at_screen(&mut app, pointer).unwrap();
+                assert_eq!(app.canvas.snap.map(|hit| hit.mode), Some(mode::APP));
+                assert!(endpoint.near(target, 1e-6));
+            }
+        }
+
+        #[test]
+        fn apparent_snap_marker_preview_and_click_share_the_target_depth() {
+            let start = Vec3::new(0.0, 0.0, 30.0);
+            let target = Vec3::new(0.0, 4.0, 8.0);
+            let camera = super::super::OrbitCamera { target, elevation: std::f64::consts::FRAC_PI_4, height: 50.0, ..Default::default() };
+            for (near, parallel, endpoint) in [(true, false, false), (false, false, false), (true, true, false), (true, false, true)] {
+                let mut app = CadApp::new(Session::new(), Services::default());
+                app.session.set_camera(camera);
+                app.session.settings.osmode = cadcraft_engine::snap::mode::APP;
+                app.session.settings.aperture = 10.0;
+                app.session.settings.orthomode = false;
+                app.session.settings.polarmode = false;
+                app.session.settings.otrack = false;
+                app.session.settings.dynmode = false;
+                if endpoint {
+                    app.session.settings.osmode |= cadcraft_engine::snap::mode::END;
+                }
+                let points = if parallel {
+                    json!([[0.0, 4.0, 3.0], [0.0, 4.0, 13.0]])
+                } else if endpoint {
+                    json!([[0.0, 4.0, 8.0], [5.0, 4.0, 8.0]])
+                } else {
+                    json!([[-5.0, 4.0, 8.0], [5.0, 4.0, 8.0]])
+                };
+                app.session.execute("line", &json!({ "points": points })).unwrap();
+                app.session.start("line").unwrap();
+                app.session.input(Input::Point3(start)).unwrap();
+                app.session.settings.zlock = true;
+                let ctx = Context::default();
+                let frame = |app: &mut CadApp, events, time| {
+                    app.logic(&ctx);
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))),
+                            events,
+                            time: Some(time),
+                            ..Default::default()
+                        },
+                        |ui| app.ui(ui),
+                    );
+                    output.textures_delta.clear();
+                    output
+                };
+                frame(&mut app, Vec::new(), 0.0);
+                let center = app.canvas.xf.unwrap().to_screen3(target);
+                let pointer = center + vec2(if near { 6.0 } else { 14.0 }, 0.0);
+                let output = frame(&mut app, vec![egui::Event::PointerMoved(pointer)], 0.1);
+                let expected_mode = if endpoint {
+                    Some(cadcraft_engine::snap::mode::END)
+                } else if near && !parallel {
+                    Some(cadcraft_engine::snap::mode::APP)
+                } else {
+                    None
+                };
+                assert_eq!(app.canvas.snap.map(|h| h.mode), expected_mode);
+                let painted_marker = output.shapes.iter().any(|clipped| {
+                    matches!(&clipped.shape, egui::Shape::Rect(rect)
+                        if rect.stroke.color == crate::theme::Tokens::get().snap && rect.rect.center().distance(center) < 0.1)
+                });
+                assert_eq!(painted_marker, expected_mode.is_some());
+                let preview = app.session.preview(app.canvas.cursor.unwrap());
+                let cadcraft_doc::EntityKind::Line(preview) = &preview[0].kind else { panic!("expected a LINE preview") };
+                let end = preview.b;
+                if expected_mode.is_some() {
+                    assert!(end.near(target, 1e-6));
+                    assert_eq!(end, app.canvas.snap.unwrap().point3.unwrap());
+                } else {
+                    let xf = app.canvas.xf.unwrap();
+                    let free = xf.to_screen3(end);
+                    assert_eq!(end.xy(), start.xy(), "the unsnapped point stays on the WCS vertical: {end:?}");
+                    assert!((free.y - pointer.y).abs() < 0.1, "the unsnapped preview follows the pointer: {free:?} vs {pointer:?}");
+                    assert!((end.z - target.z).abs() > 1.0, "without APP the target depth is ignored: {end:?}");
+                }
+                let click = |pressed| egui::Event::PointerButton {
+                    pos: pointer,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                };
+                frame(&mut app, vec![click(true), click(false)], 0.2);
+                let doc = app.session.doc().unwrap();
+                let segment = doc
+                    .model
+                    .iter()
+                    .find_map(|entity| match &entity.kind {
+                        cadcraft_doc::EntityKind::Line(line) if line.a == start => Some(line),
+                        _ => None,
+                    })
+                    .expect("click creates a segment");
+                assert!(segment.b.near(end, 1e-6));
+            }
         }
 
         #[test]

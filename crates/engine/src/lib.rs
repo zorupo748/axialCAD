@@ -1517,6 +1517,12 @@ impl Session {
     /// Feed an object-snap pick, retaining its viewport origin for measurements. Point modifiers
     /// that combine or constrain coordinates produce ordinary drawing-space points.
     pub fn input_snapped(&mut self, hit: snap::SnapHit) -> Result<()> {
+        if hit.mode == snap::mode::APP
+            && hit.point3.is_some()
+            && matches!(self.point_mods.as_slice(), [pointmod::Frame::Snap { mode: snap::mode::APP }])
+        {
+            self.point_mods.pop();
+        }
         let source = hit.viewport.filter(|_| self.point_mods.iter().all(|f| matches!(f, pointmod::Frame::Snap { mode } if *mode != 0)));
         let previous = std::mem::replace(&mut self.picked_viewport, source);
         self.input_is_snapped = true;

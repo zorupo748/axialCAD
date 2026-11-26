@@ -1,10 +1,12 @@
 //! Object snaps (OSNAP), polar tracking and ortho.
 
+mod apparent;
 mod curves;
 pub mod iso;
 pub mod tracking;
 mod viewport;
 
+pub use apparent::projected_apparent_line_intersection;
 pub use viewport::ViewportPoint;
 
 use cadcraft_doc::{Drawing, EntityKind, Insert, MAX_BLOCK_DEPTH, Prim, Space};
