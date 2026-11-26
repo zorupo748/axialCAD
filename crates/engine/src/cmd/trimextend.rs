@@ -411,6 +411,7 @@ impl Interactive for TrimM {
                 if !self.extend {
                     p.suppress_hover = true;
                 }
+                p.picks_entity_point = !self.extend;
                 p
             }
             Stage::Edges(_) => Prompt::new("Select objects or", Accept::SELECT).default("select all"),
@@ -444,6 +445,14 @@ impl Interactive for TrimM {
         let quick = quick_mode(s);
         let implied = edge_mode(s);
         let extending = self.extend;
+        let i = match i {
+            Input::Point(point) if matches!(self.stage, Stage::Pick) => {
+                let ap = s.pixel_size() * s.settings.pickbox.max(1.0) * 1.5;
+                let handle = crate::select::pick(s.doc()?, &s.space(), point, ap);
+                Input::EntityPoint { handle, point }
+            }
+            other => other,
+        };
         match self.stage.clone() {
             Stage::Mode | Stage::Project | Stage::Edge => self.option(s, i),
             Stage::Edges(mut picked) => {
@@ -555,15 +564,20 @@ impl Interactive for TrimM {
                 Ok(Step::Continue)
             }
             Stage::Pick => match i {
-                Input::Point(p) => {
-                    let ap = s.pixel_size() * s.settings.pickbox.max(1.0) * 1.5;
-                    let space = s.space();
-                    let Some(h) = crate::select::pick(s.doc()?, &space, p, ap) else {
-                        // A pick in empty space opens a window/crossing there.
+                Input::EntityPoint { handle, point: p } => {
+                    if !p.is_finite() {
+                        return Err(EngineError::Other("Point coordinates must be finite.".into()));
+                    }
+                    let Some(h) = handle else {
+                        // A pick in empty space opens a crossing window there.
                         self.stage = Stage::Crossing(Some(p), false);
                         s.pending_window = Some(crate::PendingWindow { corner: p, during_command: true, force_crossing: false });
                         return Ok(Step::Continue);
                     };
+                    let doc = s.doc()?;
+                    if !doc.space(&s.space()).and_then(|store| store.get(h)).is_some_and(|e| doc.is_visible(e)) {
+                        return Err(EngineError::Other("The picked object is unavailable in the current space.".into()));
+                    }
                     let r = self.step(s, |m, s| {
                         let new_hs = apply(s, h, p, extending, m.edges(quick, implied), quick)?;
                         m.update_edge_handles(h, &new_hs);
@@ -623,7 +637,8 @@ impl Interactive for TrimM {
             let ap = s.pixel_size() * s.settings.pickbox.max(1.0) * 1.5;
             let space = s.space();
             let Ok(d) = s.doc() else { return Vec::new() };
-            if let Some(h) = crate::select::pick(d, &space, c, ap) {
+            let picked = if s.is_interactive_ui { s.cursor_entity_point } else { crate::select::pick(d, &space, c, ap).map(|h| (h, c)) };
+            if let Some((h, c)) = picked {
                 let quick = quick_mode(s);
                 let implied = edge_mode(s);
                 let edges = self.edges(quick, implied);

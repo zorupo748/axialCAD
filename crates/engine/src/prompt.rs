@@ -76,6 +76,9 @@ pub struct Prompt {
     /// where the command previews the specific fragment being removed).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub suppress_hover: bool,
+    /// The command needs both the entity picked in the view and a point on it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub picks_entity_point: bool,
 }
 
 /// Parse `@distance<angle` (relative polar), returning `(distance, angle in radians)`.
@@ -229,6 +232,11 @@ pub enum Input {
     Text(String),
     /// Objects picked during a selection prompt.
     Pick(Vec<Handle>),
+    /// A view-space pick resolved to a drawing-space point, with its entity if any.
+    EntityPoint {
+        handle: Option<Handle>,
+        point: Vec2,
+    },
     Enter,
     Cancel,
 }

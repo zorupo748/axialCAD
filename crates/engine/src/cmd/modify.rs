@@ -944,6 +944,11 @@ pub(crate) fn trim_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges) ->
     match &e.kind {
         EntityKind::Line(l) => {
             let ln = Line::new(l.a.xy(), l.b.xy());
+            let direction = l.b - l.a;
+            let xy_length = (ln.b - ln.a).len();
+            if !direction.is_finite() || !xy_length.is_finite() || xy_length <= 1e-12 {
+                return Err(EngineError::Other("Cannot trim a line whose XY projection has no usable length.".into()));
+            }
             let mut ts: Vec<f64> = cut
                 .iter()
                 .flat_map(|c| intersect_ext(&Segment::Line(ln), c, false))
@@ -974,12 +979,12 @@ pub(crate) fn trim_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges) ->
             }
             let mut kept = Vec::new();
             if lo > 0.0 {
-                kept.push(line(ln.a, ln.at(lo)));
+                kept.push(line3(l.a, l.a + direction * lo));
             }
             if hi < 1.0 {
-                kept.push(line(ln.at(hi), ln.b));
+                kept.push(line3(l.a + direction * hi, l.b));
             }
-            let removed = vec![line(ln.at(lo), ln.at(hi))];
+            let removed = vec![line3(l.a + direction * lo, l.a + direction * hi)];
             Ok(TrimPieces { kept, removed })
         }
         EntityKind::Arc(a) => {

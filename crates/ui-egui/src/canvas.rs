@@ -1098,6 +1098,25 @@ fn screen_projected_pick_at(app: &CadApp, xf: &Xf, at: Pos2) -> Option<Handle> {
     best.map(|(_, handle)| handle)
 }
 
+/// Resolve TRIM's hover and click against the same visible geometry.
+fn screen_entity_point(app: &CadApp, xf: &Xf, at: Pos2) -> cadcraft_engine::Result<Input> {
+    let handle = screen_projected_pick_at(app, xf, at);
+    let point = match handle.and_then(|h| app.session.doc().ok()?.entity(h)).map(|entity| &entity.kind) {
+        Some(cadcraft_doc::EntityKind::Line(line)) => {
+            let a = xf.to_screen3(line.a);
+            let delta = xf.to_screen3(line.b) - a;
+            let length_sq = delta.length_sq();
+            if !length_sq.is_finite() || length_sq <= 1e-8 {
+                return Err(cadcraft_engine::EngineError::Other("Cannot trim a line that projects to a point in this view.".into()));
+            }
+            let t = f64::from(((at - a).dot(delta) / length_sq).clamp(0.0, 1.0));
+            line.a.xy().lerp(line.b.xy(), t)
+        }
+        _ => xf.to_world(at),
+    };
+    Ok(Input::EntityPoint { handle, point })
+}
+
 fn screen_window_selection(app: &CadApp, xf: &Xf, start: Pos2, end: Pos2) -> Vec<Handle> {
     let Some(st) = app.session.state().ok() else { return Vec::new() };
     let Some(store) = st.doc.space(&st.edit_space()) else { return Vec::new() };
@@ -3680,6 +3699,12 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 if !loop_prompt.as_ref().is_some_and(cadcraft_engine::pointmod::accepts) {
                     break;
                 }
+                if loop_prompt.as_ref().is_some_and(|p| p.picks_entity_point) {
+                    if let Err(error) = screen_entity_point(app, &xf, *pos).and_then(|input| app.session.input(input)) {
+                        app.session.echo(error.to_string());
+                    }
+                    continue;
+                }
                 let loop_base = loop_prompt.as_ref().and_then(|p| p.base);
                 let loop_dyn_frame = crate::cmdline::dyn_frame(app);
                 let Some((_, pt3)) = resolve_effective_point(app, *pos, &xf, ui.ctx(), loop_base, loop_dyn_frame) else {
@@ -3764,11 +3789,24 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         app.canvas.selection_window = None;
         app.canvas.drag_window = false;
     }
+    let picks_entity_point = app.session.current_prompt().is_some_and(|p| p.picks_entity_point);
     let cycled = pressed_primary
+        && !picks_entity_point
         && !middle_down
         && app.canvas.selection_window.is_none()
         && cycle_click(app, &xf, hover_pos, raw_world.filter(|_| inside), mods.shift);
     let mut screen_selection_handled = false;
+    if inside
+        && pressed_primary
+        && !middle_down
+        && picks_entity_point
+        && let Some(at) = hover_pos
+    {
+        if let Err(error) = screen_entity_point(app, &xf, at).and_then(|input| app.session.input(input)) {
+            app.session.echo(error.to_string());
+        }
+        screen_selection_handled = true;
+    }
     if inside && pressed_primary && !middle_down && !cycled && app.session.click_picks() && app.session.pending_window.is_none() {
         if let Some(window) = app.canvas.selection_window.take() {
             if let Some(end) = hover_pos {
@@ -3917,6 +3955,14 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // Hover highlight (throttled to cursor movement).
     // The cursor picks objects (pick box, rollover highlight): "Select objects" and single-object
     // prompts, or no command with PICKFIRST on; SELECTIONPREVIEW says in which of those it shows.
+    app.session.cursor_entity_point = if inside && app.session.current_prompt().is_some_and(|p| p.picks_entity_point) {
+        hover_pos.and_then(|at| match screen_entity_point(app, &xf, at).ok()? {
+            Input::EntityPoint { handle: Some(handle), point } => Some((handle, point)),
+            _ => None,
+        })
+    } else {
+        None
+    };
     let selecting = app.session.previews_selection();
     if inside && selecting && app.session.pending_window.is_none() {
         if hover_pos != app.canvas.hover_at
@@ -4181,12 +4227,24 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 draw_list(&painter, &xf, &list, bg, false);
             }
             if !dashed.is_empty() {
+                let bg_col = color32(bg);
+                let fg_col = crate::theme::crosshair_color(bg_col);
+                dashed.retain(|e| {
+                    if let cadcraft_doc::EntityKind::Line(line) = &e.kind
+                        && (line.a.z != 0.0 || line.b.z != 0.0)
+                    {
+                        let points = [xf.to_screen3(line.a), xf.to_screen3(line.b)];
+                        painter.line_segment(points, Stroke::new(4.5, bg_col));
+                        painter.extend(Shape::dashed_line(&points, Stroke::new(2.0, fg_col), 6.0, 4.0));
+                        false
+                    } else {
+                        true
+                    }
+                });
                 for e in &mut dashed {
                     e.common.linetype = "Continuous".into();
                 }
                 let list = rebuilt_preview(&st.doc, dashed.iter(), scale);
-                let bg_col = color32(bg);
-                let fg_col = crate::theme::crosshair_color(bg_col);
                 for prim in &list.prims {
                     let pts = list.points(prim);
                     let screen_pts: Vec<Pos2> = pts.iter().map(|q| xf.to_screen(*q)).collect();
@@ -4198,6 +4256,9 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             }
             let ucs = app.session.ucs();
             for k in &ents {
+                if is_trim_pick && k.common.linetype.eq_ignore_ascii_case("DASHED") {
+                    continue;
+                }
                 match &k.kind {
                     cadcraft_doc::EntityKind::Line(l) if l.a.z != 0.0 || l.b.z != 0.0 => {
                         let p1 = xf.to_screen3(l.a);
@@ -5743,7 +5804,7 @@ mod hatch_pick_tests {
     use cadcraft_geom::{Vec2, Vec3};
     use serde_json::json;
 
-    use super::point_on_plane;
+    use super::{Handle, OrbitCamera, Pos2, Rect, Xf, point_on_plane, screen_entity_point, vec2};
     use crate::{CadApp, Services};
 
     #[test]
@@ -6654,6 +6715,68 @@ mod hatch_pick_tests {
             assert!(app.canvas.cursor.is_some(), "cursor resolution recovers with a non-parallel view");
             assert!(!app.canvas.parallel_plane_warning);
         }
+    }
+
+    #[test]
+    fn trim_hover_and_click_follow_the_elevated_line() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        let mut add_line = |a, b| {
+            let out = app.session.execute("line", &json!({ "points": [a, b] })).unwrap();
+            Handle::parse_hex(out["handles"][0].as_str().unwrap()).unwrap()
+        };
+        let flat = add_line([-5.0, 0.0, 0.0], [15.0, 0.0, 0.0]);
+        let raised = add_line([-5.0, 0.0, 10.0], [15.0, 0.0, 10.0]);
+        let edge = add_line([0.0, -5.0, 10.0], [0.0, 5.0, 10.0]);
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        app.session.zoom_extents().unwrap();
+        app.session.settings.selectionpreview = 3;
+        app.session.start("trim").unwrap();
+        let ctx = egui::Context::default();
+        let frame = |app: &mut CadApp, events, time| {
+            app.logic(&ctx);
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))),
+                events,
+                time: Some(time),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.ui(ui));
+            output.textures_delta.clear();
+        };
+        frame(&mut app, Vec::new(), 0.0);
+        let at = app.canvas.xf.unwrap().to_screen3(Vec3::new(-2.0, 0.0, 10.0));
+        frame(&mut app, vec![egui::Event::PointerMoved(at)], 0.1);
+        assert_eq!(app.session.cursor_entity_point.map(|(handle, _)| handle), Some(raised));
+        assert!(app.session.preview(app.session.cursor).iter().any(|entity| {
+            matches!(&entity.kind, cadcraft_doc::EntityKind::Line(line) if line.a.z == 10.0 && line.b.z == 10.0)
+        }));
+        let button =
+            |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+        frame(&mut app, vec![button(true), button(false)], 0.2);
+        let doc = app.session.doc().unwrap();
+        assert!(doc.entity(flat).is_some());
+        assert!(doc.entity(edge).is_some());
+        assert!(doc.entity(raised).is_none());
+        let fragment = doc.model.iter().find(|e| e.handle != flat && e.handle != edge).unwrap();
+        let cadcraft_doc::EntityKind::Line(line) = &fragment.kind else { panic!("expected a line fragment") };
+        assert_eq!(line.a, Vec3::new(0.0, 0.0, 10.0));
+        assert_eq!(line.b, Vec3::new(15.0, 0.0, 10.0));
+    }
+
+    #[test]
+    fn trim_rejects_a_line_that_projects_to_a_point() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("line", &json!({ "points": [[0.0, 0.0, 10.0], [0.0, 10.0, 10.0]] })).unwrap();
+        let xf = Xf {
+            rect: Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0)),
+            center: Vec2::ZERO,
+            scale: 50.0,
+            camera: Some(OrbitCamera { elevation: 0.0, ..OrbitCamera::default() }),
+        };
+        let at = xf.to_screen3(Vec3::new(0.0, 0.0, 10.0));
+        let error = screen_entity_point(&app, &xf, at).unwrap_err();
+        assert!(error.to_string().contains("projects to a point"));
+        assert_eq!(app.session.doc().unwrap().model.iter().count(), 1);
     }
 
     #[test]

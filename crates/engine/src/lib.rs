@@ -733,6 +733,8 @@ pub struct Session {
     pub point_mods: Vec<pointmod::Frame>,
     /// Cursor position in world coordinates (from the UI; used for direct distance entry).
     pub cursor: Vec2,
+    /// Entity and point resolved from the current screen hover for TRIM preview.
+    pub cursor_entity_point: Option<(Handle, Vec2)>,
     pub cursor3: Vec3,
     /// Explicit validity flag for cursor3: true only when actively resolved by the view/camera
     /// for the current command and segment base point.
@@ -831,6 +833,7 @@ impl Session {
             last_polar: None,
             point_mods: Vec::new(),
             cursor: Vec2::ZERO,
+            cursor_entity_point: None,
             cursor3: Vec3::ZERO,
             cursor3_valid: false,
             cursor3_base: None,
@@ -1931,7 +1934,8 @@ impl Session {
             return Some(p);
         }
         self.running.as_ref().map(|r| {
-            let p = r.machine.prompt(self);
+            let mut p = r.machine.prompt(self);
+            p.picks_entity_point &= self.point_mods.is_empty();
             match &self.select_mode {
                 Some(m) if p.accept.select => m.prompt(),
                 _ => p,

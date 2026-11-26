@@ -295,7 +295,7 @@ impl GripEdit {
                 }
                 _ => Err(other("Requires a point or an option keyword.")),
             },
-            Input::Pick(_) | Input::Cancel => Ok(Step::Continue),
+            Input::Pick(_) | Input::EntityPoint { .. } | Input::Cancel => Ok(Step::Continue),
         }
     }
 

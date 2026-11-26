@@ -1114,3 +1114,23 @@ fn explicit_crossing_keyword_forces_crossing_regardless_of_drag_direction() {
         "explicit Crossing keyword forces crossing trim even when dragging to the right");
 }
 
+#[test]
+fn json_trim_keeps_elevation_and_interpolates_the_cut_on_sloped_lines() {
+    use cadcraft_geom::Vec3;
+
+    for (end_z, cut_z) in [(10.0, 10.0), (30.0, 15.0)] {
+        let mut s = Session::new();
+        let target = s.execute("line", &json!({ "points": [[0.0, 0.0, 10.0], [12.0, 0.0, end_z]] })).unwrap();
+        let edge = s.execute("line", &json!({ "points": [[3.0, -5.0, 20.0], [3.0, 5.0, 20.0]] })).unwrap();
+        let out = s.execute("trim", &json!({ "handle": target["handles"][0], "edges": [edge["handles"][0]], "pick": [1.0, 0.0] })).unwrap();
+        let doc = s.doc().unwrap();
+        let handle = |value: &serde_json::Value| cadcraft_engine::doc::Handle::parse_hex(value.as_str().unwrap()).unwrap();
+        assert!(doc.entity(handle(&target["handles"][0])).is_none());
+        assert!(doc.entity(handle(&edge["handles"][0])).is_some());
+        let EntityKind::Line(line) = &doc.entity(handle(&out["handles"][0])).unwrap().kind else {
+            panic!("expected a line fragment");
+        };
+        assert_eq!(line.a, Vec3::new(3.0, 0.0, cut_z));
+        assert_eq!(line.b, Vec3::new(12.0, 0.0, end_z));
+    }
+}
