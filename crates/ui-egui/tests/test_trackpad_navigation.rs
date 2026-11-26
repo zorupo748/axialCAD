@@ -761,8 +761,9 @@ fn test_ctrl_trackpad_zoom_and_arbitration() {
     let mut ctrl_mods = Modifiers::default();
     ctrl_mods.ctrl = true;
 
-    // 1. Ctrl + two-finger scroll: zooms in/out anchored at cursor
-    // Delta Y positive: zoom in (height decreases)
+    // 1. Synthetic Ctrl + scroll deltas exercise zoom direction and cursor anchoring.
+    // This does not establish the sign produced by a physical trackpad gesture.
+    // Positive synthetic Y delta: zoom out (height increases).
     run_frame(
         &mut app,
         &ctx,
@@ -778,12 +779,12 @@ fn test_ctrl_trackpad_zoom_and_arbitration() {
     );
     let cam1 = app.session.camera();
     let h1 = app.session.state().expect("state ok").view().height;
-    assert!(h1 < initial_h, "Ctrl + scroll upwards must zoom in (decrease height)");
+    assert!(h1 > initial_h, "positive synthetic Y delta must zoom out (increase height)");
     assert_eq!(cam1.azimuth, initial_cam.azimuth, "Ctrl + scroll must NOT orbit azimuth");
     assert_eq!(cam1.elevation, initial_cam.elevation, "Ctrl + scroll must NOT orbit elevation");
     assert_eq!(cam1.target, initial_cam.target, "Zoom anchored at screen center must keep target center");
 
-    // Delta Y negative: zoom out (height increases)
+    // Negative synthetic Y delta: zoom in (height decreases).
     run_frame(
         &mut app,
         &ctx,
@@ -798,7 +799,7 @@ fn test_ctrl_trackpad_zoom_and_arbitration() {
         ],
     );
     let h2 = app.session.state().expect("state ok").view().height;
-    assert!(h2 > h1, "Ctrl + scroll downwards must zoom out (increase height)");
+    assert!(h2 < h1, "negative synthetic Y delta must zoom in (decrease height)");
 
     // 2. Releasing Ctrl mid-gesture seamlessly drops back to panning without jumps
     let cam_before_release = app.session.camera();

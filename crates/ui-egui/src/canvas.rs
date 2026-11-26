@@ -3457,7 +3457,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 // Releasing Ctrl mid-gesture seamlessly drops back to panning without jumps.
                 app.canvas.orbit_gesture_active = false;
                 if let Some(hp) = hover_pos {
-                    let factor = (f64::from(trackpad_delta.y) * 0.005).exp();
+                    let factor = (-f64::from(trackpad_delta.y) * 0.005).exp();
                     let c = rect.center();
                     let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
                     let _ = app.session.zoom_about_camera(factor, q);
