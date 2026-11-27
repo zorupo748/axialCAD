@@ -40,6 +40,9 @@ pub struct Prompt {
     /// 3D base point when available (e.g. continuing a 3D line from an elevated vertex).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base3: Option<Vec3>,
+    /// Fixed plane for a point prompt whose geometry is confined to that plane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point_plane: Option<cadcraft_geom::UcsFrame>,
     /// The command resolves deferred tangent/perpendicular snaps ([`Input::Deferred`]) at this
     /// prompt (a point with no base yet, e.g. the first point of a line). Elsewhere a deferred
     /// pick arrives as the plain point it was picked at.

@@ -952,6 +952,7 @@ struct CircleM {
     mode: u8, // 0 center-radius, 1 = 3P, 2 = 2P, 3 = TTR
     pts: Vec<Vec3>,
     diameter: bool,
+    radius_plane: Option<cadcraft_geom::UcsFrame>,
     /// The `Ttr` option hands over to the tangent-circle machine.
     delegate: Option<Box<dyn Interactive>>,
 }
@@ -959,10 +960,14 @@ struct CircleM {
 impl CircleM {
     fn process_point(&mut self, s: &mut Session, p3: Vec3) -> Result<Step> {
         if self.pts.is_empty() {
+            if self.mode == 0 {
+                self.radius_plane = Some(s.ucs().with_origin(p3));
+            }
             self.pts.push(p3);
             return Ok(Step::Continue);
         }
-        if self.mode == 0 && self.pts.first().is_some_and(|c| c.dist(p3) < 1e-12) {
+        let p3 = self.radius_plane.map_or(p3, |plane| plane.to_world2(plane.to_local(p3).xy()));
+        if !p3.is_finite() || (self.mode == 0 && self.pts.first().is_some_and(|c| c.dist(p3) < 1e-12)) {
             return Err(crate::EngineError::Other("Value must be positive and nonzero.".into()));
         }
         self.pts.push(p3);
@@ -983,7 +988,7 @@ impl CircleM {
             _ => None,
         };
         if let Some((center, r)) = done {
-            finish_circle(s, center, r)?;
+            finish_circle(s, center, r, self.radius_plane)?;
             return Ok(Step::Done);
         }
         Ok(Step::Continue)
@@ -1000,14 +1005,19 @@ impl Interactive for CircleM {
         }
         let n = self.pts.len();
         let last_r = s.doc().map(|d| d.header.f64("CIRCLERAD", 0.0)).unwrap_or(0.0);
+        let radius_prompt = |mut prompt: Prompt| {
+            prompt.point_plane = self.radius_plane;
+            prompt
+        };
         match (self.mode, n) {
             (0, 0) => Prompt::new("Specify center point for circle", Accept::POINT).kw(&["3P", "2P", "Ttr (tan tan radius)"]),
             (0, _) if self.diameter => {
-                Prompt::new("Specify diameter of circle", Accept::POINT_OR_NUMBER).base_opt(self.pts.first().map(|p| p.xy())).distance()
+                radius_prompt(Prompt::new("Specify diameter of circle", Accept::POINT_OR_NUMBER).base3_opt(self.pts.first().copied()).distance())
             }
             (0, _) => {
-                let p =
-                    Prompt::new("Specify radius of circle", Accept::POINT_OR_NUMBER).kw(&["Diameter"]).base_opt(self.pts.first().map(|p| p.xy())).distance();
+                let p = radius_prompt(
+                    Prompt::new("Specify radius of circle", Accept::POINT_OR_NUMBER).kw(&["Diameter"]).base3_opt(self.pts.first().copied()).distance(),
+                );
                 if last_r > 0.0 { p.default(format!("{last_r:.4}")) } else { p }
             }
             (1, k) => Prompt::new(
@@ -1054,13 +1064,13 @@ impl Interactive for CircleM {
                 if r <= 0.0 {
                     return Err(crate::EngineError::Other("Value must be positive and nonzero.".into()));
                 }
-                finish_circle(s, self.pts[0], r)?;
+                finish_circle(s, self.pts[0], r, self.radius_plane)?;
                 Ok(Step::Done)
             }
             Input::Enter if self.mode == 0 && self.pts.len() == 1 => {
                 let r = s.doc()?.header.f64("CIRCLERAD", 0.0);
                 if r > 0.0 {
-                    finish_circle(s, self.pts[0], r)?;
+                    finish_circle(s, self.pts[0], r, self.radius_plane)?;
                     Ok(Step::Done)
                 } else {
                     Ok(Step::Continue)
@@ -1076,7 +1086,7 @@ impl Interactive for CircleM {
         if let Some(d) = &self.delegate {
             return d.preview(s, c);
         }
-        let cur_3d = s.cursor3;
+        let cur_3d = self.radius_plane.map_or(s.cursor3, |plane| plane.to_world2(plane.to_local(s.cursor3).xy()));
         match (self.mode, self.pts.as_slice()) {
             (0, [center]) => {
                 vec![EntityKind::Line(cadcraft_doc::Line { a: *center, b: cur_3d })]
@@ -1090,13 +1100,13 @@ impl Interactive for CircleM {
         }
     }
     fn preview_objects(&self, s: &Session, _c: Vec2) -> Vec<cadcraft_doc::Entity> {
-        let cur_3d = s.cursor3;
+        let cur_3d = self.radius_plane.map_or(s.cursor3, |plane| plane.to_world2(plane.to_local(s.cursor3).xy()));
         match (self.mode, self.pts.as_slice()) {
             (0, [center]) => {
                 let r = if self.diameter { center.dist(cur_3d) / 2.0 } else { center.dist(cur_3d) };
                 let mut common = s.current_common();
-                if !s.ucs().is_world() {
-                    common.extrusion = s.ucs().z_axis;
+                if let Some(plane) = self.radius_plane {
+                    common.extrusion = plane.z_axis;
                 }
                 vec![cadcraft_doc::Entity {
                     handle: cadcraft_doc::Handle(0),
@@ -1109,8 +1119,8 @@ impl Interactive for CircleM {
     }
 }
 
-fn finish_circle(s: &mut Session, center_wcs: Vec3, radius: f64) -> Result<()> {
-    let ucs = s.ucs();
+fn finish_circle(s: &mut Session, center_wcs: Vec3, radius: f64, plane: Option<cadcraft_geom::UcsFrame>) -> Result<()> {
+    let ucs = plane.unwrap_or_else(|| s.ucs());
     s.add_entity_with_extrusion(
         cadcraft_doc::EntityKind::Circle(cadcraft_doc::Circle {
             center: center_wcs,

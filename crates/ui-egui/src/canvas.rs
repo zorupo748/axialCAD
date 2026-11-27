@@ -2853,6 +2853,10 @@ fn resolve_effective_point(
     dyn_frame: Option<crate::dyninput::Frame>,
 ) -> Option<(Vec2, Vec3)> {
     let result = resolve_point_before_apparent_snap(app, hp, xf, ctx, prompt_base, dyn_frame)?;
+    if let Some(plane) = app.session.current_prompt().and_then(|prompt| prompt.point_plane) {
+        let point = plane.to_world2(plane.to_local(result.1).xy());
+        return point.is_finite().then_some((result.0, point));
+    }
     let over = app.session.snap_override();
     let osmode = over.unwrap_or(app.session.settings.osmode);
     if osmode & snap::mode::APP == 0
@@ -2930,7 +2934,11 @@ fn resolve_point_before_apparent_snap(
         && is_near_plan_or_oblique;
     let plane = if is_auto_oblique_line { cadcraft_geom::DrawingPlane::XY } else { app.session.drawing_plane() };
     let continuation_offset = if is_auto_oblique_line { 0.0 } else { app.session.drawing_plane_offset_for(prompt_base3) };
-    let (plane_point, raw2) = if !is_world_ucs {
+    let fixed_plane = app.session.current_prompt().and_then(|prompt| prompt.point_plane);
+    let (plane_point, raw2) = if let Some(fixed) = fixed_plane {
+        let point = cam.unproject_to_ucs(q, &fixed);
+        (point, point.map_or(raw_world, |point| ucs.to_local(point).xy()))
+    } else if !is_world_ucs {
         let ucs_pt3 = cam.unproject_to_ucs(q, &ucs);
         let r2 = ucs_pt3.map_or(raw_world, |p| ucs.to_local(p).xy());
         (ucs_pt3, r2)
@@ -2959,12 +2967,12 @@ fn resolve_point_before_apparent_snap(
         && e.first_locked().is_some()
     {
         let dyn_continuation_offset = app.session.drawing_plane_offset_for(prompt_base3);
-        let dyn_plane_point = xf.to_world3_with_offset(hp, plane, dyn_continuation_offset);
+        let dyn_plane_point = if fixed_plane.is_some() { plane_point } else { xf.to_world3_with_offset(hp, plane, dyn_continuation_offset) };
         if line_prompt && dyn_plane_point.is_none() && !(app.cmd.second_locked() && e.second_value().is_some()) {
             app.canvas.parallel_plane_warning = true;
             return None;
         }
-        let dyn_raw2 = if line_prompt { dyn_plane_point.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
+        let dyn_raw2 = if fixed_plane.is_some() { raw2 } else if line_prompt { dyn_plane_point.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
         let eff = crate::dyninput::constrain(&e, &f, dyn_raw2, app.cmd.second_locked());
         app.canvas.snap = None;
         app.canvas.track = None;
@@ -2976,6 +2984,8 @@ fn resolve_point_before_apparent_snap(
             let base = if e.prefix == "@" || f.relative() { prompt_base3.unwrap_or(Vec3::ZERO) } else { Vec3::ZERO };
             let p_unrel = Vec3::new(eff.x, eff.y, z);
             base + p_unrel
+        } else if fixed_plane.is_some() {
+            ucs.to_world2(eff)
         } else {
             plane.embed(eff, dyn_continuation_offset)
         };
@@ -3049,9 +3059,9 @@ fn resolve_point_before_apparent_snap(
         app.canvas.parallel_plane_warning = false;
         let eff3 = if let Some(hit) = app.canvas.snap
             && let Some(p3) = hit.point3
-            && line_prompt
+            && (line_prompt || fixed_plane.is_some())
         {
-            return Some((plane.coordinates(p3), p3));
+            return Some((if line_prompt { plane.coordinates(p3) } else { ucs.to_local(p3).xy() }, p3));
         } else {
             prompt_point(eff)
         };
@@ -5924,6 +5934,34 @@ mod hatch_pick_tests {
             app.session.cmdline("line").unwrap();
             app.session.input(Input::Point3(base)).unwrap();
             app
+        }
+
+        #[test]
+        fn circle_radius_preview_and_click_use_the_elevated_center_plane_in_auto() {
+            let mut app = CadApp::new(Session::new(), Services::default());
+            app.session.execute("view.swiso", &json!({})).unwrap();
+            app.session.set_drawing_plane_offset_automatic();
+            app.session.settings.osmode = 0;
+            app.session.settings.orthomode = false;
+            app.session.settings.polarmode = false;
+            app.session.start("circle").unwrap();
+            let center = Vec3::new(2.0, 3.0, 30.0);
+            app.session.input(Input::Point3(center)).unwrap();
+            assert_eq!(app.session.current_prompt().unwrap().base3, Some(center));
+            let at = test_xf(&app).to_screen3(center + Vec3::X * 2.0);
+            let cursor = resolve_at_screen(&mut app, at).unwrap();
+            assert!(cursor.1.near(center + Vec3::X * 2.0, 1e-5));
+            super::super::store_cursor_resolution(&mut app, Some(cursor));
+            let preview = app.session.preview(cursor.0);
+            let circle = preview.iter().find_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Circle(c) => Some(c.clone()),
+                _ => None,
+            }).unwrap();
+            assert!((circle.radius - 2.0).abs() < 1e-5);
+            super::super::submit_canvas_point(&mut app, cursor.1).unwrap();
+            assert!(app.session.doc().unwrap().model.iter().any(|e| {
+                matches!(&e.kind, cadcraft_doc::EntityKind::Circle(c) if *c == circle)
+            }));
         }
 
         #[test]
