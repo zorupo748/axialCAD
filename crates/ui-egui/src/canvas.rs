@@ -6118,6 +6118,73 @@ mod hatch_pick_tests {
         }
 
         #[test]
+        fn base3_modify_commands_share_the_resolved_destination_with_the_preview() {
+            use cadcraft_doc::{EntityKind, Line};
+            use cadcraft_geom::Mat3;
+
+            let to = Vec2::new(0.0, 3.0);
+            for (command, transform) in [
+                ("move", Mat3::translate(to)),
+                ("copy", Mat3::translate(to)),
+                ("stretch", Mat3::translate(to)),
+                ("rotate", Mat3::rotate_about(Vec2::ZERO, std::f64::consts::FRAC_PI_2)),
+                ("scale", Mat3::scale_about(Vec2::ZERO, 3.0)),
+                ("mirror", Mat3::mirror(Vec2::ZERO, to)),
+            ] {
+                let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+                app.session.set_drawing_plane_offset_automatic();
+                let base = Vec3::new(0.0, 0.0, 30.0);
+                let end = Vec3::new(3.0, 2.0, 30.0);
+                let mut camera = app.session.camera();
+                camera.target = base;
+                app.session.set_camera(camera);
+                let target = app.session.add_entity(EntityKind::Line(Line { a: base, b: end })).unwrap();
+                app.session.start(command).unwrap();
+                app.session.input(Input::Pick(vec![target])).unwrap();
+                app.session.input(Input::Enter).unwrap();
+                app.session.input(Input::Point3(base)).unwrap();
+                assert_eq!(app.session.current_prompt().unwrap().base3, Some(base), "{command}");
+
+                let resolved = resolve_at(&mut app, to.to3(30.0)).unwrap();
+                super::super::store_cursor_resolution(&mut app, Some(resolved));
+                let preview = app.session.preview(resolved.0);
+                let EntityKind::Line(line) = &preview[0].kind else { panic!("expected line for {command}") };
+                assert!(line.a.near(transform.apply(base.xy()).to3(30.0), 1e-5), "{command}: {line:?}");
+                assert!(line.b.near(transform.apply(end.xy()).to3(30.0), 1e-5), "{command}: {line:?}");
+                let EntityKind::Line(guide) = &preview.last().unwrap().kind else { panic!("expected guide") };
+                assert_eq!((guide.a, guide.b), (base, resolved.1));
+                assert!(app.session.drag(resolved.0).is_none(), "elevated lines use the WCS preview");
+
+                super::super::submit_canvas_point(&mut app, resolved.1).unwrap();
+                if command == "mirror" {
+                    app.session.input(Input::Keyword("Yes".into())).unwrap();
+                }
+                let found = app.session.doc().unwrap().model.iter().any(|e| e.kind == preview[0].kind);
+                assert!(found, "{command}: click must commit the preview");
+            }
+        }
+
+        #[test]
+        fn base3_modify_typed_absolute_and_relative_coordinates_keep_planar_semantics() {
+            use cadcraft_doc::{EntityKind, Line};
+
+            for (base, to) in [("0,0,30", "2,4,0"), ("0,0,30", "@2,4,9"), ("0,0", "@2,4")] {
+                let mut s = Session::new();
+                let a = Vec3::new(0.0, 0.0, 30.0);
+                let b = Vec3::new(4.0, 2.0, 30.0);
+                let target = s.add_entity(EntityKind::Line(Line { a, b })).unwrap();
+                s.start("move").unwrap();
+                s.input(Input::Pick(vec![target])).unwrap();
+                s.input(Input::Enter).unwrap();
+                s.cmdline(base).unwrap();
+                s.cmdline(to).unwrap();
+                let EntityKind::Line(stored) = &s.doc().unwrap().entity(target).unwrap().kind else { panic!("expected line") };
+                let delta = Vec3::new(2.0, 4.0, 0.0);
+                assert_eq!((stored.a, stored.b), (a + delta, b + delta));
+            }
+        }
+
+        #[test]
         fn circle_radius_preview_and_click_use_the_elevated_center_plane_in_auto() {
             let mut app = CadApp::new(Session::new(), Services::default());
             app.session.execute("view.swiso", &json!({})).unwrap();

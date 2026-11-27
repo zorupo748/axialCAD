@@ -364,7 +364,7 @@ struct StretchM {
     mode: Option<SelectMode>,
     /// First corner of the window being drawn.
     corner: Option<Vec2>,
-    base: Option<Vec2>,
+    base: Option<Vec3>,
 }
 
 impl StretchM {
@@ -543,16 +543,16 @@ impl Interactive for StretchM {
         match (self.phase, self.corner) {
             (StretchPhase::Select, Some(c)) => Prompt::new("Specify opposite corner", Accept::POINT).base(c),
             (StretchPhase::Select, None) => Prompt::new(if self.removing { "Remove objects" } else { "Select objects" }, Accept::POINT),
-            (StretchPhase::Base, _) => Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]).default("Displacement"),
+            (StretchPhase::Base, _) => Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]).default("Displacement").spatial_point(),
             (StretchPhase::Displacement, _) => Prompt::new("Specify displacement", Accept::POINT).default("0,0"),
-            (StretchPhase::Second, _) => Prompt::new("Specify second point or <use first point as displacement>", Accept::POINT).base_opt(self.base),
+            (StretchPhase::Second, _) => Prompt::new("Specify second point or <use first point as displacement>", Accept::POINT).base3_opt(self.base).spatial_point(),
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
         match (self.phase, i) {
             (StretchPhase::Select, i) => self.select(s, i),
-            (StretchPhase::Base, Input::Point(p)) => {
-                self.base = Some(p);
+            (StretchPhase::Base, i @ (Input::Point(_) | Input::Point3(_))) => {
+                self.base = i.point3();
                 self.phase = StretchPhase::Second;
                 Ok(Step::Continue)
             }
@@ -566,8 +566,9 @@ impl Interactive for StretchM {
             }
             (StretchPhase::Displacement, Input::Point(p)) => self.apply(s, p),
             (StretchPhase::Displacement, Input::Enter) => Ok(Step::Done),
-            (StretchPhase::Second, Input::Point(p)) => self.apply(s, p - self.base.unwrap_or(p)),
-            (StretchPhase::Second, Input::Enter) => self.apply(s, self.base.unwrap_or(Vec2::ZERO)),
+            (StretchPhase::Second, Input::Point(p)) => self.apply(s, p - self.base.map_or(p, Vec3::xy)),
+            (StretchPhase::Second, Input::Point3(p)) => self.apply(s, p.xy() - self.base.map_or(p.xy(), Vec3::xy)),
+            (StretchPhase::Second, Input::Enter) => self.apply(s, self.base.map_or(Vec2::ZERO, Vec3::xy)),
             _ => Ok(Step::Continue),
         }
     }
@@ -593,7 +594,8 @@ impl Interactive for StretchM {
             (StretchPhase::Select, Some(a), _) => rect(a),
             (StretchPhase::Second, _, Some(base)) => {
                 let Ok(doc) = s.doc() else { return Vec::new() };
-                let m = Mat3::translate(c - base);
+                let delta = c - base.xy();
+                let m = Mat3::translate(delta);
                 let mut out: Vec<EntityKind> = self
                     .objs
                     .iter()
@@ -604,12 +606,12 @@ impl Interactive for StretchM {
                         if self.whole.contains(&e.handle) {
                             e.kind.transform(&m);
                         } else {
-                            stretch_entity(&mut e, &self.windows, c - base);
+                            stretch_entity(&mut e, &self.windows, delta);
                         }
                         e.kind
                     })
                     .collect();
-                out.push(line(base, c));
+                out.push(line3(base, s.preview_point3(c, base)));
                 out
             }
             _ => Vec::new(),
@@ -2198,7 +2200,7 @@ struct SelectThen {
     op: Op,
     sel: SelectPhase,
     objs: Vec<Handle>,
-    pts: Vec<Vec2>,
+    pts: Vec<Vec3>,
     reference: bool,
     /// ROTATE Reference: the reference angle (radians), once known. Its first point, and the
     /// first of the two new-angle points, are kept in `ref_from`.
@@ -2206,7 +2208,7 @@ struct SelectThen {
     /// ROTATE Reference: the new angle is given by two points (the `Points` option).
     ref_points: bool,
     /// SCALE Reference: first point of a reference length given by two points.
-    ref_from: Option<Vec2>,
+    ref_from: Option<Vec3>,
     /// SCALE Reference: the reference length, once known.
     ref_len: Option<f64>,
     copy_mode: bool,
@@ -2303,9 +2305,13 @@ impl SelectThen {
     /// SCALE Reference: reference length (typed, or two points), then new length (typed, or a
     /// point measured from the base point). The scale factor is new length / reference length.
     fn scale_reference(&mut self, s: &mut Session, i: Input) -> Result<Step> {
-        let Some(base) = self.pts.first().copied() else { return Ok(Step::Done) };
+        let Some(base) = self.pts.first().copied().map(Vec3::xy) else { return Ok(Step::Done) };
+        let i = match i {
+            Input::Point(p) => Input::Point3(p.to3(0.0)),
+            other => other,
+        };
         match (self.ref_len, self.ref_from, i) {
-            (None, None, Input::Point(p)) => {
+            (None, None, Input::Point3(p)) => {
                 self.ref_from = Some(p);
                 Ok(Step::Continue)
             }
@@ -2317,11 +2323,11 @@ impl SelectThen {
                 self.ref_len = Some(1.0);
                 Ok(Step::Continue)
             }
-            (None, Some(a), Input::Point(p)) => {
-                self.ref_len = Some(require_length(Some(a.dist(p)))?);
+            (None, Some(a), Input::Point3(p)) => {
+                self.ref_len = Some(require_length(Some(a.xy().dist(p.xy())))?);
                 Ok(Step::Continue)
             }
-            (Some(r), _, Input::Point(p)) => self.scale_by(s, base, base.dist(p) / r),
+            (Some(r), _, Input::Point3(p)) => self.scale_by(s, base, base.dist(p.xy()) / r),
             (Some(r), _, Input::Text(t)) => {
                 let n = require_length(number(&t))?;
                 self.scale_by(s, base, n / r)
@@ -2335,7 +2341,11 @@ impl SelectThen {
     /// point measured from the base point, or two points after `Points`). The objects turn by the
     /// new angle minus the reference angle.
     fn rotate_reference(&mut self, s: &mut Session, i: Input) -> Result<Step> {
-        let Some(base) = self.pts.first().copied() else { return Ok(Step::Done) };
+        let Some(base) = self.pts.first().copied().map(Vec3::xy) else { return Ok(Step::Done) };
+        let i = match i {
+            Input::Point(p) => Input::Point3(p.to3(0.0)),
+            other => other,
+        };
         let au = s.angle_settings();
         let angle = |t: &str| au.direction(t).filter(|a| a.is_finite()).ok_or_else(|| EngineError::Other("Requires an angle or point.".into()));
         let two_points = |a: Vec2, p: Vec2| {
@@ -2343,11 +2353,11 @@ impl SelectThen {
         };
         let Some(r) = self.ref_angle else {
             match (self.ref_from, i) {
-                (None, Input::Point(p)) => self.ref_from = Some(p),
+                (None, Input::Point3(p)) => self.ref_from = Some(p),
                 (None, Input::Text(t)) => self.ref_angle = Some(angle(&t)?),
                 (None, Input::Enter) => self.ref_angle = Some(0.0),
-                (Some(a), Input::Point(p)) => {
-                    self.ref_angle = Some(two_points(a, p)?);
+                (Some(a), Input::Point3(p)) => {
+                    self.ref_angle = Some(two_points(a.xy(), p.xy())?);
                     self.ref_from = None;
                 }
                 _ => {}
@@ -2359,14 +2369,14 @@ impl SelectThen {
                 self.ref_points = true;
                 return Ok(Step::Continue);
             }
-            (false, _, Input::Point(p)) => base.angle_to(p),
+            (false, _, Input::Point3(p)) => base.angle_to(p.xy()),
             (false, _, Input::Text(t)) => angle(&t)?,
             (false, _, Input::Enter) => 0.0,
-            (true, None, Input::Point(p)) => {
+            (true, None, Input::Point3(p)) => {
                 self.ref_from = Some(p);
                 return Ok(Step::Continue);
             }
-            (true, Some(a), Input::Point(p)) => two_points(a, p)?,
+            (true, Some(a), Input::Point3(p)) => two_points(a.xy(), p.xy())?,
             _ => return Ok(Step::Continue),
         };
         transform_entities(s, &self.objs, &Mat3::rotate_about(base, new - r), self.copy_mode)?;
@@ -2377,12 +2387,12 @@ impl SelectThen {
     /// The prompt while ROTATE Reference collects its angles.
     fn rotate_reference_prompt(&self) -> Prompt {
         match (self.ref_angle, self.ref_points, self.ref_from) {
-            (None, _, None) => Prompt::new("Specify the reference angle", Accept::POINT_OR_NUMBER).default("0"),
-            (None, _, Some(p)) | (Some(_), true, Some(p)) => Prompt::new("Specify second point", Accept::POINT).base(p),
+            (None, _, None) => Prompt::new("Specify the reference angle", Accept::POINT_OR_NUMBER).default("0").spatial_point(),
+            (None, _, Some(p)) | (Some(_), true, Some(p)) => Prompt::new("Specify second point", Accept::POINT).base3(p).spatial_point(),
             (Some(_), false, _) => {
-                Prompt::new("Specify the new angle", Accept::POINT_OR_NUMBER).kw(&["Points"]).default("0").base_opt(self.pts.first().copied())
+                Prompt::new("Specify the new angle", Accept::POINT_OR_NUMBER).kw(&["Points"]).default("0").base3_opt(self.pts.first().copied()).spatial_point()
             }
-            (Some(_), true, None) => Prompt::new("Specify first point", Accept::POINT),
+            (Some(_), true, None) => Prompt::new("Specify first point", Accept::POINT).spatial_point(),
         }
     }
 
@@ -2392,7 +2402,7 @@ impl SelectThen {
         let (Some(base), Ok(d)) = (self.pts.first().copied(), s.doc()) else { return Vec::new() };
         match (self.ref_angle, self.ref_points, self.ref_from) {
             (Some(r), false, _) => {
-                let m = Mat3::rotate_about(base, base.angle_to(c) - r);
+                let m = Mat3::rotate_about(base.xy(), base.xy().angle_to(c) - r);
                 let mut out: Vec<EntityKind> = self
                     .objs
                     .iter()
@@ -2404,10 +2414,10 @@ impl SelectThen {
                         k
                     })
                     .collect();
-                out.push(line(base, c));
+                out.push(line3(base, s.preview_point3(c, base)));
                 out
             }
-            (_, _, Some(a)) => vec![line(a, c)],
+            (_, _, Some(a)) => vec![line3(a, s.preview_point3(c, a))],
             _ => Vec::new(),
         }
     }
@@ -2489,19 +2499,19 @@ impl Interactive for SelectThen {
         let base = self.pts.first().copied();
         if self.op == Op::Scale && self.reference {
             return match (self.ref_len, self.ref_from) {
-                (Some(_), _) => Prompt::new("Specify new length", Accept::POINT_OR_NUMBER).base_opt(base),
-                (None, Some(p)) => Prompt::new("Specify second point", Accept::POINT).base(p),
-                (None, None) => Prompt::new("Specify reference length", Accept::POINT_OR_NUMBER).default("1"),
+                (Some(_), _) => Prompt::new("Specify new length", Accept::POINT_OR_NUMBER).base3_opt(base).spatial_point(),
+                (None, Some(p)) => Prompt::new("Specify second point", Accept::POINT).base3(p).spatial_point(),
+                (None, None) => Prompt::new("Specify reference length", Accept::POINT_OR_NUMBER).default("1").spatial_point(),
             };
         }
         if self.op == Op::Rotate && self.reference {
             return self.rotate_reference_prompt();
         }
         match (self.op, k) {
-            (Op::Move | Op::Copy, 0) => Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]),
-            (Op::Move, _) => Prompt::new("Specify second point or <use first point as displacement>", Accept::POINT).base_opt(base),
-            (Op::Copy, _) => Prompt::new("Specify second point", Accept::POINT).kw(&["Array", "Exit", "Undo"]).base_opt(base),
-            (Op::Rotate | Op::Scale, 0) => Prompt::new("Specify base point", Accept::POINT),
+            (Op::Move | Op::Copy, 0) => Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]).spatial_point(),
+            (Op::Move, _) => Prompt::new("Specify second point or <use first point as displacement>", Accept::POINT).base3_opt(base).spatial_point(),
+            (Op::Copy, _) => Prompt::new("Specify second point", Accept::POINT).kw(&["Array", "Exit", "Undo"]).base3_opt(base).spatial_point(),
+            (Op::Rotate | Op::Scale, 0) => Prompt::new("Specify base point", Accept::POINT).spatial_point(),
             // ROTATE and SCALE offer the angle/factor used last time.
             (Op::Rotate, _) => {
                 let (au, ap) = s.doc().map(|d| (d.header.i64("AUNITS", 0), d.header.i64("AUPREC", 0))).unwrap_or((0, 0));
@@ -2510,14 +2520,14 @@ impl Interactive for SelectThen {
                 Prompt::new("Specify rotation angle", Accept::POINT_OR_NUMBER)
                     .kw(&["Copy", "Reference"])
                     .default(crate::units::format_angle(a, au, ap))
-                    .base_opt(base)
+                    .base3_opt(base).spatial_point()
             }
             (Op::Scale, _) => Prompt::new("Specify scale factor", Accept::POINT_OR_NUMBER)
                 .kw(&["Copy", "Reference"])
                 .default(format!("{:.4}", s.last_used.scale_factor))
-                .base_opt(base),
-            (Op::Mirror, 0) => Prompt::new("Specify first point of mirror line", Accept::POINT),
-            (Op::Mirror, _) => Prompt::new("Specify second point of mirror line", Accept::POINT).base_opt(base),
+                .base3_opt(base).spatial_point(),
+            (Op::Mirror, 0) => Prompt::new("Specify first point of mirror line", Accept::POINT).spatial_point(),
+            (Op::Mirror, _) => Prompt::new("Specify second point of mirror line", Accept::POINT).base3_opt(base).spatial_point(),
             _ => Prompt::new("", Accept::POINT),
         }
     }
@@ -2537,8 +2547,9 @@ impl Interactive for SelectThen {
         }
         if self.ask_erase {
             let yes = matches!(&i, Input::Keyword(k) if k == "Yes") || matches!(&i, Input::Text(t) if t.trim().to_ascii_lowercase().starts_with('y'));
-            let (a, b) = (self.pts[0], self.pts[1]);
-            transform_entities(s, &self.objs, &Mat3::mirror(a, b), !yes)?;
+            let Some(&a) = self.pts.first() else { return Ok(Step::Done) };
+            let Some(&b) = self.pts.get(1) else { return Ok(Step::Done) };
+            transform_entities(s, &self.objs, &Mat3::mirror(a.xy(), b.xy()), !yes)?;
             s.set_selection(Vec::new());
             return Ok(Step::Done);
         }
@@ -2549,6 +2560,11 @@ impl Interactive for SelectThen {
         if self.op == Op::Rotate && self.reference {
             return self.rotate_reference(s, i);
         }
+        let i = match i {
+            Input::Point(p) => Input::Point3(p.to3(0.0)),
+            other => other,
+        };
+        let base = self.pts.first().copied().unwrap_or(Vec3::ZERO).xy();
         match (self.op, k, i) {
             (_, _, Input::Keyword(kw)) if kw == "Copy" => {
                 self.copy_mode = true;
@@ -2563,24 +2579,24 @@ impl Interactive for SelectThen {
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
-            (_, 0, Input::Point(p)) => {
+            (_, 0, Input::Point3(p)) => {
                 self.pts.push(p);
                 Ok(Step::Continue)
             }
-            (Op::Move, 1, Input::Point(p)) => {
-                let d = p - self.pts[0];
+            (Op::Move, 1, Input::Point3(p)) => {
+                let d = p.xy() - base;
                 transform_entities(s, &self.objs, &Mat3::translate(d), false)?;
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
             (Op::Move, 1, Input::Enter) => {
-                let d = self.pts[0];
+                let d = base;
                 transform_entities(s, &self.objs, &Mat3::translate(d), false)?;
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
-            (Op::Copy, _, Input::Point(p)) => {
-                let d = p - self.pts[0];
+            (Op::Copy, _, Input::Point3(p)) => {
+                let d = p.xy() - base;
                 transform_entities(s, &self.objs, &Mat3::translate(d), true)?;
                 Ok(Step::Continue)
             }
@@ -2588,9 +2604,9 @@ impl Interactive for SelectThen {
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
-            (Op::Rotate, 1, inp @ (Input::Point(_) | Input::Text(_) | Input::Enter)) => {
+            (Op::Rotate, 1, inp @ (Input::Point3(_) | Input::Text(_) | Input::Enter)) => {
                 let a = match inp {
-                    Input::Point(p) => self.pts[0].angle_to(p),
+                    Input::Point3(p) => base.angle_to(p.xy()),
                     Input::Text(t) => s
                         .angle_settings()
                         .rotation(&t)
@@ -2599,13 +2615,13 @@ impl Interactive for SelectThen {
                     _ => s.last_used.rotate_angle,
                 };
                 s.last_used.rotate_angle = a;
-                transform_entities(s, &self.objs, &Mat3::rotate_about(self.pts[0], a), self.copy_mode)?;
+                transform_entities(s, &self.objs, &Mat3::rotate_about(base, a), self.copy_mode)?;
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
-            (Op::Scale, 1, inp @ (Input::Point(_) | Input::Text(_) | Input::Enter)) => {
+            (Op::Scale, 1, inp @ (Input::Point3(_) | Input::Text(_) | Input::Enter)) => {
                 let f = match inp {
-                    Input::Point(p) => self.pts[0].dist(p),
+                    Input::Point3(p) => base.dist(p.xy()),
                     Input::Text(t) => {
                         number(&t).filter(|f| f.is_finite() && *f > 0.0).ok_or_else(|| EngineError::Other("Requires a positive number.".into()))?
                     }
@@ -2613,13 +2629,13 @@ impl Interactive for SelectThen {
                 };
                 if f > 1e-12 && f.is_finite() {
                     s.last_used.scale_factor = f;
-                    transform_entities(s, &self.objs, &Mat3::scale_about(self.pts[0], f), self.copy_mode)?;
+                    transform_entities(s, &self.objs, &Mat3::scale_about(base, f), self.copy_mode)?;
                 }
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
-            (Op::Mirror, 1, Input::Point(p)) => {
-                if p.near(self.pts[0], 1e-12) {
+            (Op::Mirror, 1, Input::Point3(p)) => {
+                if p.xy().near(base, 1e-12) {
                     return Err(EngineError::Other("Mirror line points must differ.".into()));
                 }
                 self.pts.push(p);
@@ -2637,7 +2653,8 @@ impl Interactive for SelectThen {
         if !self.sel.done {
             return Vec::new();
         }
-        let Some(base) = self.pts.first().copied() else { return Vec::new() };
+        let Some(base3) = self.pts.first().copied() else { return Vec::new() };
+        let base = base3.xy();
         let m = match self.op {
             Op::Move | Op::Copy => Mat3::translate(c - base),
             Op::Rotate => Mat3::rotate_about(base, base.angle_to(c)),
@@ -2645,7 +2662,7 @@ impl Interactive for SelectThen {
             Op::Scale => match self.ref_len.and_then(|r| positive_length(Some(base.dist(c) / r))) {
                 Some(f) => Mat3::scale_about(base, f),
                 None if self.ref_len.is_some() => return Vec::new(),
-                None => return self.ref_from.map(|a| vec![line(a, c)]).unwrap_or_default(),
+                None => return self.ref_from.map(|a| vec![line3(a, s.preview_point3(c, a))]).unwrap_or_default(),
             },
             Op::Mirror if !self.ask_erase => Mat3::mirror(base, c),
             _ => return Vec::new(),
@@ -2662,14 +2679,29 @@ impl Interactive for SelectThen {
                 k
             })
             .collect();
-        out.push(line(base, c));
+        out.push(line3(base3, s.preview_point3(c, base3)));
         out
     }
     fn drag(&self, s: &Session, c: Vec2) -> Option<crate::prompt::Drag> {
         if (self.op == Op::Rotate && self.reference) || !self.sel.done {
             return None;
         }
-        let base = self.pts.first().copied()?;
+        // Spatial objects are omitted from the XY GPU mesh. Use the WCS preview path.
+        let d = s.doc().ok()?;
+        if self.objs.iter().filter_map(|h| d.entity(*h)).any(|e| match &e.kind {
+            EntityKind::Line(l) => l.a.z != 0.0 || l.b.z != 0.0,
+            EntityKind::Circle(c) => c.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6),
+            EntityKind::Arc(a) => a.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6),
+            EntityKind::LwPolyline(p) => p.elevation.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6),
+            EntityKind::Polyline3d(p) => p.is_spatial(),
+            EntityKind::Text(t) => t.insert.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6),
+            EntityKind::Face3d(_) | EntityKind::Solid3d(_) => true,
+            _ => false,
+        }) {
+            return None;
+        }
+        let base3 = self.pts.first().copied()?;
+        let base = base3.xy();
         let matrix = match self.op {
             Op::Move | Op::Copy => Mat3::translate(c - base),
             Op::Rotate => Mat3::rotate_about(base, base.angle_to(c)),
@@ -2678,13 +2710,12 @@ impl Interactive for SelectThen {
             Op::Mirror if !self.ask_erase => Mat3::mirror(base, c),
             _ => return None,
         };
-        let mut extra = vec![line(base, c)];
+        let mut extra = vec![line3(base3, s.preview_point3(c, base3))];
         if self.op != Op::Mirror {
             return Some(crate::prompt::Drag { handles: self.objs.clone(), matrix, extra, clipboard: false });
         }
         // Mirrored text keeps reading left to right (MIRRTEXT 0), which the matrix alone can't
         // draw: those objects are transformed one by one, the rest is mirrored on the GPU.
-        let d = s.doc().ok()?;
         let mut handles = Vec::with_capacity(self.objs.len());
         let mut texts = 0;
         for h in &self.objs {
@@ -3490,7 +3521,7 @@ impl Interactive for DisplaceM {
             return Prompt::new("Specify displacement", Accept::POINT).default("0,0");
         }
         if self.at_base() {
-            return Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]).default("Displacement");
+            return Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]).default("Displacement").spatial_point();
         }
         self.inner.prompt(s)
     }
