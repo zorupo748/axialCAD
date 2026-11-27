@@ -1,7 +1,7 @@
 //! `grip.*` commands: the undoable, scriptable form of grip editing (see `crate::grips`).
 
 use cadcraft_doc::{Entity, EntityKind, Handle};
-use cadcraft_geom::{Mat3, Vec2};
+use cadcraft_geom::{Mat3, Vec2, Vec3};
 use serde_json::{Value, json};
 
 use super::curves;
@@ -121,7 +121,7 @@ fn run_grip_stretch(s: &mut Session, p: &Value) -> Result<Value> {
         }
     };
     let others = if p.get("handles").is_some() { targets(s, p)? } else { s.selection() };
-    let hs = stretch_grips(s, &hot, &others, delta, bool_or(p, "copy", false))?;
+    let hs = stretch_grips(s, &hot, &others, delta.to3(0.0), bool_or(p, "copy", false))?;
     if hs.is_empty() {
         return Err(bad(cmd, "no grip could be stretched (locked, missing, or the result would be degenerate)"));
     }
@@ -159,7 +159,7 @@ const MAX_GRIPS: usize = 1000;
 /// The objects as they'd be after moving the grips `hot` by `delta`, with the grips of `others`
 /// that sit on a hot grip's point (connected objects stay connected). Locked objects and edits
 /// that would be degenerate are left out; several hot grips of one object move together.
-pub(super) fn stretched(s: &Session, hot: &[(Handle, usize)], others: &[Handle], delta: Vec2) -> Vec<(Handle, EntityKind)> {
+pub(super) fn stretched(s: &Session, hot: &[(Handle, usize)], others: &[Handle], delta: Vec3) -> Vec<(Handle, EntityKind)> {
     let Ok(d) = s.doc() else { return Vec::new() };
     // Every grip to move, per object, with its target point.
     let mut moves: Vec<(Handle, Vec<(usize, Vec2)>)> = Vec::new();
@@ -173,14 +173,14 @@ pub(super) fn stretched(s: &Session, hot: &[(Handle, usize)], others: &[Handle],
     };
     for &(h, i) in hot.iter().take(MAX_GRIPS) {
         let Some(from) = d.entity(h).and_then(|e| e.kind.grips().get(i).copied()) else { continue };
-        add(h, i, from + delta);
+        add(h, i, from + delta.xy());
         let tol = 1e-9 * (1.0 + from.len());
         for &o in others.iter().take(MAX_GRIPS) {
             if o == h {
                 continue;
             }
             if let Some(j) = d.entity(o).and_then(|e| e.kind.grips().iter().position(|g| g.near(from, tol))) {
-                add(o, j, from + delta);
+                add(o, j, from + delta.xy());
             }
         }
     }
@@ -193,12 +193,24 @@ pub(super) fn stretched(s: &Session, hot: &[(Handle, usize)], others: &[Handle],
         let mut k = e.kind.clone();
         let mut changed = false;
         for (i, to) in mv {
-            if let Some(nk) = stretch_grip(&k, i, to) {
+            if let EntityKind::Line(line) = &mut k && delta.z != 0.0 {
+                match i {
+                    0 => line.a = to.to3(line.a.z + delta.z),
+                    1 => {
+                        let move_by = to.to3((line.a.z + line.b.z) * 0.5 + delta.z) - (line.a + line.b) * 0.5;
+                        line.a = line.a + move_by;
+                        line.b = line.b + move_by;
+                    }
+                    2 => line.b = to.to3(line.b.z + delta.z),
+                    _ => continue,
+                }
+                changed = true;
+            } else if let Some(nk) = stretch_grip(&k, i, to) {
                 k = nk;
                 changed = true;
             }
         }
-        if changed {
+        if changed && !matches!(&k, EntityKind::Line(l) if !l.a.is_finite() || !l.b.is_finite() || l.a.near(l.b, 1e-12)) {
             out.push((h, k));
         }
     }
@@ -207,7 +219,7 @@ pub(super) fn stretched(s: &Session, hot: &[(Handle, usize)], others: &[Handle],
 
 /// Stretch the grips `hot` by `delta` (see [`stretched`]). With `copy` the stretched objects are
 /// added as copies and the originals stay. Returns the edited (or new) objects.
-pub(super) fn stretch_grips(s: &mut Session, hot: &[(Handle, usize)], others: &[Handle], delta: Vec2, copy: bool) -> Result<Vec<Handle>> {
+pub(super) fn stretch_grips(s: &mut Session, hot: &[(Handle, usize)], others: &[Handle], delta: Vec3, copy: bool) -> Result<Vec<Handle>> {
     let edits = stretched(s, hot, others, delta);
     let d = s.doc_mut()?;
     let mut out = Vec::new();

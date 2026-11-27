@@ -6000,6 +6000,112 @@ mod hatch_pick_tests {
             resolve_at_screen(app, test_xf(app).to_screen3(point))
         }
 
+        #[test]
+        fn base3_grip_stretch_follows_the_pointer_and_respects_spatial_snaps() {
+            use cadcraft_doc::{EntityKind, Line};
+
+            for (manual, snapped) in [(false, false), (false, true), (true, false), (true, true)] {
+                let mut app = app_on_plane(DrawingPlane::XY, if manual { 10.0 } else { 0.0 });
+                if !manual {
+                    app.session.set_drawing_plane_offset_automatic();
+                }
+                let a = Vec3::new(-4.0, 1.0, 30.0);
+                let b = Vec3::new(4.0, 1.0, 30.0);
+                let target = app.session.add_entity(EntityKind::Line(Line { a, b })).unwrap();
+                let point = Vec3::new(-2.0, 5.0, if snapped { 20.0 } else if manual { 10.0 } else { 30.0 });
+                if snapped {
+                    app.session.settings.osmode = cadcraft_engine::snap::mode::END;
+                    app.session.add_entity(EntityKind::Line(Line { a: point, b: point + Vec3::Y * 3.0 })).unwrap();
+                }
+                app.session.set_selection(vec![target]);
+                let mut camera = app.session.camera();
+                camera.target = point;
+                app.session.set_camera(camera);
+                let xf = test_xf(&app);
+                let grip = super::super::grip_at(&app, &xf, Some(xf.to_screen3(a))).expect("visible endpoint grip");
+                assert_eq!(grip, (target, 0));
+                super::super::click_grip(&mut app, grip, false);
+                let prompt = app.session.current_prompt().unwrap();
+                assert!(prompt.spatial_point);
+                assert_eq!(prompt.base3, Some(a));
+
+                let screen = xf.to_screen3(point);
+                let resolved = resolve_at_screen(&mut app, screen).expect("cursor resolves");
+                assert!(resolved.1.near(point, 1e-5), "{manual} {snapped}: {:?}", resolved.1);
+                if snapped {
+                    assert_eq!(app.canvas.snap.and_then(|hit| hit.point3), Some(point));
+                }
+                super::super::store_cursor_resolution(&mut app, Some(resolved));
+                let preview = app.session.preview(resolved.0);
+                let EntityKind::Line(preview_line) = &preview.first().expect("moved line preview").kind else { panic!("expected line") };
+                let expected = if manual && !snapped { point.xy().to3(a.z) } else { point };
+                assert!(preview_line.a.near(expected, 1e-5));
+                assert_eq!(preview_line.b, b);
+                if !manual || snapped {
+                    assert!(xf.to_screen3(preview_line.a).distance(screen) < 1.0);
+                }
+                super::super::submit_canvas_point(&mut app, resolved.1).unwrap();
+                let EntityKind::Line(stored) = &app.session.doc().unwrap().entity(target).unwrap().kind else { panic!("expected line") };
+                assert_eq!(stored, preview_line);
+            }
+        }
+
+        #[test]
+        fn base3_grip_transform_modes_use_the_same_cursor_for_preview_and_apply() {
+            use cadcraft_doc::{EntityKind, Line};
+            use cadcraft_geom::Mat3;
+
+            for (steps, matrix) in [
+                (1, Mat3::translate(Vec2::new(0.0, 3.0))),
+                (2, Mat3::rotate_about(Vec2::ZERO, std::f64::consts::FRAC_PI_2)),
+                (3, Mat3::scale_about(Vec2::ZERO, 3.0)),
+                (4, Mat3::mirror(Vec2::ZERO, Vec2::new(0.0, 3.0))),
+            ] {
+                let base = Vec3::new(0.0, 0.0, 30.0);
+                let b = Vec3::new(4.0, 1.0, 30.0);
+                let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+                app.session.set_drawing_plane_offset_automatic();
+                let mut camera = app.session.camera();
+                camera.target = base;
+                app.session.set_camera(camera);
+                let target = app.session.add_entity(EntityKind::Line(Line { a: base, b })).unwrap();
+                app.session.start_grip_edit(&[(target, 0)]).unwrap();
+                for _ in 0..steps {
+                    app.session.input(Input::Enter).unwrap();
+                }
+                let resolved = resolve_at(&mut app, base + Vec3::Y * 3.0).unwrap();
+                super::super::store_cursor_resolution(&mut app, Some(resolved));
+                let preview = app.session.preview(resolved.0);
+                let EntityKind::Line(line) = &preview[0].kind else { panic!("expected line") };
+                assert!(line.b.near(matrix.apply(b.xy()).to3(30.0), 1e-5), "mode {steps}");
+                super::super::submit_canvas_point(&mut app, resolved.1).unwrap();
+                assert_eq!(app.session.doc().unwrap().entity(target).unwrap().kind, preview[0].kind);
+            }
+        }
+
+        #[test]
+        fn base3_grip_reference_and_redefined_base_keep_wcs() {
+            use cadcraft_doc::{EntityKind, Line};
+
+            let base = Vec3::new(0.0, 0.0, 30.0);
+            let mut s = Session::new();
+            let target = s.add_entity(EntityKind::Line(Line { a: base, b: base + Vec3::X })).unwrap();
+            s.start_grip_edit(&[(target, 0)]).unwrap();
+            for _ in 0..2 {
+                s.input(Input::Enter).unwrap();
+            }
+            s.input(Input::Keyword("Base point".into())).unwrap();
+            let new_base = Vec3::new(3.0, 1.0, 40.0);
+            s.input(Input::Point3(new_base)).unwrap();
+            assert_eq!(s.current_prompt().unwrap().base3, Some(new_base));
+            s.input(Input::Keyword("Reference".into())).unwrap();
+            let first = Vec3::new(1.0, 2.0, 20.0);
+            s.input(Input::Point3(first)).unwrap();
+            assert_eq!(s.current_prompt().unwrap().base3, Some(first));
+            s.input(Input::Point3(first + Vec3::X)).unwrap();
+            assert_eq!(s.current_prompt().unwrap().base3, Some(new_base));
+        }
+
         fn oblique_line_from(base: Vec3) -> CadApp {
             let mut app = CadApp::new(Session::new(), Services::default());
             app.session.execute("view.swiso", &json!({})).unwrap();
