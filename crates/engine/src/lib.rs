@@ -741,6 +741,7 @@ pub struct Session {
     pub cursor3_valid: bool,
     /// Base point associated with the current cursor3 resolution.
     pub cursor3_base: Option<Vec3>,
+    pub cursor3_snapped: bool,
     /// Flag indicating whether the point currently being dispatched came from an object snap.
     pub input_is_snapped: bool,
     /// Flag indicating whether the point currently being dispatched came from explicit typed coordinates.
@@ -812,6 +813,7 @@ impl Session {
     pub fn invalidate_cursor3(&mut self) {
         self.cursor3_valid = false;
         self.cursor3_base = None;
+        self.cursor3_snapped = false;
         self.input_is_snapped = false;
         self.input_is_explicit = false;
     }
@@ -837,6 +839,7 @@ impl Session {
             cursor3: Vec3::ZERO,
             cursor3_valid: false,
             cursor3_base: None,
+            cursor3_snapped: false,
             input_is_snapped: false,
             input_is_explicit: false,
             is_interactive_ui: false,
@@ -1719,14 +1722,16 @@ impl Session {
     }
 
     fn feed(&mut self, input: Option<Input>) -> Result<()> {
-        let base = if matches!(input, Some(Input::Point(_) | Input::Point3(_))) { self.current_prompt().and_then(|p| p.base) } else { None };
+        let prompt = matches!(input, Some(Input::Point(_) | Input::Point3(_))).then(|| self.current_prompt()).flatten();
+        let base = prompt.as_ref().and_then(|p| p.base);
+        let spatial = prompt.is_some_and(|p| p.spatial_point);
         let Some(mut run) = self.running.take() else { return Ok(()) };
         let step = match input {
             Some(Input::Cancel) => Ok(Step::Cancel),
             Some(i) => {
                 let i = match i {
                     Input::Point3(p3)
-                        if !matches!(
+                        if !spatial && !matches!(
                             run.id.as_str(),
                             "line"
                                 | "3dpoly"
@@ -1764,7 +1769,7 @@ impl Session {
                     self.tracking.release_temporary();
                 } else if let Input::Point3(p) = &i {
                     self.last_point = p.xy();
-                    self.last_point3 = *p;
+                    self.last_point3 = if spatial && self.input_is_explicit { p.xy().to3(self.last_point3.z) } else { *p };
                     if let Some(b) = base.filter(|b| b.is_finite() && p.xy().is_finite() && b.dist(p.xy()) > 1e-12) {
                         self.last_segment = Some((b, p.xy()));
                     }
@@ -1986,6 +1991,15 @@ impl Session {
             Some(r) if self.suspended.is_some() => format!(">>{} {}", r.id.to_ascii_uppercase(), r.machine.prompt(self).display()),
             Some(r) => format!("{} {}", r.id.to_ascii_uppercase(), r.machine.prompt(self).display()),
             None => "Command:".into(),
+        }
+    }
+
+    /// WCS cursor for a spatial preview, with a deterministic fallback for headless previews.
+    pub(crate) fn preview_point3(&self, cursor: Vec2, base: Vec3) -> Vec3 {
+        if self.cursor3_valid && self.cursor == cursor && self.cursor3_base == Some(base) {
+            self.cursor3
+        } else {
+            cursor.to3(base.z)
         }
     }
 

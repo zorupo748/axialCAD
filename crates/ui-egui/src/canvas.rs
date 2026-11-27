@@ -2706,6 +2706,7 @@ fn store_cursor_resolution(app: &mut CadApp, point: Option<(Vec2, Vec3)>) {
         app.session.cursor3 = cursor3;
         app.session.cursor3_valid = true;
         app.session.cursor3_base = app.session.current_prompt().and_then(|p| p.base3);
+        app.session.cursor3_snapped = app.canvas.snap.is_some_and(|hit| hit.point3.is_some());
         app.session.cursor_deferred = app.canvas.snap.and_then(|hit| hit.deferred);
         app.canvas.parallel_plane_warning = false;
     } else {
@@ -2946,7 +2947,9 @@ fn resolve_point_before_apparent_snap(
     let base_osmode = app.session.settings.osmode;
     let zlock = app.session.settings.zlock;
     let orthomode = app.session.settings.orthomode;
-    let prompt_base3 = app.session.current_prompt().as_ref().and_then(|p| p.base3);
+    let prompt = app.session.current_prompt();
+    let spatial = prompt.as_ref().is_some_and(|p| p.spatial_point);
+    let prompt_base3 = prompt.as_ref().and_then(|p| p.base3);
     let base3 = prompt_base3.unwrap_or(app.session.last_point3);
     let was_z_zero = app.canvas.axis_track_z_zero;
     let line_prompt = is_ucs_cmd || app.session.running.as_ref().is_some_and(|r| r.id == "line");
@@ -2964,13 +2967,21 @@ fn resolve_point_before_apparent_snap(
         && is_near_plan_or_oblique;
     let plane = if is_auto_oblique_line { cadcraft_geom::DrawingPlane::XY } else { app.session.drawing_plane() };
     let continuation_offset = if is_auto_oblique_line { 0.0 } else { app.session.drawing_plane_offset_for(prompt_base3) };
-    let fixed_plane = app.session.current_prompt().and_then(|prompt| prompt.point_plane);
+    let fixed_plane = prompt.and_then(|prompt| prompt.point_plane);
+    let shifted_ucs = if spatial && !is_world_ucs && !app.session.drawing_plane_offset_is_manual() {
+        prompt_base3.map(|base| cadcraft_geom::UcsFrame {
+            origin: ucs.origin + ucs.z_axis * ucs.to_local(base).z,
+            ..ucs
+        })
+    } else {
+        None
+    };
     let (plane_point, raw2) = if let Some(fixed) = fixed_plane {
         let point = cam.unproject_to_ucs(q, &fixed);
         (point, point.map_or(raw_world, |point| ucs.to_local(point).xy()))
     } else if !is_world_ucs {
-        let ucs_pt3 = cam.unproject_to_ucs(q, &ucs);
-        let r2 = ucs_pt3.map_or(raw_world, |p| ucs.to_local(p).xy());
+        let ucs_pt3 = cam.unproject_to_ucs(q, &shifted_ucs.unwrap_or(ucs));
+        let r2 = ucs_pt3.map_or(raw_world, |p| if spatial { p.xy() } else { ucs.to_local(p).xy() });
         (ucs_pt3, r2)
     } else {
         let pp = if is_ucs_cmd {
@@ -2978,11 +2989,26 @@ fn resolve_point_before_apparent_snap(
         } else {
             xf.to_world3_with_offset(hp, plane, continuation_offset)
         };
-        let r2 = if line_prompt { pp.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
+        let r2 = if spatial { pp.map_or(raw_world, Vec3::xy) }
+            else if line_prompt { pp.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
         (pp, r2)
     };
     let prompt_point = |p: Vec2| {
-        if !is_world_ucs {
+        if spatial && let Some(origin) = plane_point {
+            let normal = if is_world_ucs {
+                match plane {
+                    cadcraft_geom::DrawingPlane::XY => Vec3::Z,
+                    cadcraft_geom::DrawingPlane::XZ => Vec3::Y,
+                    cadcraft_geom::DrawingPlane::YZ => Vec3::X,
+                }
+            } else { ucs.z_axis };
+            let flat = p.to3(origin.z);
+            if normal.z.abs() > 1e-9 {
+                flat - Vec3::Z * ((flat - origin).dot(normal) / normal.z)
+            } else {
+                flat - normal * (flat - origin).dot(normal)
+            }
+        } else if !is_world_ucs {
             ucs.to_world2(p)
         } else if prompt_base.is_some() && !line_prompt {
             Vec3::new(p.x, p.y, base3.z)
@@ -2997,12 +3023,12 @@ fn resolve_point_before_apparent_snap(
         && e.first_locked().is_some()
     {
         let dyn_continuation_offset = app.session.drawing_plane_offset_for(prompt_base3);
-        let dyn_plane_point = if fixed_plane.is_some() { plane_point } else { xf.to_world3_with_offset(hp, plane, dyn_continuation_offset) };
-        if line_prompt && dyn_plane_point.is_none() && !(app.cmd.second_locked() && e.second_value().is_some()) {
+        let dyn_plane_point = if spatial || fixed_plane.is_some() { plane_point } else { xf.to_world3_with_offset(hp, plane, dyn_continuation_offset) };
+        if (spatial || line_prompt) && dyn_plane_point.is_none() && !(app.cmd.second_locked() && e.second_value().is_some()) {
             app.canvas.parallel_plane_warning = true;
             return None;
         }
-        let dyn_raw2 = if fixed_plane.is_some() { raw2 } else if line_prompt { dyn_plane_point.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
+        let dyn_raw2 = if spatial || fixed_plane.is_some() { raw2 } else if line_prompt { dyn_plane_point.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
         let eff = crate::dyninput::constrain(&e, &f, dyn_raw2, app.cmd.second_locked());
         app.canvas.snap = None;
         app.canvas.track = None;
@@ -3014,12 +3040,14 @@ fn resolve_point_before_apparent_snap(
             let base = if e.prefix == "@" || f.relative() { prompt_base3.unwrap_or(Vec3::ZERO) } else { Vec3::ZERO };
             let p_unrel = Vec3::new(eff.x, eff.y, z);
             base + p_unrel
+        } else if spatial {
+            prompt_point(eff)
         } else if fixed_plane.is_some() {
             ucs.to_world2(eff)
         } else {
             plane.embed(eff, dyn_continuation_offset)
         };
-        return Some((eff, dyn_p3));
+        return Some((if spatial { dyn_p3.xy() } else { eff }, dyn_p3));
     }
     let grip_held = crate::grip_dyn::constrain(app, raw2);
     if let Some(q_grip) = grip_held {
@@ -3027,7 +3055,8 @@ fn resolve_point_before_apparent_snap(
         app.canvas.track = None;
         app.canvas.active_axis_3d = None;
         app.canvas.axis_track_z_zero = false;
-        return Some((q_grip, prompt_point(q_grip)));
+        let p = prompt_point(q_grip);
+        return Some((if spatial { p.xy() } else { q_grip }, p));
     }
 
     // Priority 2: 3D Object Snap (when in 3D camera view)
@@ -3047,7 +3076,7 @@ fn resolve_point_before_apparent_snap(
             && let Some(hit3d) = snap::snap_3d_endpoints(&st.doc, &st.edit_space(), &cam, q, ap_cam, osmode & snap_modes_3d, cycle_idx)
         {
             let p3 = hit3d.point3.unwrap_or_else(|| Vec3::new(hit3d.point.x, hit3d.point.y, 0.0));
-            let at2 = if !is_world_ucs {
+            let at2 = if spatial { p3.xy() } else if !is_world_ucs {
                 ucs.to_local(p3).xy()
             } else if line_prompt {
                 plane.coordinates(p3)
@@ -3089,13 +3118,13 @@ fn resolve_point_before_apparent_snap(
         app.canvas.parallel_plane_warning = false;
         let eff3 = if let Some(hit) = app.canvas.snap
             && let Some(p3) = hit.point3
-            && (line_prompt || fixed_plane.is_some())
+            && (spatial || line_prompt || fixed_plane.is_some())
         {
-            return Some((if line_prompt { plane.coordinates(p3) } else { ucs.to_local(p3).xy() }, p3));
+            return Some((if spatial { p3.xy() } else if line_prompt { plane.coordinates(p3) } else { ucs.to_local(p3).xy() }, p3));
         } else {
             prompt_point(eff)
         };
-        return Some((eff, eff3));
+        return Some((if spatial { eff3.xy() } else { eff }, eff3));
     }
 
     // Priority 3: 3D Axis Snapping (ORTHO 3D) or legacy Z-LOCK
@@ -3176,7 +3205,7 @@ fn resolve_point_before_apparent_snap(
     match plane_point {
         Some(p3) => {
             app.canvas.parallel_plane_warning = false;
-            let pt2 = if !is_world_ucs {
+            let pt2 = if spatial { p3.xy() } else if !is_world_ucs {
                 ucs.to_local(p3).xy()
             } else if line_prompt {
                 plane.coordinates(p3)
@@ -4295,7 +4324,17 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             let serial = app.session.clipboard_source.as_ref().map_or(0, |c| c.serial);
             let transparency = app.session.settings.transparency_display;
             draw_drag_gpu(&mut app.canvas, &painter, &xf, &st.doc, &drag, (&app.session.clipboard, serial), bg, transparency);
-            let list = rebuilt_preview(&st.doc, extra.iter(), scale);
+            let planar = extra.iter().filter(|e| {
+                if let cadcraft_doc::EntityKind::Line(l) = &e.kind
+                    && (l.a.z != 0.0 || l.b.z != 0.0)
+                {
+                    painter.line_segment([xf.to_screen3(l.a), xf.to_screen3(l.b)], Stroke::new(1.0, t.canvas_ink));
+                    false
+                } else {
+                    true
+                }
+            });
+            let list = rebuilt_preview(&st.doc, planar, scale);
             draw_list(&painter, &xf, &list, bg, false);
         }
     } else if let (Some(c), true) = (
@@ -6647,6 +6686,74 @@ mod hatch_pick_tests {
                 let next = plane.embed(Vec2::new(9.0, 11.0), plane.normal_offset(first));
                 let resolved_next = resolve_at(&mut app, next).expect("continuation resolves in a principal view");
                 assert!(resolved_next.1.dist(next) < 1e-5, "{preset}: {:?}", resolved_next.1);
+            }
+        }
+
+        struct SpatialProbe(cadcraft_engine::Prompt);
+
+        impl cadcraft_engine::Interactive for SpatialProbe {
+            fn name(&self) -> &'static str { "SPATIALPROBE" }
+            fn prompt(&self, _: &Session) -> cadcraft_engine::Prompt { self.0.clone() }
+            fn input(&mut self, _: &mut Session, _: Input) -> cadcraft_engine::Result<cadcraft_engine::Step> {
+                Ok(cadcraft_engine::Step::Continue)
+            }
+        }
+
+        fn start_probe(app: &mut CadApp, prompt: cadcraft_engine::Prompt) {
+            let before = app.session.state().unwrap().doc.clone();
+            app.session.running = Some(cadcraft_engine::Running {
+                id: "spatial-probe".into(),
+                machine: Box::new(SpatialProbe(prompt)),
+                before,
+                selection_before: Vec::new(),
+            });
+        }
+
+        #[test]
+        fn base3_resolver_shifts_an_inclined_ucs_and_rejects_an_edge_on_plane() {
+            use cadcraft_engine::{Accept, Prompt};
+            use cadcraft_geom::UcsFrame;
+
+            let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+            app.session.set_drawing_plane_offset_automatic();
+            let y = Vec3::new(0.0, 1.0, 1.0).normalized();
+            let normal = Vec3::X.cross(y);
+            let ucs = UcsFrame::new(Vec3::new(2.0, 3.0, 4.0), Vec3::X, y, normal);
+            app.session.set_ucs(ucs).unwrap();
+            let base = ucs.origin + normal * 30.0;
+            let expected = base + Vec3::X * 2.0 + y;
+            let mut camera = app.session.camera();
+            camera.target = expected;
+            app.session.set_camera(camera);
+            start_probe(&mut app, Prompt::new("Point", Accept::POINT).base3(base).spatial_point());
+            assert!(resolve_at(&mut app, expected).unwrap().1.near(expected, 1e-5));
+
+            app.session.set_drawing_plane_offset(10.0);
+            let legacy_manual = ucs.origin + Vec3::X * 2.0 + y;
+            assert!(resolve_at(&mut app, legacy_manual).unwrap().1.near(legacy_manual, 1e-5));
+            app.session.set_drawing_plane_offset_automatic();
+            app.session.set_ucs(UcsFrame::WORLD).unwrap();
+            app.session.execute("view.front", &json!({})).unwrap();
+            assert!(resolve_at_screen(&mut app, Pos2::new(500.0, 400.0)).is_none());
+        }
+
+        #[test]
+        fn base3_resolver_preserves_legacy_line_and_pline_auto_points() {
+            for command in ["line", "pline"] {
+                let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+                app.session.set_drawing_plane_automatic();
+                app.session.set_drawing_plane_offset_automatic();
+                app.session.settings.axistrack = false;
+                app.session.start(command).unwrap();
+                let first = Vec3::new(3.0, 4.0, 30.0);
+                app.session.input(Input::Point3(first)).unwrap();
+                let prompt = app.session.current_prompt().unwrap();
+                assert!(!prompt.spatial_point);
+                assert_eq!(prompt.base3, (command == "line").then_some(first));
+                let expected = Vec3::new(2.0, -1.0, 0.0);
+                let resolved = resolve_at(&mut app, expected).expect("legacy point");
+                assert!(resolved.1.near(expected, 1e-5), "{command}: {resolved:?}");
+                assert!(resolved.0.near(expected.xy(), 1e-5));
             }
         }
 

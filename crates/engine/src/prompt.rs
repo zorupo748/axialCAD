@@ -40,6 +40,9 @@ pub struct Prompt {
     /// 3D base point when available (e.g. continuing a 3D line from an elevated vertex).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base3: Option<Vec3>,
+    /// Retain the WCS point in input and resolve free Auto points in the plane through the base.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub spatial_point: bool,
     /// Fixed plane for a point prompt whose geometry is confined to that plane.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub point_plane: Option<cadcraft_geom::UcsFrame>,
@@ -138,6 +141,10 @@ impl Prompt {
     pub fn base3_opt(mut self, p: Option<Vec3>) -> Self {
         self.base = p.map(|pt| pt.xy());
         self.base3 = p;
+        self
+    }
+    pub fn spatial_point(mut self) -> Self {
+        self.spatial_point = true;
         self
     }
     /// The base is a window's first corner (the `corner` field).
