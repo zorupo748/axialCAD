@@ -9,7 +9,7 @@ use cadcraft_geom::{Bounds2, Line, Vec2, line_line};
 use serde_json::{Value, json};
 
 use super::helpers::line;
-use super::modify::{Edges, extend, trim, quick_mode, misses_edges, edge_mode, proj_mode, trim_window_entity};
+use super::modify::{CurvePick, Edges, extend, extend_at_pick, trim, trim_at_pick, quick_mode, misses_edges, edge_mode, proj_mode, trim_window_entity};
 use super::{bad, point_param, points_param};
 use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Session, Step};
 
@@ -23,7 +23,12 @@ fn apply(s: &mut Session, h: Handle, at: Vec2, extending: bool, edges: Edges, qu
         extend(s, h, at, edges)?;
         return Ok(vec![h]);
     }
-    match trim(s, h, at, edges) {
+    let result = trim(s, h, at, edges);
+    finish_trim(s, h, quick, result)
+}
+
+fn finish_trim(s: &mut Session, h: Handle, quick: bool, result: Result<Vec<Handle>>) -> Result<Vec<Handle>> {
+    match result {
         Err(e) if quick && misses_edges(&e) => {
             s.doc_mut()?.remove_entity(h);
             Ok(Vec::new())
@@ -408,10 +413,8 @@ impl Interactive for TrimM {
                 }
                 kw.push("Undo");
                 let mut p = Prompt::new(msg, Accept::POINT).kw(&kw);
-                if !self.extend {
-                    p.suppress_hover = true;
-                }
-                p.picks_entity_point = !self.extend;
+                p.suppress_hover = true;
+                p.picks_entity_point = true;
                 p
             }
             Stage::Edges(_) => Prompt::new("Select objects or", Accept::SELECT).default("select all"),
@@ -449,7 +452,7 @@ impl Interactive for TrimM {
             Input::Point(point) if matches!(self.stage, Stage::Pick) => {
                 let ap = s.pixel_size() * s.settings.pickbox.max(1.0) * 1.5;
                 let handle = crate::select::pick(s.doc()?, &s.space(), point, ap);
-                Input::EntityPoint { handle, point }
+                Input::EntityPoint { handle, point, point3: None }
             }
             other => other,
         };
@@ -564,8 +567,8 @@ impl Interactive for TrimM {
                 Ok(Step::Continue)
             }
             Stage::Pick => match i {
-                Input::EntityPoint { handle, point: p } => {
-                    if !p.is_finite() {
+                Input::EntityPoint { handle, point: p, point3 } => {
+                    if !p.is_finite() || point3.is_some_and(|p| !p.is_finite()) {
                         return Err(EngineError::Other("Point coordinates must be finite.".into()));
                     }
                     let Some(h) = handle else {
@@ -579,7 +582,13 @@ impl Interactive for TrimM {
                         return Err(EngineError::Other("The picked object is unavailable in the current space.".into()));
                     }
                     let r = self.step(s, |m, s| {
-                        let new_hs = apply(s, h, p, extending, m.edges(quick, implied), quick)?;
+                        let edges = m.edges(quick, implied);
+                        let pick = CurvePick { xy: p, world: point3 };
+                        if extending {
+                            return extend_at_pick(s, h, pick, edges);
+                        }
+                        let result = trim_at_pick(s, h, pick, edges);
+                        let new_hs = finish_trim(s, h, quick, result)?;
                         m.update_edge_handles(h, &new_hs);
                         Ok(())
                     });
@@ -633,16 +642,22 @@ impl Interactive for TrimM {
         }
     }
     fn preview_objects(&self, s: &Session, c: Vec2) -> Vec<Entity> {
-        if matches!(self.stage, Stage::Pick) && !self.extend {
+        if matches!(self.stage, Stage::Pick) {
             let ap = s.pixel_size() * s.settings.pickbox.max(1.0) * 1.5;
             let space = s.space();
             let Ok(d) = s.doc() else { return Vec::new() };
-            let picked = if s.is_interactive_ui { s.cursor_entity_point } else { crate::select::pick(d, &space, c, ap).map(|h| (h, c)) };
-            if let Some((h, c)) = picked {
+            let picked = if s.is_interactive_ui { s.cursor_entity_point } else { crate::select::pick(d, &space, c, ap).map(|h| (h, c, None)) };
+            if let Some((h, c, point3)) = picked {
                 let quick = quick_mode(s);
                 let implied = edge_mode(s);
                 let edges = self.edges(quick, implied);
-                if let Ok(removed) = super::modify::trim_preview(s, h, c, edges) {
+                let pick = CurvePick { xy: c, world: point3 };
+                let pieces = if self.extend {
+                    super::modify::extend_preview(s, h, pick, edges).map(|piece| piece.into_iter().collect::<Vec<_>>())
+                } else {
+                    super::modify::trim_preview(s, h, pick, edges)
+                };
+                if let Ok(removed) = pieces {
                     let mut common = d.entity(h).map(|e| e.common.clone()).unwrap_or_else(|| s.current_common());
                     common.visible = true;
                     common.linetype = "DASHED".into();

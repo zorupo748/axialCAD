@@ -239,6 +239,8 @@ pub enum Input {
     EntityPoint {
         handle: Option<Handle>,
         point: Vec2,
+        /// Closest point on the visible entity, when the view can recover it.
+        point3: Option<Vec3>,
     },
     Enter,
     Cancel,

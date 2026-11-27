@@ -988,6 +988,10 @@ fn screen_entity_polylines(doc: &cadcraft_doc::Drawing, entity: &cadcraft_doc::E
             let pts = c.sample_points_3d(entity.common.extrusion, 64);
             vec![pts.into_iter().map(|p| xf.to_screen3(p)).collect()]
         }
+        cadcraft_doc::EntityKind::Arc(arc) if arc.center.z != 0.0 || !entity.common.extrusion.near(Vec3::Z, 1e-6) => {
+            let points = arc.sample_points_3d(entity.common.extrusion, 64);
+            vec![points.into_iter().map(|p| xf.to_screen3(p)).collect()]
+        }
         cadcraft_doc::EntityKind::LwPolyline(pl) if !entity.common.extrusion.near(Vec3::Z, 1e-6) || pl.elevation.abs() > 1e-6 => {
             let mut pts = pl.vertices_3d(entity.common.extrusion);
             if pl.closed && !pts.is_empty() {
@@ -1101,20 +1105,42 @@ fn screen_projected_pick_at(app: &CadApp, xf: &Xf, at: Pos2) -> Option<Handle> {
 /// Resolve TRIM's hover and click against the same visible geometry.
 fn screen_entity_point(app: &CadApp, xf: &Xf, at: Pos2) -> cadcraft_engine::Result<Input> {
     let handle = screen_projected_pick_at(app, xf, at);
-    let point = match handle.and_then(|h| app.session.doc().ok()?.entity(h)).map(|entity| &entity.kind) {
-        Some(cadcraft_doc::EntityKind::Line(line)) => {
-            let a = xf.to_screen3(line.a);
-            let delta = xf.to_screen3(line.b) - a;
-            let length_sq = delta.length_sq();
-            if !length_sq.is_finite() || length_sq <= 1e-8 {
-                return Err(cadcraft_engine::EngineError::Other("Cannot trim a line that projects to a point in this view.".into()));
-            }
-            let t = f64::from(((at - a).dot(delta) / length_sq).clamp(0.0, 1.0));
-            line.a.xy().lerp(line.b.xy(), t)
+    let projection = |a: Vec3, b: Vec3| {
+        let start = xf.to_screen3(a);
+        let delta = xf.to_screen3(b) - start;
+        let length_sq = delta.length_sq();
+        if !length_sq.is_finite() || length_sq <= 1e-8 {
+            return None;
         }
-        _ => xf.to_world(at),
+        let t = ((at - start).dot(delta) / length_sq).clamp(0.0, 1.0);
+        Some((at.distance(start + delta * t), a + (b - a) * f64::from(t)))
     };
-    Ok(Input::EntityPoint { handle, point })
+    let nearest = |points: &[Vec3]| {
+        points.windows(2).filter_map(|pair| {
+            let [a, b] = pair else { return None };
+            projection(*a, *b)
+        }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, p)| p)
+    };
+    let point3 = if let Some(e) = handle.and_then(|h| app.session.doc().ok()?.entity(h)) {
+        match &e.kind {
+            cadcraft_doc::EntityKind::Line(line) => Some(projection(line.a, line.b).ok_or_else(|| {
+                cadcraft_engine::EngineError::Other("Degenerate projection: the line projects to a point in this view.".into())
+            })?.1),
+            cadcraft_doc::EntityKind::Circle(circle) => {
+                let mut points = circle.sample_points_3d(e.common.extrusion, 64);
+                if let Some(first) = points.first().copied() {
+                    points.push(first);
+                }
+                nearest(&points)
+            }
+            cadcraft_doc::EntityKind::Arc(arc) => nearest(&arc.sample_points_3d(e.common.extrusion, 64)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let point = point3.map_or_else(|| xf.to_world(at), Vec3::xy);
+    Ok(Input::EntityPoint { handle, point, point3 })
 }
 
 fn screen_window_selection(app: &CadApp, xf: &Xf, start: Pos2, end: Pos2) -> Vec<Handle> {
@@ -1202,6 +1228,10 @@ fn draw_spatial_lines(app: &CadApp, painter: &egui::Painter, xf: &Xf) {
                 } else {
                     painter.line_segment([p1, p2], stroke);
                 }
+            }
+            cadcraft_doc::EntityKind::Arc(arc) if arc.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) => {
+                let points = arc.sample_points_3d(e.common.extrusion, 64);
+                draw_spatial_polyline(painter, xf, &points, stroke, look.is_some_and(|look| look.dashed));
             }
             cadcraft_doc::EntityKind::Circle(c)
                 if c.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
@@ -4020,7 +4050,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // prompts, or no command with PICKFIRST on; SELECTIONPREVIEW says in which of those it shows.
     app.session.cursor_entity_point = if inside && app.session.current_prompt().is_some_and(|p| p.picks_entity_point) {
         hover_pos.and_then(|at| match screen_entity_point(app, &xf, at).ok()? {
-            Input::EntityPoint { handle: Some(handle), point } => Some((handle, point)),
+            Input::EntityPoint { handle: Some(handle), point, point3 } => Some((handle, point, point3)),
             _ => None,
         })
     } else {
@@ -4293,16 +4323,22 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 let bg_col = color32(bg);
                 let fg_col = crate::theme::crosshair_color(bg_col);
                 dashed.retain(|e| {
-                    if let cadcraft_doc::EntityKind::Line(line) = &e.kind
-                        && (line.a.z != 0.0 || line.b.z != 0.0)
-                    {
-                        let points = [xf.to_screen3(line.a), xf.to_screen3(line.b)];
-                        painter.line_segment(points, Stroke::new(4.5, bg_col));
-                        painter.extend(Shape::dashed_line(&points, Stroke::new(2.0, fg_col), 6.0, 4.0));
-                        false
-                    } else {
-                        true
-                    }
+                    let ext = e.common.extrusion;
+                    let points = match &e.kind {
+                        cadcraft_doc::EntityKind::Line(line) if line.a.z != 0.0 || line.b.z != 0.0 => vec![line.a, line.b],
+                        cadcraft_doc::EntityKind::Arc(arc) if arc.center.z != 0.0 || !ext.near(Vec3::Z, 1e-6) => arc.sample_points_3d(ext, 64),
+                        cadcraft_doc::EntityKind::Circle(circle) if circle.center.z != 0.0 || !ext.near(Vec3::Z, 1e-6) => {
+                            let mut points = circle.sample_points_3d(ext, 64);
+                            if let Some(first) = points.first().copied() {
+                                points.push(first);
+                            }
+                            points
+                        }
+                        _ => return true,
+                    };
+                    draw_spatial_polyline(&painter, &xf, &points, Stroke::new(4.5, bg_col), false);
+                    draw_spatial_polyline(&painter, &xf, &points, Stroke::new(2.0, fg_col), true);
+                    false
                 });
                 for e in &mut dashed {
                     e.common.linetype = "Continuous".into();
@@ -6980,7 +7016,7 @@ mod hatch_pick_tests {
         frame(&mut app, Vec::new(), 0.0);
         let at = app.canvas.xf.unwrap().to_screen3(Vec3::new(-2.0, 0.0, 10.0));
         frame(&mut app, vec![egui::Event::PointerMoved(at)], 0.1);
-        assert_eq!(app.session.cursor_entity_point.map(|(handle, _)| handle), Some(raised));
+        assert_eq!(app.session.cursor_entity_point.map(|(handle, _, _)| handle), Some(raised));
         assert!(app.session.preview(app.session.cursor).iter().any(|entity| {
             matches!(&entity.kind, cadcraft_doc::EntityKind::Line(line) if line.a.z == 10.0 && line.b.z == 10.0)
         }));
@@ -6995,6 +7031,38 @@ mod hatch_pick_tests {
         let cadcraft_doc::EntityKind::Line(line) = &fragment.kind else { panic!("expected a line fragment") };
         assert_eq!(line.a, Vec3::new(0.0, 0.0, 10.0));
         assert_eq!(line.b, Vec3::new(15.0, 0.0, 10.0));
+    }
+
+    #[test]
+    fn trim_arc_preview_is_painted_at_the_circle_height() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        let center = Vec3::new(0.0, 0.0, 12.0);
+        app.session.set_camera(OrbitCamera { target: center, height: 40.0, ..app.session.camera() });
+        app.session.add_entity(cadcraft_doc::EntityKind::Circle(cadcraft_doc::Circle { center, radius: 5.0 })).unwrap();
+        app.session.execute("line", &json!({ "points": [[0.0, -8.0, 12.0], [0.0, 8.0, 12.0]] })).unwrap();
+        app.session.start("trim").unwrap();
+        let ctx = egui::Context::default();
+        let frame = |app: &mut CadApp, events, time| {
+            app.logic(&ctx);
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))),
+                events,
+                time: Some(time),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.ui(ui));
+            output.textures_delta.clear();
+            output
+        };
+        frame(&mut app, Vec::new(), 0.0);
+        let xf = app.canvas.xf.unwrap();
+        let at = xf.to_screen3(center + Vec3::X * 5.0);
+        let output = frame(&mut app, vec![egui::Event::PointerMoved(at)], 0.1);
+        assert!(output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Path(path) if path.stroke.width == 4.5
+                && path.points.iter().any(|point| point.distance(at) < 1.0))
+        }));
     }
 
     #[test]

@@ -1134,3 +1134,126 @@ fn json_trim_keeps_elevation_and_interpolates_the_cut_on_sloped_lines() {
         assert_eq!(line.b, Vec3::new(12.0, 0.0, end_z));
     }
 }
+
+#[test]
+fn click_trim_elevated_circle_keeps_center_radius_and_preview_height() {
+    use cadcraft_engine::Input;
+    use cadcraft_engine::doc::Circle;
+    use cadcraft_geom::{Vec2, Vec3};
+
+    let mut s = Session::new();
+    let center = Vec3::new(0.0, 0.0, 10.0);
+    let target = s.add_entity_with_extrusion(EntityKind::Circle(Circle { center, radius: 5.0 }), Vec3::Z).unwrap();
+    s.execute("line", &json!({ "points": [[0.0, -10.0, 20.0], [0.0, 10.0, 20.0]] })).unwrap();
+    let pick = Vec2::new(5.0, 0.0);
+    s.start("trim").unwrap();
+    s.is_interactive_ui = true;
+    s.cursor_entity_point = Some((target, pick, Some(pick.to3(center.z))));
+    let preview = s.preview(pick);
+    let EntityKind::Arc(removed) = &preview.first().expect("arc preview").kind else { panic!("expected an arc") };
+    assert_eq!(removed.center, center);
+    assert_eq!(removed.radius, 5.0);
+    assert_eq!(preview[0].common.extrusion, Vec3::Z);
+    assert!((removed.start - std::f64::consts::FRAC_PI_2 * 3.0).abs() < 1e-9);
+    s.input(Input::EntityPoint { handle: Some(target), point: pick, point3: Some(pick.to3(center.z)) }).unwrap();
+    let doc = s.doc().unwrap();
+    assert!(doc.entity(target).is_none());
+    let kept = doc.model.iter().find(|e| matches!(e.kind, EntityKind::Arc(_))).unwrap();
+    let EntityKind::Arc(kept_arc) = &kept.kind else { panic!("expected an arc") };
+    assert_eq!(kept_arc.center, center);
+    assert_eq!(kept_arc.radius, 5.0);
+    assert_eq!(kept.common.extrusion, Vec3::Z);
+    assert_eq!(kept_arc.start, removed.end);
+    assert_eq!(kept_arc.end, removed.start);
+}
+
+#[test]
+fn click_trim_and_extend_vertical_lines_use_view_when_ucs_is_degenerate() {
+    use cadcraft_engine::Input;
+    use cadcraft_engine::doc::Line;
+    use cadcraft_geom::Vec3;
+
+    for (command, end_z, expected) in [("trim", 12.0, 7.0), ("extend", 4.0, 7.0)] {
+        let mut s = Session::new();
+        s.execute("view.front", &json!({})).unwrap();
+        let a = Vec3::new(0.0, 0.0, 2.0);
+        let b = Vec3::new(0.0, 0.0, end_z);
+        let target = s.add_entity(EntityKind::Line(Line { a, b })).unwrap();
+        s.execute("line", &json!({ "points": [[-5.0, 3.0, 7.0], [5.0, 3.0, 7.0]] })).unwrap();
+        let pick = b - Vec3::Z * 0.1;
+        s.start(command).unwrap();
+        s.input(Input::EntityPoint { handle: Some(target), point: pick.xy(), point3: Some(pick) }).unwrap();
+        let doc = s.doc().unwrap();
+        let line = doc.model.iter().find_map(|e| match &e.kind {
+            EntityKind::Line(line) if line.a == a => Some(line),
+            _ => None,
+        }).unwrap();
+        assert!(line.b.near(Vec3::new(0.0, 0.0, expected), 1e-9), "{command}: {line:?}");
+    }
+}
+
+#[test]
+fn click_trim_end_on_vertical_reports_degenerate_projection_without_erasing() {
+    use cadcraft_engine::Input;
+    use cadcraft_engine::doc::Line;
+    use cadcraft_geom::Vec3;
+
+    let mut s = Session::new();
+    let a = Vec3::new(0.0, 0.0, 2.0);
+    let b = Vec3::new(0.0, 0.0, 12.0);
+    let target = s.add_entity(EntityKind::Line(Line { a, b })).unwrap();
+    s.start("trim").unwrap();
+    s.input(Input::EntityPoint { handle: Some(target), point: a.xy(), point3: Some(a) }).unwrap();
+    assert!(s.doc().unwrap().entity(target).is_some());
+    assert!(s.log.iter().any(|line| line.contains("Degenerate projection")));
+}
+
+#[test]
+fn click_trim_or_extend_rejects_tilted_circles_and_arcs_without_mutation() {
+    use cadcraft_engine::Input;
+    use cadcraft_engine::doc::{Arc, Circle};
+    use cadcraft_geom::Vec3;
+
+    let center = Vec3::new(1.0, 2.0, 10.0);
+    for command in ["trim", "extend"] {
+        for kind in [EntityKind::Circle(Circle { center, radius: 5.0 }), EntityKind::Arc(Arc { center, radius: 5.0, start: 0.0, end: 1.0 })] {
+            let mut s = Session::new();
+            let target = s.add_entity_with_extrusion(kind.clone(), Vec3::Y).unwrap();
+            s.start(command).unwrap();
+            s.input(Input::EntityPoint { handle: Some(target), point: center.xy(), point3: Some(center) }).unwrap();
+            let doc = s.doc().unwrap();
+            assert_eq!(doc.model.len(), 1);
+            assert_eq!(doc.entity(target).unwrap().kind, kind);
+            assert!(s.log.iter().any(|line| line.contains("world Z extrusion")));
+        }
+    }
+}
+
+#[test]
+fn click_extend_arc_preview_matches_the_added_sweep_at_source_height() {
+    use cadcraft_engine::Input;
+    use cadcraft_engine::doc::Arc;
+    use cadcraft_geom::Vec3;
+
+    let mut s = Session::new();
+    let center = Vec3::new(0.0, 0.0, 10.0);
+    let radius = 5.0;
+    let target = s.add_entity(EntityKind::Arc(Arc { center, radius, start: 0.0, end: std::f64::consts::FRAC_PI_2 })).unwrap();
+    s.execute("line", &json!({ "points": [[0.0, -3.0, 20.0], [8.0, -3.0, 20.0]] })).unwrap();
+    let pick = center + Vec3::X * radius;
+    s.start("extend").unwrap();
+    s.is_interactive_ui = true;
+    s.cursor_entity_point = Some((target, pick.xy(), Some(pick)));
+    let preview = s.preview(pick.xy());
+    let EntityKind::Arc(added) = &preview.first().expect("arc preview").kind else { panic!("expected an arc") };
+    assert_eq!(added.center, center);
+    assert_eq!(added.radius, radius);
+    assert_eq!(added.end, 0.0);
+    s.input(Input::EntityPoint { handle: Some(target), point: pick.xy(), point3: Some(pick) }).unwrap();
+    let stored = s.doc().unwrap().entity(target).unwrap();
+    let EntityKind::Arc(arc) = &stored.kind else { panic!("expected an arc") };
+    assert_eq!(arc.center, center);
+    assert_eq!(arc.radius, radius);
+    assert_eq!(arc.start, added.start);
+    assert_eq!(stored.common.extrusion, Vec3::Z);
+}

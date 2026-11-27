@@ -186,6 +186,21 @@ pub struct Arc {
     pub start: f64,
     pub end: f64,
 }
+impl Arc {
+    /// Sample the CCW sweep in WCS, including both endpoints.
+    pub fn sample_points_3d(&self, extrusion: Vec3, segments: usize) -> Vec<Vec3> {
+        let (x, y, _) = cadcraft_geom::Mat4::ocs_basis(extrusion);
+        let sweep = cadcraft_geom::ccw_sweep(self.start, self.end);
+        let segments = segments.clamp(1, 256);
+        (0..=segments)
+            .map(|i| {
+                let angle = self.start + sweep * (i as f64 / segments as f64);
+                self.center + x * (self.radius * angle.cos()) + y * (self.radius * angle.sin())
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Ellipse {
     pub center: Vec3,

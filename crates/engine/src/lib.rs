@@ -734,7 +734,7 @@ pub struct Session {
     /// Cursor position in world coordinates (from the UI; used for direct distance entry).
     pub cursor: Vec2,
     /// Entity and point resolved from the current screen hover for TRIM preview.
-    pub cursor_entity_point: Option<(Handle, Vec2)>,
+    pub cursor_entity_point: Option<(Handle, Vec2, Option<Vec3>)>,
     pub cursor3: Vec3,
     /// Explicit validity flag for cursor3: true only when actively resolved by the view/camera
     /// for the current command and segment base point.
