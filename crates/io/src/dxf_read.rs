@@ -1423,6 +1423,19 @@ fn header(tags: &[Tag], d: &mut Drawing) {
                 }
                 continue;
             }
+            if name == "PROJMODE" {
+                if let [tag] = vals.as_slice()
+                    && tag.code == 70
+                    && let cadcraft_dxf::Value::Int(value) = tag.value
+                {
+                    let mode = match value {
+                        1 | 2 => value,
+                        _ => 0,
+                    };
+                    d.header.set_i64("PROJMODE", mode);
+                }
+                continue;
+            }
             let hv = match vals.as_slice() {
                 [x, y, z] if x.code == 10 => HVal::Point(Vec3::new(x.f64(), y.f64(), z.f64())),
                 [x, y] if x.code == 10 => HVal::Point(Vec3::new(x.f64(), y.f64(), 0.0)),
@@ -1436,10 +1449,6 @@ fn header(tags: &[Tag], d: &mut Drawing) {
             };
             // $DIMDSEP holds a character code; the dimension style holds the character.
             let hv = match hv {
-                hv if name == "PROJMODE" => HVal::Int(match hv {
-                    HVal::Int(mode @ (0 | 1 | 2)) => mode,
-                    _ => 0,
-                }),
                 HVal::Int(n) if name == "DIMDSEP" => match u32::try_from(n).ok().and_then(char::from_u32).filter(|c| !c.is_control()) {
                     Some(c) => HVal::Str(c.to_string()),
                     None => continue,

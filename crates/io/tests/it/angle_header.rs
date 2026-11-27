@@ -42,6 +42,9 @@ fn projmode_dxf_preserves_valid_values_and_defaults_to_none() {
         ("9\n$PROJMODE\n70\n2\n", 2),
         ("9\n$PROJMODE\n70\n9\n", 0),
         ("9\n$PROJMODE\n1\n2\n", 0),
+        ("9\n$PROJMODE\n290\n1\n", 0),
+        ("9\n$PROJMODE\n71\n2\n", 0),
+        ("9\n$PROJMODE\n70\n1\n9\n$PROJMODE\n71\n2\n", 1),
     ] {
         let input = format!("0\nSECTION\n2\nHEADER\n{field}0\nENDSEC\n0\nEOF\n");
         let d = cadcraft_io::read_dxf(input.as_bytes()).unwrap();
