@@ -124,6 +124,14 @@ pub fn specs() -> Vec<CommandSpec> {
 // ---------------- core operations ----------------
 
 pub(crate) fn transform_entities(s: &mut Session, hs: &[Handle], m: &Mat3, copy: bool) -> Result<Vec<Handle>> {
+    edit_entities(s, hs, copy, |kind| kind.transform(m))
+}
+
+pub(super) fn translate_entities_3d(s: &mut Session, hs: &[Handle], delta: Vec3, copy: bool) -> Result<Vec<Handle>> {
+    edit_entities(s, hs, copy, |kind| kind.translate_3d(delta))
+}
+
+fn edit_entities(s: &mut Session, hs: &[Handle], copy: bool, edit: impl Fn(&mut EntityKind)) -> Result<Vec<Handle>> {
     let d = s.doc_mut()?;
     let mut out = Vec::new();
     for h in hs {
@@ -132,7 +140,7 @@ pub(crate) fn transform_entities(s: &mut Session, hs: &[Handle], m: &Mat3, copy:
             let Some(e) = d.entity(*h).map(|e| (**e).clone()) else { continue };
             let nh = d.new_handle();
             let mut ne = Entity { handle: nh, ..e };
-            ne.kind.transform(m);
+            edit(&mut ne.kind);
             if let Some(st) = d.space_mut(&sp) {
                 st.push(ne);
                 out.push(nh);
@@ -142,7 +150,7 @@ pub(crate) fn transform_entities(s: &mut Session, hs: &[Handle], m: &Mat3, copy:
             if locked {
                 continue;
             }
-            d.modify_entity(*h, |e| e.kind.transform(m))?;
+            d.modify_entity(*h, |e| edit(&mut e.kind))?;
             out.push(*h);
         }
     }
@@ -2584,8 +2592,11 @@ impl Interactive for SelectThen {
                 Ok(Step::Continue)
             }
             (Op::Move, 1, Input::Point3(p)) => {
-                let d = p.xy() - base;
-                transform_entities(s, &self.objs, &Mat3::translate(d), false)?;
+                if s.input_is_spatial_end_override && let Some(&base) = self.pts.first() {
+                    translate_entities_3d(s, &self.objs, p - base, false)?;
+                } else {
+                    transform_entities(s, &self.objs, &Mat3::translate(p.xy() - base), false)?;
+                }
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
@@ -2668,6 +2679,11 @@ impl Interactive for SelectThen {
             _ => return Vec::new(),
         };
         let Ok(d) = s.doc() else { return Vec::new() };
+        let spatial_move = if self.op == Op::Move {
+            s.preview_spatial_end_override(c, base3).map(|p| p - base3)
+        } else {
+            None
+        };
         let mut out: Vec<EntityKind> = self
             .objs
             .iter()
@@ -2675,7 +2691,11 @@ impl Interactive for SelectThen {
             .filter_map(|h| d.entity(*h))
             .map(|e| {
                 let mut k = e.kind.clone();
-                k.transform(&m);
+                if let Some(delta) = spatial_move {
+                    k.translate_3d(delta);
+                } else {
+                    k.transform(&m);
+                }
                 k
             })
             .collect();
@@ -2701,6 +2721,9 @@ impl Interactive for SelectThen {
             return None;
         }
         let base3 = self.pts.first().copied()?;
+        if self.op == Op::Move && s.preview_spatial_end_override(c, base3).is_some() {
+            return None;
+        }
         let base = base3.xy();
         let matrix = match self.op {
             Op::Move | Op::Copy => Mat3::translate(c - base),

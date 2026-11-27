@@ -744,6 +744,8 @@ pub struct Session {
     pub cursor3_snapped: bool,
     /// Flag indicating whether the point currently being dispatched came from an object snap.
     pub input_is_snapped: bool,
+    /// An already-resolved spatial endpoint offered by a one-shot END override.
+    pub(crate) input_is_spatial_end_override: bool,
     /// Flag indicating whether the point currently being dispatched came from explicit typed coordinates.
     pub input_is_explicit: bool,
     /// Whether the session is actively attached to an interactive UI canvas.
@@ -841,6 +843,7 @@ impl Session {
             cursor3_base: None,
             cursor3_snapped: false,
             input_is_snapped: false,
+            input_is_spatial_end_override: false,
             input_is_explicit: false,
             is_interactive_ui: false,
             cursor_deferred: None,
@@ -1520,18 +1523,15 @@ impl Session {
     /// Feed an object-snap pick, retaining its viewport origin for measurements. Point modifiers
     /// that combine or constrain coordinates produce ordinary drawing-space points.
     pub fn input_snapped(&mut self, hit: snap::SnapHit) -> Result<()> {
-        if hit.mode == snap::mode::APP
-            && hit.point3.is_some()
-            && matches!(self.point_mods.as_slice(), [pointmod::Frame::Snap { mode: snap::mode::APP }])
-        {
-            self.point_mods.pop();
-        }
+        let endpoint_override = self.consume_resolved_spatial_override(&hit) && hit.mode == snap::mode::END;
+        let previous_override = std::mem::replace(&mut self.input_is_spatial_end_override, endpoint_override);
         let source = hit.viewport.filter(|_| self.point_mods.iter().all(|f| matches!(f, pointmod::Frame::Snap { mode } if *mode != 0)));
         let previous = std::mem::replace(&mut self.picked_viewport, source);
         self.input_is_snapped = true;
         let result = self.input(hit.input());
         self.input_is_snapped = false;
         self.picked_viewport = previous;
+        self.input_is_spatial_end_override = previous_override;
         result
     }
 
@@ -2001,6 +2001,13 @@ impl Session {
         } else {
             cursor.to3(base.z)
         }
+    }
+
+    pub(crate) fn preview_spatial_end_override(&self, cursor: Vec2, base: Vec3) -> Option<Vec3> {
+        (self.cursor3_snapped
+            && matches!(self.point_mods.as_slice(), [pointmod::Frame::Snap { mode: snap::mode::END }])
+            && self.cursor3_valid && self.cursor == cursor && self.cursor3_base == Some(base))
+            .then_some(self.cursor3)
     }
 
     /// Preview entities for the cursor: objects drawn with their own properties

@@ -257,6 +257,20 @@ impl Session {
         None
     }
 
+    /// Consume a single override already resolved spatially by the view. Nested
+    /// coordinate modifiers still collect and combine points through their own frames.
+    pub(crate) fn consume_resolved_spatial_override(&mut self, hit: &SnapHit) -> bool {
+        if matches!(hit.mode, mode::APP | mode::END)
+            && hit.point3.is_some_and(Vec3::is_finite)
+            && matches!(self.point_mods.as_slice(), [Frame::Snap { mode }] if *mode == hit.mode)
+        {
+            self.point_mods.pop();
+            true
+        } else {
+            false
+        }
+    }
+
     /// An input while modifiers are pending.
     pub(crate) fn modifier_input(&mut self, input: Input) -> Result<()> {
         // An angle override only constrains a point: anything else goes to the prompt below it.

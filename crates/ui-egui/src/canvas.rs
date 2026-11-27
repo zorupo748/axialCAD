@@ -6051,6 +6051,55 @@ mod hatch_pick_tests {
         }
 
         #[test]
+        fn one_shot_end_retains_the_other_elevation_for_stretch_and_move() {
+            use cadcraft_doc::{EntityKind, Line};
+            use super::super::{store_cursor_resolution, submit_canvas_point};
+
+            for (mode, point) in [
+                ("grip stretch", Vec3::new(-2.0, 5.0, 20.0)),
+                ("grip move", Vec3::new(-4.0, 1.0, 20.0)),
+                ("move", Vec3::new(-2.0, 5.0, 20.0)),
+            ] {
+                let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+                app.session.set_drawing_plane_offset_automatic();
+                let a = Vec3::new(-4.0, 1.0, 30.0);
+                let b = Vec3::new(4.0, 1.0, 30.0);
+                let target = app.session.add_entity(EntityKind::Line(Line { a, b })).unwrap();
+                app.session.add_entity(EntityKind::Line(Line { a: point, b: point + Vec3::Y * 3.0 })).unwrap();
+                let mut camera = app.session.camera();
+                camera.target = point;
+                app.session.set_camera(camera);
+                if mode == "move" {
+                    app.session.start("move").unwrap();
+                    app.session.input(Input::Pick(vec![target])).unwrap();
+                    app.session.input(Input::Enter).unwrap();
+                    app.session.input(Input::Point3(a)).unwrap();
+                } else {
+                    app.session.start_grip_edit(&[(target, 0)]).unwrap();
+                    if mode == "grip move" {
+                        app.session.input(Input::Enter).unwrap();
+                    }
+                }
+
+                app.session.cmdline("_END").unwrap();
+                assert_eq!(app.session.snap_override(), Some(cadcraft_engine::snap::mode::END));
+                let resolved = resolve_at(&mut app, point).expect("END point");
+                assert_eq!(resolved.1, point);
+                assert_eq!(app.canvas.snap.and_then(|hit| hit.point3), Some(point));
+                store_cursor_resolution(&mut app, Some(resolved));
+                let preview = app.session.preview(resolved.0);
+                let EntityKind::Line(preview_line) = &preview[0].kind else { panic!("expected line") };
+                let other = if mode == "grip stretch" { b } else { b + point - a };
+                assert_eq!((preview_line.a, preview_line.b), (point, other), "{mode}");
+
+                submit_canvas_point(&mut app, resolved.1).unwrap();
+                assert_eq!(app.session.snap_override(), None);
+                let stored = app.session.doc().unwrap().entity(target).unwrap();
+                assert_eq!(stored.kind, preview[0].kind, "{mode}");
+            }
+        }
+
+        #[test]
         fn base3_grip_transform_modes_use_the_same_cursor_for_preview_and_apply() {
             use cadcraft_doc::{EntityKind, Line};
             use cadcraft_geom::Mat3;

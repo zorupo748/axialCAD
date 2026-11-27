@@ -14,7 +14,7 @@ use cadcraft_geom::{Mat3, Vec2, Vec3};
 use super::gripcmds::stretch_grips;
 use super::helpers::line3;
 use super::machines::number;
-use super::modify::transform_entities;
+use super::modify::{transform_entities, translate_entities_3d};
 use crate::grips::{GripAction, GripMode, grip_action, grip_actions, mode_matrix};
 use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Running, Session, Step};
 
@@ -218,6 +218,9 @@ impl GripEdit {
         };
         let changed = match (self.mode, m) {
             (GripMode::Stretch, _) => !stretch_grips(s, &self.hot, &self.targets, delta, self.copy)?.is_empty(),
+            (GripMode::Move, _) if s.input_is_spatial_end_override => {
+                !translate_entities_3d(s, &self.targets, to - self.base, self.copy)?.is_empty()
+            }
             (_, Some(m)) => !transform_entities(s, &self.targets, &m, self.copy)?.is_empty(),
             (_, None) => return Err(other("Invalid point.")),
         };
@@ -470,7 +473,12 @@ impl Interactive for GripEdit {
             };
             super::gripcmds::stretched(s, &self.hot, &self.targets, delta).into_iter().take(500).map(|(_, k)| k).collect()
         } else {
-            match self.matrix(to) {
+            let spatial_move = if self.mode == GripMode::Move {
+                s.preview_spatial_end_override(c, base).map(|p| p - base)
+            } else {
+                None
+            };
+            match self.matrix(to).or_else(|| spatial_move.map(|_| Mat3::IDENTITY)) {
                 Some(m) => self
                     .targets
                     .iter()
@@ -478,7 +486,11 @@ impl Interactive for GripEdit {
                     .filter_map(|h| d.entity(*h))
                     .map(|e| {
                         let mut k = e.kind.clone();
-                        k.transform(&m);
+                        if let Some(delta) = spatial_move {
+                            k.translate_3d(delta);
+                        } else {
+                            k.transform(&m);
+                        }
                         k
                     })
                     .collect(),
