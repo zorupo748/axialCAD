@@ -1381,3 +1381,93 @@ fn projmode_none_trims_an_elevated_arc_at_real_contact() {
     let EntityKind::Arc(a) = &doc.entity(kept).unwrap().kind else { panic!("expected arc") };
     assert_eq!((a.center, a.radius, a.start, a.end), (center, 5.0, FRAC_PI_2, PI));
 }
+
+#[test]
+fn projmode_none_tolerates_small_depth_noise_without_crossing_real_gaps() {
+    use cadcraft_engine::Input;
+    use cadcraft_engine::doc::{Circle, Line};
+    use cadcraft_geom::Vec3;
+
+    for dz in [0.0, 1e-6, 1e-3, 1.0] {
+        for circle in [false, true] {
+            let mut s = Session::new();
+            let (kind, a, b, pick) = if circle {
+                (
+                    EntityKind::Circle(Circle { center: Vec3::ZERO, radius: 22.0 }),
+                    Vec3::new(-44.0, 0.0, dz), Vec3::new(44.0, 0.0, dz), Vec3::new(0.0, 22.0, 0.0),
+                )
+            } else {
+                (
+                    EntityKind::Line(Line { a: Vec3::new(-52.0, 0.0, 0.0), b: Vec3::new(52.0, 0.0, 0.0) }),
+                    Vec3::new(0.0, -40.0, dz), Vec3::new(0.0, 40.0, dz), Vec3::new(-25.0, 0.0, 0.0),
+                )
+            };
+            let target = s.add_entity(kind).unwrap();
+            let cutter = s.add_entity(EntityKind::Line(Line { a, b })).unwrap();
+            s.start("trim").unwrap();
+            s.is_interactive_ui = true;
+            s.cursor_entity_point = Some((target, pick.xy(), Some(pick)));
+            let preview = s.preview(pick.xy());
+            s.input(Input::EntityPoint { handle: Some(target), point: pick.xy(), point3: Some(pick) }).unwrap();
+            let doc = s.doc().unwrap();
+            let should_cut = dz < 1.0;
+            assert_eq!(preview.len(), usize::from(should_cut), "preview, dz={dz}, circle={circle}");
+            assert_eq!(doc.entity(target).is_none(), should_cut, "apply, dz={dz}, circle={circle}");
+            if should_cut {
+                let fragment = doc.model.iter().find(|e| e.handle != cutter).unwrap();
+                match &fragment.kind {
+                    EntityKind::Line(l) if !circle => assert_eq!(l.a, Vec3::ZERO),
+                    EntityKind::Arc(a) if circle => assert_eq!((a.center.z, a.start, a.end), (0.0, std::f64::consts::PI, 0.0)),
+                    _ => panic!("unexpected surviving fragment"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn projmode_none_uses_coplanar_ellipse_and_spline_edges_like_ucs() {
+    use cadcraft_engine::doc::{Circle, Line};
+    use cadcraft_geom::Vec3;
+
+    for (command, params) in [
+        ("ellipse", json!({"center":[0,0], "major":[20,0], "ratio":0.5})),
+        ("spline", json!({"fit":[[-40,0],[0,0],[40,0]]})),
+    ] {
+        for circle in [false, true] {
+            let mut results = Vec::new();
+            for mode in [0, 1] {
+                let mut s = Session::new();
+                s.doc_mut().unwrap().header.set_i64("PROJMODE", mode);
+                s.execute(command, &params).unwrap();
+                let (target, pick) = if circle {
+                    (EntityKind::Circle(Circle { center: Vec3::ZERO, radius: 12.0 }), [0, 12])
+                } else {
+                    (EntityKind::Line(Line { a: Vec3::new(0.0, -30.0, 0.0), b: Vec3::new(0.0, 30.0, 0.0) }), [0, 2])
+                };
+                let handle = s.add_entity(target).unwrap();
+                s.execute("trim", &json!({"handle":handle.hex(), "pick":pick, "mode":"quick"})).unwrap();
+                let doc = s.doc().unwrap();
+                assert!(doc.entity(handle).is_none(), "{command}, circle={circle}, mode={mode}");
+                results.push(doc.model.iter().skip(1).map(|e| e.kind.clone()).collect::<Vec<_>>());
+            }
+            assert_eq!(results[0].len(), results[1].len(), "{command}, circle={circle}");
+            assert!(!results[0].is_empty());
+            for (a, b) in results[0].iter().zip(&results[1]) {
+                match (a, b) {
+                    (EntityKind::Line(a), EntityKind::Line(b)) => {
+                        assert!(a.a.near(b.a, 1e-8) && a.b.near(b.b, 1e-8));
+                    }
+                    (EntityKind::Arc(a), EntityKind::Arc(b)) => {
+                        assert!(a.center.near(b.center, 1e-8));
+                        assert!((a.radius - b.radius).abs() < 1e-8);
+                        for (a, b) in [(a.start, b.start), (a.end, b.end)] {
+                            assert!(cadcraft_geom::Vec2::from_angle(a).near(cadcraft_geom::Vec2::from_angle(b), 1e-8));
+                        }
+                    }
+                    _ => panic!("unexpected fragments for {command}, circle={circle}"),
+                }
+            }
+        }
+    }
+}

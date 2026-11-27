@@ -7,10 +7,14 @@ use crate::{EngineError, Result, Session};
 use super::{CurvePick, Edges, cutting_entities, implied_edge, prim_to_segments, proj_mode};
 
 const REL_TOL: f64 = 1e-9;
-const ABS_TOL: f64 = 1e-9;
+// Linear contact tolerance in drawing units. Use the local extent of the two
+// operands, so neither a far-off origin nor unrelated geometry inflates it.
+const CONTACT_REL_TOL: f64 = 2e-5;
+const CONTACT_MIN_TOL: f64 = 1e-8;
+const CONTACT_MAX_TOL: f64 = 1e-2;
 
-fn tolerance(a: f64, b: f64) -> f64 {
-    ABS_TOL.max(REL_TOL * a.max(b))
+fn contact_tolerance(a: f64, b: f64) -> f64 {
+    (CONTACT_REL_TOL * a.abs().max(b.abs())).clamp(CONTACT_MIN_TOL, CONTACT_MAX_TOL)
 }
 
 fn degenerate() -> EngineError {
@@ -79,18 +83,21 @@ impl Round {
         if !length.is_finite() || length <= 1e-12 || !self.radius.is_finite() {
             return Vec::new();
         }
-        let tol = tolerance(length, self.radius);
+        let tol = contact_tolerance(length, self.radius);
         let ta = tol / length;
         let height = (line.a - self.center).dot(self.normal);
         let rise = direction.dot(self.normal);
-        if height.abs() <= tol && (height + rise).abs() <= tol && (!line.before && !line.after || rise == 0.0) {
+        if height.abs() <= tol && (height + rise).abs() <= tol {
             let local = Line::new(self.local(line.a), self.local(line.b));
-            return line_circle(&local, &Circle::new(Vec2::ZERO, self.radius))
+            let hits: Vec<_> = line_circle(&local, &Circle::new(Vec2::ZERO, self.radius))
                 .into_iter()
                 .filter(|&(_, t)| line.contains(t, ta))
                 .map(|(_, t)| line.a + direction * t)
                 .filter(|&p| self.contains(p, tol))
                 .collect();
+            if !hits.is_empty() || (!line.before && !line.after) {
+                return hits;
+            }
         }
         if rise == 0.0 {
             return Vec::new();
@@ -101,7 +108,7 @@ impl Round {
     }
 
     fn intersect_round(self, other: Self) -> Vec<Vec3> {
-        let tol = tolerance(self.radius, other.radius);
+        let tol = contact_tolerance(self.radius, other.radius);
         let axis = self.normal.cross(other.normal);
         let offset = (other.center - self.center).dot(other.normal);
         let points: Vec<_> = if axis.len() <= REL_TOL {
@@ -169,11 +176,28 @@ fn physical_cutters(s: &Session, edges: Edges, entity: &Entity) -> Result<Vec<Cu
                     });
                 }
             }
-            // The 2D primitives of other entities do not establish a WCS location.
+            // Reuse the planar cutter approximation for these curves only when their
+            // geometry provides a known horizontal WCS plane.
+            EntityKind::Ellipse(ellipse)
+                if e.common.extrusion.near(Vec3::Z, REL_TOL) && ellipse.major.z == 0.0 =>
+            {
+                planar_curve_cutters(e, ellipse.center.z, &mut out);
+            }
+            EntityKind::Spline(_) if e.common.extrusion.near(Vec3::Z, REL_TOL) => {
+                // The document spline representation stores points in WCS XY at Z=0.
+                planar_curve_cutters(e, 0.0, &mut out);
+            }
             _ => {}
         }
     }
     Ok(out)
+}
+
+fn planar_curve_cutters(entity: &Entity, z: f64, out: &mut Vec<Cutter>) {
+    out.extend(entity.kind.prims().iter().flat_map(prim_to_segments).filter_map(|segment| {
+        let Segment::Line(line) = segment else { return None };
+        Some(Cutter::Line(SpatialLine::finite(line.a.to3(z), line.b.to3(z))))
+    }));
 }
 
 fn line_contact(target: SpatialLine, cutter: SpatialLine) -> Option<f64> {
@@ -191,7 +215,7 @@ fn line_contact(target: SpatialLine, cutter: SpatialLine) -> Option<f64> {
     }
     let offset = cutter.a - target.a;
     let (t, w) = (offset.cross(v).dot(cross) / (denom * la), offset.cross(u).dot(cross) / (denom * lb));
-    let tol = tolerance(la, lb);
+    let tol = contact_tolerance(la, lb);
     (target.contains(t, tol / la) && cutter.contains(w, tol / lb) && (a * t - offset - b * w).len() <= tol).then_some(t)
 }
 

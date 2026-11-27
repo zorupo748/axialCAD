@@ -6931,6 +6931,63 @@ mod hatch_pick_tests {
         }
 
         #[test]
+        fn trim_none_oblique_auto_cuts_pointer_drawn_lines_and_circles_on_xy() {
+            use cadcraft_doc::EntityKind;
+            use super::super::{screen_entity_point, store_cursor_resolution, submit_canvas_point};
+
+            for (circle, noise) in [(false, 0.0), (true, 0.0), (false, 1e-6), (true, 1e-6)] {
+                let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+                app.session.set_drawing_plane_automatic();
+                app.session.set_drawing_plane_offset_automatic();
+                app.session.settings.axistrack = false;
+                let draw = |app: &mut CadApp, command, a, b| {
+                    app.session.start(command).unwrap();
+                    for p in [a, b] {
+                        let resolved = resolve_at(app, p).expect("free Auto point");
+                        assert_eq!(resolved.1.z, p.z);
+                        store_cursor_resolution(app, Some(resolved));
+                        submit_canvas_point(app, resolved.1).unwrap();
+                    }
+                    if command == "line" {
+                        app.session.input(Input::Enter).unwrap();
+                    }
+                };
+                let target_right = Vec3::new(4.0, 0.0, 0.0);
+                let (a, b) = if circle {
+                    draw(&mut app, "circle", Vec3::ZERO, target_right);
+                    (Vec3::new(-7.0, 0.0, noise), Vec3::new(7.0, 0.0, noise))
+                } else {
+                    draw(&mut app, "line", -target_right, target_right);
+                    (Vec3::new(0.0, -4.0, noise), Vec3::new(0.0, 4.0, noise))
+                };
+                let target = app.session.doc().unwrap().model.iter().next().unwrap().handle;
+                if noise != 0.0 {
+                    app.session.settings.osmode = cadcraft_engine::snap::mode::NOD;
+                    for p in [a, b] {
+                        app.session.add_entity(EntityKind::Point(cadcraft_doc::Point { p, angle: 0.0 })).unwrap();
+                    }
+                }
+                draw(&mut app, "line", a, b);
+                app.session.settings.osmode = 0;
+                app.session.start("trim").unwrap();
+                let at = if circle { Vec3::new(0.0, 4.0, 0.0) } else { Vec3::new(-2.0, 0.0, 0.0) };
+                let xf = test_xf(&app);
+                let pick = screen_entity_point(&app, &xf, xf.to_screen3(at)).unwrap();
+                let Input::EntityPoint { handle: Some(h), point, point3 } = pick else { panic!("expected projected target") };
+                assert_eq!(h, target);
+                app.session.is_interactive_ui = true;
+                app.session.cursor_entity_point = Some((h, point, point3));
+                let preview = app.session.preview(point);
+                assert_eq!(preview.len(), 1);
+                app.session.input(pick).unwrap();
+                let doc = app.session.doc().unwrap();
+                assert!(doc.entity(target).is_none());
+                assert_eq!(doc.model.iter().filter(|e| !matches!(e.kind, EntityKind::Point(_))).count(), 2);
+                assert_eq!(doc.model.iter().any(|e| matches!(e.kind, EntityKind::Arc(_))), circle);
+            }
+        }
+
+        #[test]
         fn automatic_oblique_plane_ignores_camera_target_depth_and_uses_reference_depth() {
             let mut app = CadApp::new(Session::new(), Services::default());
             app.session.execute("view.swiso", &json!({})).unwrap();

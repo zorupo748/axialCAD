@@ -81,8 +81,10 @@ constraints 10%.
 **TRIM and EXTEND projection.** `PROJMODE` defaults to None (WCS contact), with UCS XY
 and View as explicit alternatives. This applies to direct TRIM of lines, circles and arcs, and
 to direct EXTEND of lines, including JSON handle-and-pick calls. A vertical line needs a
-three-coordinate JSON pick. In None, lines, circles, arcs, rays, construction lines and
-polyline segments can supply WCS cutting edges. Window, Crossing, Fence and arc EXTEND
+three-coordinate JSON pick. In None, lines, circles, arcs, rays, construction lines,
+polyline segments, horizontal ellipses and planar splines can supply WCS cutting edges.
+Contact allows 2e-5 of the local operand size, bounded between 1e-8 and 1e-2 drawing
+units. Window, Crossing, Fence and arc EXTEND
 still use WCS XY, even in None. Direct edits of other target types retain their planar
 algorithms. Direct circle and arc targets still require world-Z extrusion.
 
