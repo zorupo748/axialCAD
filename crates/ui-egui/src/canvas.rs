@@ -7037,10 +7037,13 @@ mod hatch_pick_tests {
     fn trim_arc_preview_is_painted_at_the_circle_height() {
         let mut app = CadApp::new(Session::new(), Services::default());
         app.session.execute("view.swiso", &json!({})).unwrap();
-        let center = Vec3::new(0.0, 0.0, 12.0);
+        let center = Vec3::new(0.0, 0.0, 30.0);
         app.session.set_camera(OrbitCamera { target: center, height: 40.0, ..app.session.camera() });
-        app.session.add_entity(cadcraft_doc::EntityKind::Circle(cadcraft_doc::Circle { center, radius: 5.0 })).unwrap();
-        app.session.execute("line", &json!({ "points": [[0.0, -8.0, 12.0], [0.0, 8.0, 12.0]] })).unwrap();
+        let target = app.session.add_entity(cadcraft_doc::EntityKind::Circle(cadcraft_doc::Circle { center, radius: 5.0 })).unwrap();
+        app.session.execute("line", &json!({ "points": [[-8,0,30], [8,0,30]] })).unwrap();
+        for x in [-2, 2] {
+            app.session.execute("line", &json!({ "points": [[x,-8,0], [x,8,0]] })).unwrap();
+        }
         app.session.start("trim").unwrap();
         let ctx = egui::Context::default();
         let frame = |app: &mut CadApp, events, time| {
@@ -7057,12 +7060,28 @@ mod hatch_pick_tests {
         };
         frame(&mut app, Vec::new(), 0.0);
         let xf = app.canvas.xf.unwrap();
-        let at = xf.to_screen3(center + Vec3::X * 5.0);
+        let at = xf.to_screen3(center + Vec3::Y * 5.0);
         let output = frame(&mut app, vec![egui::Event::PointerMoved(at)], 0.1);
         assert!(output.shapes.iter().any(|shape| {
             matches!(&shape.shape, egui::Shape::Path(path) if path.stroke.width == 4.5
                 && path.points.iter().any(|point| point.distance(at) < 1.0))
         }));
+        assert_eq!(app.session.cursor_entity_point.map(|(handle, _, _)| handle), Some(target));
+        let preview = app.session.preview(app.session.cursor);
+        let cadcraft_doc::EntityKind::Arc(removed) = &preview.first().expect("semicircle preview").kind else {
+            panic!("expected arc preview");
+        };
+        assert_eq!((removed.center, removed.start, removed.end), (center, 0.0, std::f64::consts::PI));
+        let button =
+            |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+        frame(&mut app, vec![button(true), button(false)], 0.2);
+        let doc = app.session.doc().unwrap();
+        assert!(doc.entity(target).is_none());
+        let kept = doc.model.iter().find_map(|e| match &e.kind {
+            cadcraft_doc::EntityKind::Arc(arc) => Some(arc),
+            _ => None,
+        }).expect("surviving semicircle");
+        assert_eq!((kept.center, kept.radius, kept.start, kept.end), (center, 5.0, removed.end, removed.start));
     }
 
     #[test]

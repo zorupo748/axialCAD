@@ -31,3 +31,23 @@ fn angbase_in_degrees_is_read_as_radians() {
     let base = d.header.f64("ANGBASE", 0.0);
     assert!((base - std::f64::consts::FRAC_PI_2).abs() < 1e-12, "$ANGBASE 90.0 read as {base} radians");
 }
+
+#[test]
+fn projmode_dxf_preserves_valid_values_and_defaults_to_none() {
+    assert_eq!(Drawing::new_metric().header.i64("PROJMODE", -1), 0);
+    for (field, expected) in [
+        ("", 0),
+        ("9\n$PROJMODE\n70\n0\n", 0),
+        ("9\n$PROJMODE\n70\n1\n", 1),
+        ("9\n$PROJMODE\n70\n2\n", 2),
+        ("9\n$PROJMODE\n70\n9\n", 0),
+        ("9\n$PROJMODE\n1\n2\n", 0),
+    ] {
+        let input = format!("0\nSECTION\n2\nHEADER\n{field}0\nENDSEC\n0\nEOF\n");
+        let d = cadcraft_io::read_dxf(input.as_bytes()).unwrap();
+        assert_eq!(d.header.get("PROJMODE"), Some(&HVal::Int(expected)));
+        let written = cadcraft_io::write_dxf(&d);
+        let written = cadcraft_io::read_dxf(written.as_bytes()).unwrap();
+        assert_eq!(written.header.get("PROJMODE"), Some(&HVal::Int(expected)));
+    }
+}

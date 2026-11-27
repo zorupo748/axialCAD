@@ -1266,3 +1266,118 @@ fn click_extend_arc_preview_matches_the_added_sweep_at_source_height() {
     assert_eq!(arc.start, added.start);
     assert_eq!(stored.common.extrusion, Vec3::Z);
 }
+
+#[test]
+fn projmode_none_elevated_circle_ignores_ground_and_trims_only_the_selected_semicircle() {
+    use cadcraft_engine::{Input, doc::Circle};
+    use cadcraft_geom::{Vec2, Vec3};
+
+    // The first case has no real contact. The second has only one real intersection.
+    // The last reproduces the user's full secant with extra ground cutters.
+    for end in [None, Some(0), Some(8)] {
+        let mut s = Session::new();
+        assert_eq!(header(&s, "PROJMODE"), 0);
+        let center = Vec3::new(0.0, 0.0, 30.0);
+        let target = s.add_entity(EntityKind::Circle(Circle { center, radius: 5.0 })).unwrap();
+        for x in [-2, 2] {
+            s.execute("line", &json!({ "points": [[x,-8,0], [x,8,0]] })).unwrap();
+        }
+        if let Some(end) = end {
+            s.execute("line", &json!({ "points": [[-8,0,30], [end,0,30]] })).unwrap();
+        }
+        let pick = Vec2::new(0.0, 5.0);
+        let point3 = Some(pick.to3(30.0));
+        s.start("trim").unwrap();
+        s.is_interactive_ui = true;
+        s.cursor_entity_point = Some((target, pick, point3));
+        let preview = s.preview(pick);
+        s.input(Input::EntityPoint { handle: Some(target), point: pick, point3 }).unwrap();
+        let doc = s.doc().unwrap();
+
+        if end != Some(8) {
+            assert!(preview.is_empty());
+            assert!(matches!(doc.entity(target).unwrap().kind, EntityKind::Circle(_)));
+            continue;
+        }
+        let [removed] = preview.as_slice() else { panic!("expected one arc preview") };
+        let EntityKind::Arc(arc) = &removed.kind else { panic!("expected arc preview") };
+        assert_eq!((arc.center, arc.radius, arc.start, arc.end), (center, 5.0, 0.0, std::f64::consts::PI));
+        assert_eq!(removed.common.extrusion, Vec3::Z);
+        assert!(doc.entity(target).is_none());
+        let mut kept = doc.model.iter().filter_map(|e| match &e.kind {
+            EntityKind::Arc(a) => Some((a, e.common.extrusion)),
+            _ => None,
+        });
+        let (kept_arc, normal) = kept.next().expect("surviving semicircle");
+        assert_eq!((kept_arc.center, kept_arc.radius, kept_arc.start, kept_arc.end), (center, 5.0, arc.end, arc.start));
+        assert_eq!(normal, Vec3::Z);
+        assert!(kept.next().is_none());
+    }
+}
+
+#[test]
+fn projmode_vertical_json_distinguishes_physical_contact_ucs_degeneracy_and_view() {
+    use cadcraft_engine::doc::Line;
+    use cadcraft_geom::Vec3;
+
+    for (mode, offset, expect_cut) in [(0, 3, false), (0, 0, true), (1, 0, false), (2, 3, true)] {
+        let mut s = Session::new();
+        s.execute("view.front", &json!({})).unwrap();
+        s.doc_mut().unwrap().header.set_i64("PROJMODE", mode);
+        let a = Vec3::new(0.0, 0.0, 20.0);
+        let b = Vec3::new(0.0, 0.0, 40.0);
+        let target = s.add_entity(EntityKind::Line(Line { a, b })).unwrap();
+        s.execute("line", &json!({ "points": [[-8,offset,30], [8,offset,30]] })).unwrap();
+
+        let result = s.execute("trim", &json!({ "handle": target.hex(), "pick": [0,0,38], "mode": "quick" }));
+        if mode == 1 {
+            assert!(result.unwrap_err().to_string().contains("Degenerate projection"));
+        } else {
+            result.unwrap();
+        }
+        let doc = s.doc().unwrap();
+        assert_eq!(doc.entity(target).is_none(), expect_cut);
+        if expect_cut {
+            let expected = Vec3::new(0.0, 0.0, 30.0);
+            assert!(doc.model.iter().any(|e| matches!(&e.kind, EntityKind::Line(l) if l.a == a && l.b.near(expected, 1e-9))));
+        }
+    }
+}
+
+#[test]
+fn projmode_projected_quick_erases_only_a_circle_with_zero_hits() {
+    for mode in [1, 2] {
+        for one_hit in [false, true] {
+            let mut s = Session::new();
+            s.doc_mut().unwrap().header.set_i64("PROJMODE", mode);
+            let target = s.execute("circle", &json!({ "center": [0,0,30], "radius": 5 })).unwrap();
+            if one_hit {
+                s.execute("line", &json!({ "points": [[-8,0,0], [0,0,0]] })).unwrap();
+            }
+            let handle = &target["handle"];
+            s.execute("trim", &json!({ "handle": handle, "pick": [0,5,30], "mode": "quick" })).unwrap();
+            let h = cadcraft_engine::doc::Handle::parse_hex(handle.as_str().unwrap()).unwrap();
+            assert_eq!(s.doc().unwrap().entity(h).is_some(), one_hit);
+        }
+    }
+}
+
+#[test]
+fn projmode_none_trims_an_elevated_arc_at_real_contact() {
+    use cadcraft_engine::doc::Arc;
+    use cadcraft_geom::Vec3;
+    use std::f64::consts::{FRAC_PI_2, PI};
+
+    let mut s = Session::new();
+    let center = Vec3::new(0.0, 0.0, 30.0);
+    let handle = s.add_entity(EntityKind::Arc(Arc { center, radius: 5.0, start: 0.0, end: PI })).unwrap();
+    // A floor edge crosses the arc's plan, while the vertical edge meets it in WCS.
+    s.execute("line", &json!({ "points": [[-2,0,0], [-2,8,0]] })).unwrap();
+    s.execute("line", &json!({ "points": [[0,5,20], [0,5,40]] })).unwrap();
+    let r = s.execute("trim", &json!({ "handle": handle.hex(), "pick": [4,3,30] })).unwrap();
+    let kept = cadcraft_engine::doc::Handle::parse_hex(r["handles"][0].as_str().unwrap()).unwrap();
+    let doc = s.doc().unwrap();
+    assert!(doc.entity(handle).is_none());
+    let EntityKind::Arc(a) = &doc.entity(kept).unwrap().kind else { panic!("expected arc") };
+    assert_eq!((a.center, a.radius, a.start, a.end), (center, 5.0, FRAC_PI_2, PI));
+}
