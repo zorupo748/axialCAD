@@ -84,13 +84,13 @@ pub fn specs() -> Vec<CommandSpec> {
             .menu(&["Modify", "Trim"])
             .alias(&["tr"])
             .params(
-                "{handle, pick: [x,y] | fence: [[x,y],...] | crossing: [[x,y],[x,y]], edges?: [hex], edgeMode?: \"extend\"|\"none\", mode?: \"quick\"|\"standard\"}",
+                "{handle, pick: [x,y] or [x,y,z] | fence: [[x,y],...] | crossing: [[x,y],[x,y]], edges?: [hex], edgeMode?: \"extend\"|\"none\", mode?: \"quick\"|\"standard\"}. PROJMODE applies to direct line/circle/arc picks. Window, Crossing and Fence use XY.",
             )
             .interactive(|_| Ok(Box::new(TrimM::new(false)))),
         CommandSpec::new("extend", "Extend", trimextend::run_extend)
             .menu(&["Modify", "Extend"])
             .alias(&["ex"])
-            .params("{handle, pick: [x,y] | fence: [[x,y],...] | crossing: [[x,y],[x,y]], edges?: [hex], edgeMode?: \"extend\"|\"none\"}")
+            .params("{handle, pick: [x,y] or [x,y,z] | fence: [[x,y],...] | crossing: [[x,y],[x,y]], edges?: [hex], edgeMode?: \"extend\"|\"none\"}. PROJMODE applies to direct line picks. Window, Crossing, Fence and arc extension use XY.")
             .interactive(|_| Ok(Box::new(TrimM::new(true)))),
         CommandSpec::new("fillet", "Fillet", run_fillet)
             .menu(&["Modify", "Fillet"])
@@ -953,6 +953,7 @@ pub(crate) struct TrimPieces {
     pub removed: Vec<EntityKind>,
 }
 
+/// Planar TRIM route for Window, Crossing and Fence. It deliberately ignores PROJMODE.
 pub(crate) fn trim_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges) -> Result<TrimPieces> {
     trim_geometry_impl(s, h, pick, edges, None)
 }
@@ -1112,7 +1113,6 @@ pub(crate) fn trim_at_pick(s: &mut Session, h: Handle, pick: CurvePick, edges: E
     replace_trimmed(s, h, pieces)
 }
 
-fn replace_trimmed(s: &mut Session, h: Handle, pieces: TrimPieces) -> Result<Vec<Handle>> {
 fn direct_trim(s: &Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool) -> Result<TrimPieces> {
     match trim_geometry_impl(s, h, pick.xy, edges, Some(pick)) {
         Err(e) if misses_edges(&e) => {
@@ -1129,6 +1129,7 @@ fn direct_trim(s: &Session, h: Handle, pick: CurvePick, edges: Edges, quick: boo
     }
 }
 
+fn replace_trimmed(s: &mut Session, h: Handle, pieces: TrimPieces) -> Result<Vec<Handle>> {
     let e = s.doc()?.entity(h).map(|e| (**e).clone()).ok_or_else(|| EngineError::Other("no such object".into()))?;
     let common = e.common.clone();
     let space = s.space();
@@ -1578,6 +1579,7 @@ fn extend_geometry(
             if from_b { line(a, np) } else { line(np, b) }
         }
         EntityKind::Arc(a) => {
+            // EXTEND of an arc still resolves hits in XY, even for direct picks.
             let cut = edge_segments(s, edges, h)?;
             let ga = Arc::new(a.center.xy(), a.radius, a.start, a.end);
             let from_end = pick.dist(ga.end_point()) < pick.dist(ga.start_point());

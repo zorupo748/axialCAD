@@ -454,7 +454,8 @@ impl Interactive for TrimM {
                     2 => "View",
                     _ => "Ucs",
                 };
-                Prompt::new("Enter a projection option", Accept::TEXT).kw(&["None", "Ucs", "View"]).default(cur)
+                Prompt::new("Enter a projection option (direct picks; Window, Crossing, Fence and arc EXTEND use XY)", Accept::TEXT)
+                    .kw(&["None", "Ucs", "View"]).default(cur)
             }
             Stage::Edge => Prompt::new("Enter an implied edge extension mode", Accept::TEXT).kw(&["Extend", "No extend"]).default(if edge_mode(s) {
                 "Extend"

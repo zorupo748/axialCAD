@@ -78,6 +78,14 @@ constraints 10%.
 
 ## Trim, extend, fillet, chamfer, break, join, lengthen (≈ 70%)
 
+**TRIM and EXTEND projection.** `PROJMODE` defaults to None (WCS contact), with UCS XY
+and View as explicit alternatives. This applies to direct TRIM of lines, circles and arcs, and
+to direct EXTEND of lines, including JSON handle-and-pick calls. A vertical line needs a
+three-coordinate JSON pick. In None, lines, circles, arcs, rays, construction lines and
+polyline segments can supply WCS cutting edges. Window, Crossing, Fence and arc EXTEND
+still use WCS XY, even in None. Direct edits of other target types retain their planar
+algorithms. Direct circle and arc targets still require world-Z extrusion.
+
 | Command | AutoCAD supports | axialCAD supports |
 |---|---|---|
 | TRIM | every curve type, quick and standard modes | line, arc, circle, polyline; ellipse and spline via sampled cutting (`modify.rs:485-656`, `modify2.rs` `trim_other`); a closed spline leaves one open spline On a closed polyline a pick before the first or after the last cut keeps the run between the cuts and nothing more (#726). |
