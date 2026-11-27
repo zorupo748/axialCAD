@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::helpers::line;
 use super::modify::{CurvePick, Edges, extend, extend_at_pick, trim, trim_at_pick, quick_mode, misses_edges, edge_mode, proj_mode, trim_window_entity};
-use super::{bad, point_param, points_param};
+use super::{bad, point3_param, point_param, points_param};
 use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Session, Step};
 
 /// Most fence points the JSON form takes.
@@ -252,8 +252,27 @@ fn run(s: &mut Session, p: &Value, extending: bool) -> Result<Value> {
         return Ok(json!({ key: n }));
     }
     let h = super::targets(s, p)?.first().copied().ok_or_else(|| bad(cmd, "`handle` is required"))?;
-    let pick = point_param(p, "pick").ok_or_else(|| bad(cmd, "`pick` ([x, y]) is required"))?;
-    let r = apply(s, h, pick, extending, edges, quick)?;
+    let value = p.get("pick").ok_or_else(|| bad(cmd, "`pick` is required"))?;
+    let z = value.as_array().and_then(|a| a.get(2)).or_else(|| value.get("z"));
+    if z.is_some_and(|z| z.as_f64().is_none()) {
+        return Err(bad(cmd, "`pick` Z must be numeric"));
+    }
+    let has_z = z.is_some()
+        || value.as_str().is_some_and(|text| text.matches(',').count() >= 2);
+    let world = if has_z {
+        Some(point3_param(p, "pick").ok_or_else(|| bad(cmd, "`pick` must be a finite WCS point"))?)
+    } else {
+        None
+    };
+    let xy = world.map(cadcraft_geom::Vec3::xy).or_else(|| point_param(p, "pick"))
+        .ok_or_else(|| bad(cmd, "`pick` ([x,y] or [x,y,z]) is required"))?;
+    let pick = CurvePick { xy, world };
+    let r = if extending {
+        extend_at_pick(s, h, pick, edges)?;
+        vec![h]
+    } else {
+        trim_at_pick(s, h, pick, edges, quick)?
+    };
     if extending { Ok(Value::Null) } else { Ok(json!({ "handles": r.iter().map(|h| h.hex()).collect::<Vec<_>>() })) }
 }
 
@@ -587,9 +606,10 @@ impl Interactive for TrimM {
                         if extending {
                             return extend_at_pick(s, h, pick, edges);
                         }
-                        let result = trim_at_pick(s, h, pick, edges);
-                        let new_hs = finish_trim(s, h, quick, result)?;
-                        m.update_edge_handles(h, &new_hs);
+                        let new_hs = trim_at_pick(s, h, pick, edges, quick)?;
+                        if new_hs.as_slice() != [h] {
+                            m.update_edge_handles(h, &new_hs);
+                        }
                         Ok(())
                     });
                     if let Err(e) = r {

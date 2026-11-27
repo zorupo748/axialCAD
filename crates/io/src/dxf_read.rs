@@ -1436,6 +1436,10 @@ fn header(tags: &[Tag], d: &mut Drawing) {
             };
             // $DIMDSEP holds a character code; the dimension style holds the character.
             let hv = match hv {
+                hv if name == "PROJMODE" => HVal::Int(match hv {
+                    HVal::Int(mode @ (0 | 1 | 2)) => mode,
+                    _ => 0,
+                }),
                 HVal::Int(n) if name == "DIMDSEP" => match u32::try_from(n).ok().and_then(char::from_u32).filter(|c| !c.is_control()) {
                     Some(c) => HVal::Str(c.to_string()),
                     None => continue,
@@ -1784,6 +1788,7 @@ fn read_budgeted(bytes: &[u8], mut table_cells_left: usize) -> Result<Drawing> {
     d.layouts.clear();
     // A file without $INSUNITS declares no units (#1209); only new drawings take the template's.
     d.header.set_i64("INSUNITS", 0);
+    d.header.set_i64("PROJMODE", 0);
     let mut rx = Rx { pstyles: plot_style_names(&secs), ..Rx::default() };
     let mut blocks: Vec<(String, Vec3, String, Vec<(Option<String>, bool, Entity)>, i64)> = Vec::new();
     let mut layout_objs: Vec<(String, u32, String, PageSetup)> = Vec::new();

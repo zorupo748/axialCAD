@@ -259,6 +259,7 @@ const HEADER_VARS: &[(&str, i32)] = &[
     ("SNAPMODE", 70),
     ("GRIDMODE", 70),
     ("ORTHOMODE", 70),
+    ("PROJMODE", 70),
     ("FILLMODE", 70),
     ("MIRRTEXT", 70),
     ("LTSCALE", 40),

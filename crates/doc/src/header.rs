@@ -130,6 +130,7 @@ impl Header {
         h.set_i64("PDMODE", 0);
         h.set_f64("PDSIZE", 0.0);
         h.set_i64("FILLMODE", 1);
+        h.set_i64("PROJMODE", 0);
         h.set_i64("MIRRTEXT", 0);
         h.set_i64("ATTMODE", 1);
         h.set_f64("THICKNESS", 0.0);

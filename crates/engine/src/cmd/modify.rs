@@ -22,10 +22,12 @@ pub(crate) fn quick_mode(s: &Session) -> bool {
 pub(crate) fn edge_mode(s: &Session) -> bool {
     s.doc().map(|d| d.header.i64("EDGEMODE", 0) != 0).unwrap_or(false)
 }
-/// PROJMODE: 0 None, 1 UCS (default), 2 View. Drawings are 2D (every object lies in the XY
-/// plane), so the three give the same result; the setting is kept for scripts and the DWG.
+/// PROJMODE: 0 None (default), 1 UCS, 2 View.
 pub(crate) fn proj_mode(s: &Session) -> i64 {
-    s.doc().map(|d| d.header.i64("PROJMODE", 1)).unwrap_or(1)
+    match s.doc().map(|d| d.header.i64("PROJMODE", 0)) {
+        Ok(mode @ (1 | 2)) => mode,
+        _ => 0,
+    }
 }
 pub(crate) fn no_intersection(msg: impl Into<String>) -> EngineError {
     EngineError::NoIntersection(msg.into())
@@ -894,95 +896,8 @@ fn arc_at_height(center: Vec3, radius: f64, start: f64, end: f64) -> EntityKind 
     EntityKind::Arc(cadcraft_doc::Arc { center, radius: radius.abs(), start: norm_angle(start), end: norm_angle(end) })
 }
 
-fn projected_line_cutters(s: &Session, edges: Edges, exclude: Handle, project: impl Fn(Vec3) -> Vec2) -> Result<Vec<Segment>> {
-    let mut cut = Vec::new();
-    for entity in cutting_entities(s, edges, exclude)? {
-        let mut add = |a: Vec3, b: Vec3| {
-            let (a, b) = (project(a), project(b));
-            if a.is_finite() && b.is_finite() && !a.near(b, 1e-12) {
-                cut.push(Segment::Line(Line::new(a, b)));
-            }
-        };
-        let points = match &entity.kind {
-            EntityKind::Line(line) => {
-                let direction = (line.b - line.a).normalized();
-                let extra = if edges.implied { direction * 1e8 } else { Vec3::ZERO };
-                add(line.a - extra, line.b + extra);
-                continue;
-            }
-            EntityKind::Circle(circle) => {
-                let mut points = circle.sample_points_3d(entity.common.extrusion, 128);
-                if let Some(first) = points.first().copied() {
-                    points.push(first);
-                }
-                points
-            }
-            EntityKind::Arc(arc) if edges.implied => {
-                let mut points = cadcraft_doc::Circle { center: arc.center, radius: arc.radius }.sample_points_3d(entity.common.extrusion, 128);
-                if let Some(first) = points.first().copied() {
-                    points.push(first);
-                }
-                points
-            }
-            EntityKind::Arc(arc) => arc.sample_points_3d(entity.common.extrusion, 128),
-            _ => {
-                // Keep the legacy 2D representation of other cutter types.
-                let segments = if edges.implied { implied_edge(&entity.kind) } else { None }
-                    .unwrap_or_else(|| entity.kind.prims().iter().flat_map(prim_to_segments).collect());
-                for segment in segments {
-                    let count = if matches!(segment, Segment::Line(_)) { 1 } else { 128 };
-                    for i in 0..count {
-                        add(segment.at(i as f64 / count as f64).to3(0.0), segment.at((i + 1) as f64 / count as f64).to3(0.0));
-                    }
-                }
-                continue;
-            }
-        };
-        for pair in points.windows(2) {
-            if let [a, b] = pair {
-                add(*a, *b);
-            }
-        }
-    }
-    Ok(cut)
-}
-
-fn line_edit_geometry(
-    s: &Session, h: Handle, l: &cadcraft_doc::Line, pick: Vec2, click: Option<CurvePick>, edges: Edges,
-) -> Result<(Line, Vec2, Vec<Segment>)> {
-    let error = || EngineError::Other("Degenerate projection: the line has no usable length in this view.".into());
-    let direction = l.b - l.a;
-    if !direction.is_finite() || direction.len() <= 1e-12 {
-        return Err(error());
-    }
-    let usable = |line: Line| {
-        let length = line.a.dist(line.b);
-        length.is_finite() && length > (direction.len() * 1e-9).max(1e-12)
-    };
-    let xy = Line::new(l.a.xy(), l.b.xy());
-    if let Some(click) = click {
-        let ucs = s.ucs();
-        let to_ucs = |p| ucs.to_local(p).xy();
-        let line = Line::new(to_ucs(l.a), to_ucs(l.b));
-        if !usable(line) {
-            let camera = s.camera();
-            let project = |p| camera.project_point(p);
-            let line = Line::new(project(l.a), project(l.b));
-            if !usable(line) {
-                return Err(error());
-            }
-            let point = click.world.ok_or_else(|| EngineError::Other("Pick this line in the view to resolve its depth.".into()))?;
-            return Ok((line, project(point), projected_line_cutters(s, edges, h, project)?));
-        }
-        if !ucs.is_world() && let Some(point) = click.world {
-            return Ok((line, to_ucs(point), projected_line_cutters(s, edges, h, to_ucs)?));
-        }
-    }
-    if !usable(xy) {
-        return Err(error());
-    }
-    Ok((xy, pick, edge_segments(s, edges, h)?))
-}
+#[path = "trim_projection.rs"]
+mod trim_projection;
 
 /// `k` as an implied edge (EDGEMODE 1), for lines, arcs and open polylines.
 fn implied_edge(k: &EntityKind) -> Option<Vec<Segment>> {
@@ -1053,20 +968,25 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
     let pick = click.and_then(|p| p.world).map_or(pick, Vec3::xy);
     match &e.kind {
         EntityKind::Line(l) => {
-            let (ln, pick, cut) = line_edit_geometry(s, h, l, pick, click, edges)?;
             let direction = l.b - l.a;
-            let mut ts: Vec<f64> = cut
-                .iter()
-                .flat_map(|c| intersect_ext(&Segment::Line(ln), c, false))
-                .map(|x| ln.param_of(x))
-                .filter(|t| *t > 1e-9 && *t < 1.0 - 1e-9)
-                .collect();
+            let (tp, mut ts) = if let Some(click) = click {
+                trim_projection::line_hits(s, &e, l, click, edges, false)?
+            } else {
+                let ln = Line::new(l.a.xy(), l.b.xy());
+                if ln.a.dist(ln.b) <= 1e-12 {
+                    return Err(EngineError::Other("Degenerate projection: the line has no usable length in XY.".into()));
+                }
+                let cut = edge_segments(s, edges, h)?;
+                let ts = cut.iter().flat_map(|c| intersect_ext(&Segment::Line(ln), c, false)).map(|p| ln.param_of(p)).collect();
+                (ln.param_of(pick), ts)
+            };
+            ts.retain(|t| *t > 1e-9 && *t < 1.0 - 1e-9);
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
                 return Err(no_intersection("Object does not intersect a cutting edge."));
             }
-            let tp = ln.param_of(pick).clamp(0.0, 1.0);
+            let tp = tp.clamp(0.0, 1.0);
             let mut cuts = Vec::with_capacity(ts.len() + 2);
             cuts.push(0.0);
             cuts.extend(&ts);
@@ -1094,21 +1014,27 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
             Ok(TrimPieces { kept, removed })
         }
         EntityKind::Arc(a) => {
-            let cut = edge_segments(s, edges, h)?;
             let center = if click.is_some() { a.center } else { v3(a.center.xy()) };
-            let ga = Arc::new(a.center.xy(), a.radius, a.start, a.end);
-            let seg = Segment::Arc { arc: ga, ccw: true };
+            let ga = Arc::new(Vec2::ZERO, a.radius, a.start, a.end);
             let sweep = ga.sweep();
-            let param = |p: Vec2| norm_angle(ga.center.angle_to(p) - ga.start);
-            let mut ts: Vec<f64> =
-                cut.iter().flat_map(|c| intersect_ext(&seg, c, false)).map(param).filter(|t| *t > 1e-9 && *t < sweep - 1e-9).collect();
+            let param = |angle| norm_angle(angle - ga.start);
+            let (local_pick, mut ts) = if let Some(click) = click {
+                let (local_pick, hits) = trim_projection::round_hits(s, &e, a.center, a.radius, click, edges)?;
+                (local_pick, hits.into_iter().map(param).collect::<Vec<_>>())
+            } else {
+                let cut = edge_segments(s, edges, h)?;
+                let seg = Segment::Arc { arc: Arc { center: a.center.xy(), ..ga }, ccw: true };
+                let ts = cut.iter().flat_map(|c| intersect_ext(&seg, c, false))
+                    .map(|p| param(a.center.xy().angle_to(p))).collect();
+                (pick - a.center.xy(), ts)
+            };
+            ts.retain(|t| *t > 1e-9 && *t < sweep - 1e-9);
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
                 return Err(no_intersection("Object does not intersect a cutting edge."));
             }
-            let p_on_arc = ga.closest(pick);
-            let tp = param(p_on_arc).min(sweep);
+            let tp = param(ga.closest(local_pick).angle()).min(sweep);
             let mut cuts = Vec::with_capacity(ts.len() + 2);
             cuts.push(0.0);
             cuts.extend(&ts);
@@ -1136,31 +1062,36 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
             Ok(TrimPieces { kept, removed })
         }
         EntityKind::Circle(c) => {
-            let cut = edge_segments(s, edges, h)?;
             let center = if click.is_some() { c.center } else { v3(c.center.xy()) };
-            let full = Segment::Arc { arc: Arc { center: c.center.xy(), radius: c.radius, start: 0.0, end: TAU - 1e-12 }, ccw: true };
-            let mut angs: Vec<f64> = cut.iter().flat_map(|x| intersect_ext(&full, x, false)).map(|p| c.center.xy().angle_to(p)).collect();
-            angs.sort_by(f64::total_cmp);
-            angs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-            if angs.len() < 2 {
+            let (local_pick, mut angles) = if let Some(click) = click {
+                trim_projection::round_hits(s, &e, c.center, c.radius, click, edges)?
+            } else {
+                let cut = edge_segments(s, edges, h)?;
+                let full = Segment::Arc { arc: Arc::new(c.center.xy(), c.radius, 0.0, 0.0), ccw: true };
+                let angles = cut.iter().flat_map(|edge| intersect_ext(&full, edge, false))
+                    .map(|p| c.center.xy().angle_to(p)).collect();
+                (pick - c.center.xy(), angles)
+            };
+            angles.sort_by(f64::total_cmp);
+            angles.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if let (Some(first), Some(last)) = (angles.first(), angles.last()) && first + TAU - last < 1e-9 {
+                angles.pop();
+            }
+            if angles.is_empty() || (click.is_none() && angles.len() == 1) {
                 return Err(no_intersection("Circle must intersect cutting edges at two or more points."));
             }
-            let ap = c.center.xy().angle_to(pick);
-            // The removed arc runs between the two intersections around the pick.
-            let n = angs.len();
-            let mut kept = None;
-            let mut removed = None;
-            for i in 0..n {
-                let a0 = angs[i];
-                let a1 = angs[(i + 1) % n];
-                if angle_in_sweep(ap, a0, a1) {
-                    kept = Some(arc_at_height(center, c.radius, a1, a0));
-                    removed = Some(arc_at_height(center, c.radius, a0, a1));
-                }
+            if angles.len() == 1 {
+                return Ok(TrimPieces { kept: vec![], removed: vec![] });
             }
-            let kept = kept.into_iter().collect();
-            let removed = removed.into_iter().collect();
-            Ok(TrimPieces { kept, removed })
+            let ap = norm_angle(local_pick.angle());
+            let (&first, &last) = angles.first().zip(angles.last())
+                .ok_or_else(|| EngineError::Other("Could not resolve the circle cut.".into()))?;
+            let (a0, a1) = angles.iter().copied().zip(angles.iter().copied().skip(1).chain([first]))
+                .find(|&(a, b)| angle_in_sweep(ap, a, b)).unwrap_or((last, first));
+            Ok(TrimPieces {
+                kept: vec![arc_at_height(center, c.radius, a1, a0)],
+                removed: vec![arc_at_height(center, c.radius, a0, a1)],
+            })
         }
         EntityKind::LwPolyline(p) => trim_polyline(p, &edge_segments(s, edges, h)?, pick),
         k => super::modify2::trim_other(k, &edge_segments(s, edges, h)?, pick),
@@ -1173,12 +1104,31 @@ pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Resu
     replace_trimmed(s, h, pieces)
 }
 
-pub(crate) fn trim_at_pick(s: &mut Session, h: Handle, pick: CurvePick, edges: Edges) -> Result<Vec<Handle>> {
-    let pieces = trim_geometry_impl(s, h, pick.xy, edges, Some(pick))?;
+pub(crate) fn trim_at_pick(s: &mut Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool) -> Result<Vec<Handle>> {
+    let pieces = direct_trim(s, h, pick, edges, quick)?;
+    if pieces.removed.is_empty() {
+        return Ok(vec![h]);
+    }
     replace_trimmed(s, h, pieces)
 }
 
 fn replace_trimmed(s: &mut Session, h: Handle, pieces: TrimPieces) -> Result<Vec<Handle>> {
+fn direct_trim(s: &Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool) -> Result<TrimPieces> {
+    match trim_geometry_impl(s, h, pick.xy, edges, Some(pick)) {
+        Err(e) if misses_edges(&e) => {
+            let Some(entity) = s.doc()?.entity(h) else { return Err(e) };
+            if quick && proj_mode(s) == 0 && matches!(entity.kind, EntityKind::Line(_) | EntityKind::Arc(_) | EntityKind::Circle(_)) {
+                return Ok(TrimPieces { kept: vec![], removed: vec![] });
+            }
+            if quick {
+                return Ok(TrimPieces { kept: vec![], removed: vec![entity.kind.clone()] });
+            }
+            Err(e)
+        }
+        result => result,
+    }
+}
+
     let e = s.doc()?.entity(h).map(|e| (**e).clone()).ok_or_else(|| EngineError::Other("no such object".into()))?;
     let common = e.common.clone();
     let space = s.space();
@@ -1197,14 +1147,7 @@ fn replace_trimmed(s: &mut Session, h: Handle, pieces: TrimPieces) -> Result<Vec
 
 /// The piece of `h` that would be removed by a trim at `pick`.
 pub(crate) fn trim_preview(s: &Session, h: Handle, pick: CurvePick, edges: Edges) -> Result<Vec<EntityKind>> {
-    match trim_geometry_impl(s, h, pick.xy, edges, Some(pick)) {
-        Ok(pieces) => Ok(pieces.removed),
-        Err(e) if quick_mode(s) && misses_edges(&e) => {
-            // Quick-mode fallback: preview the entire entity being erased.
-            s.doc()?.entity(h).map(|e| vec![e.kind.clone()]).ok_or(e)
-        }
-        Err(e) => Err(e),
-    }
+    direct_trim(s, h, pick, edges, quick_mode(s)).map(|pieces| pieces.removed)
 }
 
 /// Sub-polyline between length parameters `a` and `b` (open polylines).
@@ -1604,29 +1547,34 @@ fn extend_geometry(
     let pick = click.and_then(|p| p.world).map_or(pick, Vec3::xy);
     let new_kind = match &e.kind {
         EntityKind::Line(l) => {
-            let (ln, pick, cut) = line_edit_geometry(s, h, l, pick, click, edges)?;
-            let (a, b) = (ln.a, ln.b);
+            if let Some(click) = click {
+                let (tp, hits) = trim_projection::line_hits(s, &e, l, click, edges, true)?;
+                let from_b = tp > 0.5;
+                let t = if from_b {
+                    hits.into_iter().filter(|&t| t.is_finite() && t > 1.0 + 1e-9).min_by(f64::total_cmp)
+                } else {
+                    hits.into_iter().filter(|&t| t.is_finite() && t < -1e-9).max_by(f64::total_cmp)
+                }.ok_or_else(|| EngineError::Other("Object does not intersect an edge.".into()))?;
+                let end = l.a + (l.b - l.a) * t;
+                if !end.is_finite() {
+                    return Err(EngineError::Other("Extended endpoint is not finite.".into()));
+                }
+                return Ok(if from_b {
+                    (line3(l.a, end), Some(line3(l.b, end)))
+                } else {
+                    (line3(end, l.b), Some(line3(end, l.a)))
+                });
+            }
+            let (a, b) = (l.a.xy(), l.b.xy());
             let from_b = pick.dist(b) < pick.dist(a);
             let (fixed, end) = if from_b { (a, b) } else { (b, a) };
             let dir = (end - fixed).normalized();
             let ray = Segment::Line(Line::new(end, end + dir * 1e8));
-            let best = cut
-                .iter()
-                .flat_map(|c| intersect_ext(&ray, c, false))
+            let cut = edge_segments(s, edges, h)?;
+            let best = cut.iter().flat_map(|c| intersect_ext(&ray, c, false))
                 .filter(|x| (*x - end).dot(dir) > 1e-9)
                 .min_by(|x, y| x.dist(end).total_cmp(&y.dist(end)));
             let np = best.ok_or_else(|| EngineError::Other("Object does not intersect an edge.".into()))?;
-            if click.is_some() {
-                let end3 = l.a + (l.b - l.a) * ln.param_of(np);
-                if !end3.is_finite() {
-                    return Err(EngineError::Other("Extended endpoint is not finite.".into()));
-                }
-                return Ok(if from_b {
-                    (line3(l.a, end3), Some(line3(l.b, end3)))
-                } else {
-                    (line3(end3, l.b), Some(line3(end3, l.a)))
-                });
-            }
             if from_b { line(a, np) } else { line(np, b) }
         }
         EntityKind::Arc(a) => {

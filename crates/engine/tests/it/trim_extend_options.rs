@@ -55,6 +55,7 @@ fn header(s: &Session, name: &str) -> i64 {
 #[test]
 fn quick_mode_trims_to_all_objects_and_erases_an_object_with_no_edge() {
     let mut s = ladder();
+    s.doc_mut().unwrap().header.set_i64("PROJMODE", 1);
     s.cmdline("LINE 20,20 25,20").unwrap();
     s.cmdline("").unwrap();
     s.script("TRIM 5,0 22,20\n\n").unwrap();
@@ -184,6 +185,7 @@ fn json_forms_take_fence_crossing_edge_mode_and_mode() {
     assert_eq!(lines(&s), vec![((-5.0, 0.0), (5.0, 0.0)), ((5.0, 3.0), (5.0, 4.0))]);
 
     let mut s = session(&["20,20 25,20"]);
+    s.doc_mut().unwrap().header.set_i64("PROJMODE", 1);
     let h = s.doc().unwrap().model.last().unwrap().handle.hex();
     let r = s.execute("trim", &json!({ "handle": h, "pick": [22, 20], "mode": "quick" })).unwrap();
     assert_eq!(r["handles"], json!([]));
@@ -303,6 +305,7 @@ fn trim_preview_line_indicates_segment_to_remove() {
 #[test]
 fn trim_preview_uncut_object_shows_no_fictitious_removal() {
     let mut s = Session::new();
+    s.doc_mut().unwrap().header.set_i64("PROJMODE", 1);
     s.cmdline("CIRCLE 100,100 5").unwrap();
 
     s.cmdline("TRIM").unwrap();
@@ -393,6 +396,7 @@ fn trim_preview_successive_cuts_on_line() {
 #[test]
 fn trim_sequential_successive_cuts_circle_to_arc() {
     let mut s = Session::new();
+    s.doc_mut().unwrap().header.set_i64("PROJMODE", 1);
     // Circle at origin with radius 10, cut by two horizontal lines at y = -5 and y = 5
     s.cmdline("CIRCLE 0,0 10").unwrap();
     s.cmdline("LINE -20,-5 20,-5").unwrap();
@@ -965,6 +969,7 @@ fn json_edges_validation_handles_all_cases() {
 #[test]
 fn typed_no_intersection_distinguishes_no_cuts_from_invalid_data() {
     let mut s = ladder();
+    s.doc_mut().unwrap().header.set_i64("PROJMODE", 1);
     s.cmdline("LINE 20,20 25,20").unwrap();
     s.cmdline("").unwrap();
     // In Quick mode, line with no intersection gets erased cleanly via NoIntersection
@@ -1120,6 +1125,7 @@ fn json_trim_keeps_elevation_and_interpolates_the_cut_on_sloped_lines() {
 
     for (end_z, cut_z) in [(10.0, 10.0), (30.0, 15.0)] {
         let mut s = Session::new();
+        s.doc_mut().unwrap().header.set_i64("PROJMODE", 1);
         let target = s.execute("line", &json!({ "points": [[0.0, 0.0, 10.0], [12.0, 0.0, end_z]] })).unwrap();
         let edge = s.execute("line", &json!({ "points": [[3.0, -5.0, 20.0], [3.0, 5.0, 20.0]] })).unwrap();
         let out = s.execute("trim", &json!({ "handle": target["handles"][0], "edges": [edge["handles"][0]], "pick": [1.0, 0.0] })).unwrap();
@@ -1142,6 +1148,7 @@ fn click_trim_elevated_circle_keeps_center_radius_and_preview_height() {
     use cadcraft_geom::{Vec2, Vec3};
 
     let mut s = Session::new();
+    s.doc_mut().unwrap().header.set_i64("PROJMODE", 1);
     let center = Vec3::new(0.0, 0.0, 10.0);
     let target = s.add_entity_with_extrusion(EntityKind::Circle(Circle { center, radius: 5.0 }), Vec3::Z).unwrap();
     s.execute("line", &json!({ "points": [[0.0, -10.0, 20.0], [0.0, 10.0, 20.0]] })).unwrap();
@@ -1168,13 +1175,14 @@ fn click_trim_elevated_circle_keeps_center_radius_and_preview_height() {
 }
 
 #[test]
-fn click_trim_and_extend_vertical_lines_use_view_when_ucs_is_degenerate() {
+fn click_trim_and_extend_vertical_lines_in_explicit_view_mode() {
     use cadcraft_engine::Input;
     use cadcraft_engine::doc::Line;
     use cadcraft_geom::Vec3;
 
     for (command, end_z, expected) in [("trim", 12.0, 7.0), ("extend", 4.0, 7.0)] {
         let mut s = Session::new();
+        s.doc_mut().unwrap().header.set_i64("PROJMODE", 2);
         s.execute("view.front", &json!({})).unwrap();
         let a = Vec3::new(0.0, 0.0, 2.0);
         let b = Vec3::new(0.0, 0.0, end_z);
@@ -1199,6 +1207,7 @@ fn click_trim_end_on_vertical_reports_degenerate_projection_without_erasing() {
     use cadcraft_geom::Vec3;
 
     let mut s = Session::new();
+    s.doc_mut().unwrap().header.set_i64("PROJMODE", 2);
     let a = Vec3::new(0.0, 0.0, 2.0);
     let b = Vec3::new(0.0, 0.0, 12.0);
     let target = s.add_entity(EntityKind::Line(Line { a, b })).unwrap();
