@@ -3,14 +3,15 @@
 
 use cadcraft_doc::{Entity, EntityKind, Handle, Prim};
 use cadcraft_geom::{
-    Arc, Bounds2, Circle, Line, Mat3, PolyVertex, Polyline, Segment, TAU, Vec2, Vec3, angle_in_sweep, ccw_sweep, intersect_ext, line_line, line_line_infinite, norm_angle,
+    Arc, Bounds2, Circle, Line, Mat3, PolyVertex, Polyline, Segment, TAU, Vec2, Vec3, angle_in_sweep, ccw_sweep, intersect_ext, line_line,
+    line_line_infinite, norm_angle,
 };
 use serde_json::{Value, json};
 
 use super::helpers::*;
 use super::machines::{SelOutcome, SelectPhase, number};
 use super::trimextend::{self, TrimM};
-use super::{bad, point_param, points_param, targets, point_req, bool_or, f64_or, f64_req, str_param, CommandSpec};
+use super::{CommandSpec, bad, bool_or, f64_or, f64_req, point_param, point_req, points_param, str_param, targets};
 use crate::select::{SelectKind, SelectMode};
 use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Session, Step};
 
@@ -553,7 +554,9 @@ impl Interactive for StretchM {
             (StretchPhase::Select, None) => Prompt::new(if self.removing { "Remove objects" } else { "Select objects" }, Accept::POINT),
             (StretchPhase::Base, _) => Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]).default("Displacement").spatial_point(),
             (StretchPhase::Displacement, _) => Prompt::new("Specify displacement", Accept::POINT).default("0,0"),
-            (StretchPhase::Second, _) => Prompt::new("Specify second point or <use first point as displacement>", Accept::POINT).base3_opt(self.base).spatial_point(),
+            (StretchPhase::Second, _) => {
+                Prompt::new("Specify second point or <use first point as displacement>", Accept::POINT).base3_opt(self.base).spatial_point()
+            }
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
@@ -868,16 +871,19 @@ pub(crate) struct Edges<'a> {
 fn cutting_entities<'a>(s: &'a Session, edges: Edges<'a>, exclude: Handle) -> Result<impl Iterator<Item = &'a Entity> + 'a> {
     let d = s.doc()?;
     let store = d.space(&s.space()).ok_or(EngineError::NoDocument)?;
-    Ok(store.iter().map(|entity| entity.as_ref()).filter(move |e| {
-        e.handle != exclude && d.is_visible(e) && edges.only.is_none_or(|hs| hs.contains(&e.handle))
-    }))
+    Ok(store
+        .iter()
+        .map(|entity| entity.as_ref())
+        .filter(move |e| e.handle != exclude && d.is_visible(e) && edges.only.is_none_or(|hs| hs.contains(&e.handle))))
 }
 
 /// All primitives of the cutting edges (excluding `exclude`).
 fn edge_segments(s: &Session, edges: Edges, exclude: Handle) -> Result<Vec<Segment>> {
     let mut out = Vec::new();
     for e in cutting_entities(s, edges, exclude)? {
-        if edges.implied && let Some(segs) = implied_edge(&e.kind) {
+        if edges.implied
+            && let Some(segs) = implied_edge(&e.kind)
+        {
             out.extend(segs);
         } else {
             for p in e.kind.prims() {
@@ -999,18 +1005,12 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
             let t_tol = (tol / length.max(1e-9)).clamp(1e-9, 1e-2);
             let has_start_cut = raw_ts.iter().any(|&t| t.abs() <= t_tol || (t < 0.0 && t >= -t_tol));
             let has_end_cut = raw_ts.iter().any(|&t| (t - 1.0).abs() <= t_tol || (t > 1.0 && t <= 1.0 + t_tol));
-            let mut ts: Vec<f64> = raw_ts
-                .into_iter()
-                .filter(|&t| t > t_tol && t < 1.0 - t_tol)
-                .collect();
+            let mut ts: Vec<f64> = raw_ts.into_iter().filter(|&t| t > t_tol && t < 1.0 - t_tol).collect();
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
                 if has_start_cut && has_end_cut {
-                    return Ok(TrimPieces {
-                        kept: vec![],
-                        removed: vec![line3(l.a, l.b)],
-                    });
+                    return Ok(TrimPieces { kept: vec![], removed: vec![line3(l.a, l.b)] });
                 }
                 return Err(no_intersection("Object does not intersect a cutting edge."));
             }
@@ -1051,12 +1051,13 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
             } else {
                 let cut = edge_segments(s, edges, h)?;
                 let full = Segment::Arc { arc: Arc::new(a.center.xy(), a.radius, 0.0, 0.0), ccw: true };
-                let angles = cut.iter().flat_map(|c| intersect_ext(&full, c, false))
-                    .map(|p| a.center.xy().angle_to(p)).collect();
+                let angles = cut.iter().flat_map(|c| intersect_ext(&full, c, false)).map(|p| a.center.xy().angle_to(p)).collect();
                 (pick - a.center.xy(), angles)
             };
             let tol = trim_projection::contact_tolerance(ga.radius, ga.radius);
-            let ang_tol = (tol / ga.radius.max(1e-9)).clamp(1e-9, 1e-2);
+            // Keep the two endpoint neighborhoods disjoint across the angular seam as well.
+            let endpoint_spacing = sweep.min(TAU - sweep);
+            let ang_tol = (tol / ga.radius.max(1e-9)).clamp(1e-9, 1e-2).min(endpoint_spacing / 4.0);
             let has_start_cut = hits.iter().any(|&angle| {
                 let d = norm_angle(angle - ga.start);
                 d <= ang_tol || d >= TAU - ang_tol
@@ -1065,18 +1066,18 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
                 let d = norm_angle(angle - ga.start);
                 (d - sweep).abs() <= ang_tol
             });
-            let mut ts: Vec<f64> = hits.iter().filter_map(|&angle| {
-                let d = norm_angle(angle - ga.start);
-                (d > ang_tol && d < sweep - ang_tol).then_some(d)
-            }).collect();
+            let mut ts: Vec<f64> = hits
+                .iter()
+                .filter_map(|&angle| {
+                    let d = norm_angle(angle - ga.start);
+                    (d > ang_tol && d < sweep - ang_tol).then_some(d)
+                })
+                .collect();
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
                 if has_start_cut && has_end_cut {
-                    return Ok(TrimPieces {
-                        kept: vec![],
-                        removed: vec![arc_at_height(center, ga.radius, ga.start, ga.end)],
-                    });
+                    return Ok(TrimPieces { kept: vec![], removed: vec![arc_at_height(center, ga.radius, ga.start, ga.end)] });
                 }
                 return Err(no_intersection("Object does not intersect a cutting edge."));
             }
@@ -1115,13 +1116,14 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
             } else {
                 let cut = edge_segments(s, edges, h)?;
                 let full = Segment::Arc { arc: Arc::new(c.center.xy(), c.radius, 0.0, 0.0), ccw: true };
-                let angles = cut.iter().flat_map(|edge| intersect_ext(&full, edge, false))
-                    .map(|p| c.center.xy().angle_to(p)).collect();
+                let angles = cut.iter().flat_map(|edge| intersect_ext(&full, edge, false)).map(|p| c.center.xy().angle_to(p)).collect();
                 (pick - c.center.xy(), angles)
             };
             angles.sort_by(f64::total_cmp);
             angles.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-            if let (Some(first), Some(last)) = (angles.first(), angles.last()) && first + TAU - last < 1e-9 {
+            if let (Some(first), Some(last)) = (angles.first(), angles.last())
+                && first + TAU - last < 1e-9
+            {
                 angles.pop();
             }
             if angles.is_empty() || (click.is_none() && angles.len() == 1) {
@@ -1131,14 +1133,14 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
                 return Ok(TrimPieces { kept: vec![], removed: vec![] });
             }
             let ap = norm_angle(local_pick.angle());
-            let (&first, &last) = angles.first().zip(angles.last())
-                .ok_or_else(|| EngineError::Other("Could not resolve the circle cut.".into()))?;
-            let (a0, a1) = angles.iter().copied().zip(angles.iter().copied().skip(1).chain([first]))
-                .find(|&(a, b)| angle_in_sweep(ap, a, b)).unwrap_or((last, first));
-            Ok(TrimPieces {
-                kept: vec![arc_at_height(center, c.radius, a1, a0)],
-                removed: vec![arc_at_height(center, c.radius, a0, a1)],
-            })
+            let (&first, &last) = angles.first().zip(angles.last()).ok_or_else(|| EngineError::Other("Could not resolve the circle cut.".into()))?;
+            let (a0, a1) = angles
+                .iter()
+                .copied()
+                .zip(angles.iter().copied().skip(1).chain([first]))
+                .find(|&(a, b)| angle_in_sweep(ap, a, b))
+                .unwrap_or((last, first));
+            Ok(TrimPieces { kept: vec![arc_at_height(center, c.radius, a1, a0)], removed: vec![arc_at_height(center, c.radius, a0, a1)] })
         }
         EntityKind::LwPolyline(p) => trim_polyline(p, &edge_segments(s, edges, h)?, pick),
         k => super::modify2::trim_other(k, &edge_segments(s, edges, h)?, pick),
@@ -1351,7 +1353,15 @@ fn polyline_in_bounds(pl: &Polyline, bx: &Bounds2, sides: &[Line; 4], tol: f64, 
     }
 }
 
-pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, edges: Edges, quick: bool, crossing: bool) -> Result<Option<Vec<EntityKind>>> {
+pub(crate) fn trim_window_entity(
+    s: &Session,
+    h: Handle,
+    a: Vec2,
+    bx: Bounds2,
+    edges: Edges,
+    quick: bool,
+    crossing: bool,
+) -> Result<Option<Vec<EntityKind>>> {
     if super::curves::is_locked(s, h) {
         return Ok(None);
     }
@@ -1397,11 +1407,7 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
                     kept.push(line(sub.a, sub.b));
                 }
             }
-            if kept.len() < total_intervals {
-                Ok(Some(kept))
-            } else {
-                Ok(None)
-            }
+            if kept.len() < total_intervals { Ok(Some(kept)) } else { Ok(None) }
         }
         EntityKind::Arc(a_arc) => {
             let ga = Arc::new(a_arc.center.xy(), a_arc.radius, a_arc.start, a_arc.end);
@@ -1431,11 +1437,7 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
                     kept.push(arc(&sub_arc));
                 }
             }
-            if kept.len() < total_intervals {
-                Ok(Some(kept))
-            } else {
-                Ok(None)
-            }
+            if kept.len() < total_intervals { Ok(Some(kept)) } else { Ok(None) }
         }
         EntityKind::Circle(c) => {
             let full = Segment::Arc { arc: Arc { center: c.center.xy(), radius: c.radius, start: 0.0, end: TAU - 1e-12 }, ccw: true };
@@ -1459,11 +1461,7 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
                     kept.push(arc(&sub_arc));
                 }
             }
-            if kept.len() < n {
-                Ok(Some(kept))
-            } else {
-                Ok(None)
-            }
+            if kept.len() < n { Ok(Some(kept)) } else { Ok(None) }
         }
         EntityKind::LwPolyline(p) => {
             let pl = Polyline { vertices: p.vertices.clone(), closed: p.closed };
@@ -1504,11 +1502,7 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
                         }
                     }
                 }
-                if kept.len() < total_intervals {
-                    Ok(Some(kept))
-                } else {
-                    Ok(None)
-                }
+                if kept.len() < total_intervals { Ok(Some(kept)) } else { Ok(None) }
             } else {
                 let inside = |p: Vec2| bx.expand(tol).contains(p);
                 let mut best: Option<Vec2> = None;
@@ -1563,7 +1557,6 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
     }
 }
 
-
 /// Extend the end of `h` nearest `pick` to the nearest boundary edge.
 pub(crate) fn extend(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Result<()> {
     let (kind, _) = extend_geometry(s, h, pick, edges, None)?;
@@ -1581,9 +1574,7 @@ pub(crate) fn extend_preview(s: &Session, h: Handle, pick: CurvePick, edges: Edg
     extend_geometry(s, h, pick.xy, edges, Some(pick)).map(|(_, added)| added)
 }
 
-fn extend_geometry(
-    s: &Session, h: Handle, pick: Vec2, edges: Edges, click: Option<CurvePick>,
-) -> Result<(EntityKind, Option<EntityKind>)> {
+fn extend_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: Option<CurvePick>) -> Result<(EntityKind, Option<EntityKind>)> {
     if super::curves::is_locked(s, h) {
         return Err(EngineError::Other("The object is on a locked layer.".into()));
     }
@@ -1601,16 +1592,13 @@ fn extend_geometry(
                     hits.into_iter().filter(|&t| t.is_finite() && t > 1.0 + 1e-9).min_by(f64::total_cmp)
                 } else {
                     hits.into_iter().filter(|&t| t.is_finite() && t < -1e-9).max_by(f64::total_cmp)
-                }.ok_or_else(|| EngineError::Other("Object does not intersect an edge.".into()))?;
+                }
+                .ok_or_else(|| EngineError::Other("Object does not intersect an edge.".into()))?;
                 let end = l.a + (l.b - l.a) * t;
                 if !end.is_finite() {
                     return Err(EngineError::Other("Extended endpoint is not finite.".into()));
                 }
-                return Ok(if from_b {
-                    (line3(l.a, end), Some(line3(l.b, end)))
-                } else {
-                    (line3(end, l.b), Some(line3(end, l.a)))
-                });
+                return Ok(if from_b { (line3(l.a, end), Some(line3(l.b, end))) } else { (line3(end, l.b), Some(line3(end, l.a))) });
             }
             let (a, b) = (l.a.xy(), l.b.xy());
             let from_b = pick.dist(b) < pick.dist(a);
@@ -1618,7 +1606,9 @@ fn extend_geometry(
             let dir = (end - fixed).normalized();
             let ray = Segment::Line(Line::new(end, end + dir * 1e8));
             let cut = edge_segments(s, edges, h)?;
-            let best = cut.iter().flat_map(|c| intersect_ext(&ray, c, false))
+            let best = cut
+                .iter()
+                .flat_map(|c| intersect_ext(&ray, c, false))
                 .filter(|x| (*x - end).dot(dir) > 1e-9)
                 .min_by(|x, y| x.dist(end).total_cmp(&y.dist(end)));
             let np = best.ok_or_else(|| EngineError::Other("Object does not intersect an edge.".into()))?;
@@ -2433,9 +2423,11 @@ impl SelectThen {
         match (self.ref_angle, self.ref_points, self.ref_from) {
             (None, _, None) => Prompt::new("Specify the reference angle", Accept::POINT_OR_NUMBER).default("0").spatial_point(),
             (None, _, Some(p)) | (Some(_), true, Some(p)) => Prompt::new("Specify second point", Accept::POINT).base3(p).spatial_point(),
-            (Some(_), false, _) => {
-                Prompt::new("Specify the new angle", Accept::POINT_OR_NUMBER).kw(&["Points"]).default("0").base3_opt(self.pts.first().copied()).spatial_point()
-            }
+            (Some(_), false, _) => Prompt::new("Specify the new angle", Accept::POINT_OR_NUMBER)
+                .kw(&["Points"])
+                .default("0")
+                .base3_opt(self.pts.first().copied())
+                .spatial_point(),
             (Some(_), true, None) => Prompt::new("Specify first point", Accept::POINT).spatial_point(),
         }
     }
@@ -2564,12 +2556,14 @@ impl Interactive for SelectThen {
                 Prompt::new("Specify rotation angle", Accept::POINT_OR_NUMBER)
                     .kw(&["Copy", "Reference"])
                     .default(crate::units::format_angle(a, au, ap))
-                    .base3_opt(base).spatial_point()
+                    .base3_opt(base)
+                    .spatial_point()
             }
             (Op::Scale, _) => Prompt::new("Specify scale factor", Accept::POINT_OR_NUMBER)
                 .kw(&["Copy", "Reference"])
                 .default(format!("{:.4}", s.last_used.scale_factor))
-                .base3_opt(base).spatial_point(),
+                .base3_opt(base)
+                .spatial_point(),
             (Op::Mirror, 0) => Prompt::new("Specify first point of mirror line", Accept::POINT).spatial_point(),
             (Op::Mirror, _) => Prompt::new("Specify second point of mirror line", Accept::POINT).base3_opt(base).spatial_point(),
             _ => Prompt::new("", Accept::POINT),
@@ -2628,7 +2622,9 @@ impl Interactive for SelectThen {
                 Ok(Step::Continue)
             }
             (Op::Move, 1, Input::Point3(p)) => {
-                if s.input_is_spatial_end_override && let Some(&base) = self.pts.first() {
+                if s.input_is_spatial_end_override
+                    && let Some(&base) = self.pts.first()
+                {
                     translate_entities_3d(s, &self.objs, p - base, false)?;
                 } else {
                     transform_entities(s, &self.objs, &Mat3::translate(p.xy() - base), false)?;
@@ -2715,11 +2711,7 @@ impl Interactive for SelectThen {
             _ => return Vec::new(),
         };
         let Ok(d) = s.doc() else { return Vec::new() };
-        let spatial_move = if self.op == Op::Move {
-            s.preview_spatial_end_override(c, base3).map(|p| p - base3)
-        } else {
-            None
-        };
+        let spatial_move = if self.op == Op::Move { s.preview_spatial_end_override(c, base3).map(|p| p - base3) } else { None };
         let mut out: Vec<EntityKind> = self
             .objs
             .iter()

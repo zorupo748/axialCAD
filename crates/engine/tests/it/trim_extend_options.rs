@@ -540,10 +540,15 @@ fn crossing_window_trims_all_interior_intervals_in_one_pass() {
     // Quick mode explicitly
     s.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 1);
 
-    let result = s.execute("trim", &json!({
-        "crossing": [[70.0, -10.0], [30.0, 10.0]],
-        "mode": "quick"
-    })).unwrap();
+    let result = s
+        .execute(
+            "trim",
+            &json!({
+                "crossing": [[70.0, -10.0], [30.0, 10.0]],
+                "mode": "quick"
+            }),
+        )
+        .unwrap();
 
     assert_eq!(result["trimmed"], 2, "expected 2 entities trimmed in one pass");
 
@@ -580,20 +585,20 @@ fn crossing_window_trims_multiple_interior_intervals_additional_cutters() {
 
     s.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 1);
 
-    let result = s.execute("trim", &json!({
-        "crossing": [[90.0, -10.0], [30.0, 10.0]],
-        "mode": "quick"
-    })).unwrap();
+    let result = s
+        .execute(
+            "trim",
+            &json!({
+                "crossing": [[90.0, -10.0], [30.0, 10.0]],
+                "mode": "quick"
+            }),
+        )
+        .unwrap();
 
     // H trimmed (1) + C1, C2, C3 eliminated (3) = 4
     assert_eq!(result["trimmed"], 4, "expected 4 entities trimmed/erased in one pass");
 
-    let expected = vec![
-        ((0.0, 0.0), (20.0, 0.0)),
-        ((20.0, -10.0), (20.0, 10.0)),
-        ((100.0, -10.0), (100.0, 10.0)),
-        ((100.0, 0.0), (120.0, 0.0)),
-    ];
+    let expected = vec![((0.0, 0.0), (20.0, 0.0)), ((20.0, -10.0), (20.0, 10.0)), ((100.0, -10.0), (100.0, 10.0)), ((100.0, 0.0), (120.0, 0.0))];
     assert_eq!(lines(&s), expected, "geometry after multi-interval crossing pass");
 }
 
@@ -612,19 +617,19 @@ fn crossing_window_trims_independent_of_creation_order() {
 
     s.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 1);
 
-    let result = s.execute("trim", &json!({
-        "crossing": [[70.0, -10.0], [30.0, 10.0]],
-        "mode": "quick"
-    })).unwrap();
+    let result = s
+        .execute(
+            "trim",
+            &json!({
+                "crossing": [[70.0, -10.0], [30.0, 10.0]],
+                "mode": "quick"
+            }),
+        )
+        .unwrap();
 
     assert_eq!(result["trimmed"], 2);
 
-    let expected = vec![
-        ((0.0, 0.0), (25.0, 0.0)),
-        ((25.0, -10.0), (25.0, 10.0)),
-        ((75.0, -10.0), (75.0, 10.0)),
-        ((75.0, 0.0), (100.0, 0.0)),
-    ];
+    let expected = vec![((0.0, 0.0), (25.0, 0.0)), ((25.0, -10.0), (25.0, 10.0)), ((75.0, -10.0), (75.0, 10.0)), ((75.0, 0.0), (100.0, 0.0))];
     assert_eq!(lines(&s), expected, "geometry identical regardless of creation order");
 }
 
@@ -645,11 +650,16 @@ fn crossing_window_standard_mode_with_explicit_edges() {
     let h_c3 = d.model.iter().find(|e| matches!(&e.kind, EntityKind::Line(l) if (l.a.x - 75.0).abs() < 1e-6)).unwrap().handle;
 
     // Standard mode: only C1 and C3 are cutting edges. C2 is NOT a cutting edge.
-    let result = s.execute("trim", &json!({
-        "crossing": [[70.0, -10.0], [30.0, 10.0]],
-        "mode": "standard",
-        "edges": [h_c1.hex(), h_c3.hex()]
-    })).unwrap();
+    let result = s
+        .execute(
+            "trim",
+            &json!({
+                "crossing": [[70.0, -10.0], [30.0, 10.0]],
+                "mode": "standard",
+                "edges": [h_c1.hex(), h_c3.hex()]
+            }),
+        )
+        .unwrap();
 
     // H is trimmed between C1 and C3 (kept 0-25 and 75-100).
     // C2 is not cut by C1/C3, so in standard mode it is untouched.
@@ -708,22 +718,22 @@ fn crossing_window_trims_circle_multiple_intervals() {
     // Standard mode with L1 and L2 as explicit cutting edges
     // Window covers top half: y in [2, 12], x in [-12, 12]
     // Removes Quadrant 1 (0 -> pi/2) and Quadrant 2 (pi/2 -> pi)
-    let result = s.execute("trim", &json!({
-        "crossing": [[12.0, 12.0], [-12.0, 2.0]],
-        "mode": "standard",
-        "edges": [h_v.hex(), h_h.hex()]
-    })).unwrap();
+    let result = s
+        .execute(
+            "trim",
+            &json!({
+                "crossing": [[12.0, 12.0], [-12.0, 2.0]],
+                "mode": "standard",
+                "edges": [h_v.hex(), h_h.hex()]
+            }),
+        )
+        .unwrap();
 
     assert_eq!(result["trimmed"], 2, "circle and vertical line trimmed in pass 1");
 
     // The circle should be replaced by the surviving bottom semicircle (pi -> 2pi)
-    let mut arcs_pass1: Vec<(f64, f64)> = s.doc().unwrap().model.iter().filter_map(|e| {
-        if let EntityKind::Arc(a) = &e.kind {
-            Some((r(a.start), r(a.end)))
-        } else {
-            None
-        }
-    }).collect();
+    let mut arcs_pass1: Vec<(f64, f64)> =
+        s.doc().unwrap().model.iter().filter_map(|e| if let EntityKind::Arc(a) = &e.kind { Some((r(a.start), r(a.end))) } else { None }).collect();
     arcs_pass1.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     // Surviving arcs cover quadrants 3 and 4 (pi -> 1.5pi and 1.5pi -> 2pi)
@@ -734,21 +744,19 @@ fn crossing_window_trims_circle_multiple_intervals() {
     assert!((arcs_pass1[1].1 - std::f64::consts::TAU).abs() < 1e-3 || arcs_pass1[1].1.abs() < 1e-3);
 
     // Pass 2: repeat the exact same crossing window without undo
-    let res2 = s.execute("trim", &json!({
-        "crossing": [[12.0, 12.0], [-12.0, 2.0]],
-        "mode": "standard",
-        "edges": [h_v.hex(), h_h.hex()]
-    }));
+    let res2 = s.execute(
+        "trim",
+        &json!({
+            "crossing": [[12.0, 12.0], [-12.0, 2.0]],
+            "mode": "standard",
+            "edges": [h_v.hex(), h_h.hex()]
+        }),
+    );
     assert!(res2.is_err(), "pass 2 finds no objects to trim in window");
 
     // Geometry after pass 2 must be identical to pass 1
-    let mut arcs_pass2: Vec<(f64, f64)> = s.doc().unwrap().model.iter().filter_map(|e| {
-        if let EntityKind::Arc(a) = &e.kind {
-            Some((r(a.start), r(a.end)))
-        } else {
-            None
-        }
-    }).collect();
+    let mut arcs_pass2: Vec<(f64, f64)> =
+        s.doc().unwrap().model.iter().filter_map(|e| if let EntityKind::Arc(a) = &e.kind { Some((r(a.start), r(a.end))) } else { None }).collect();
     arcs_pass2.sort_by(|a, b| a.partial_cmp(b).unwrap());
     assert_eq!(arcs_pass1, arcs_pass2, "no change after second pass");
 }
@@ -768,44 +776,49 @@ fn crossing_window_trims_polyline_multiple_intervals() {
     s.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 1);
 
     // Pass 1: crossing window 70,-10 to 30,10
-    let result = s.execute("trim", &json!({
-        "crossing": [[70.0, -10.0], [30.0, 10.0]],
-        "mode": "quick"
-    })).unwrap();
+    let result = s
+        .execute(
+            "trim",
+            &json!({
+                "crossing": [[70.0, -10.0], [30.0, 10.0]],
+                "mode": "quick"
+            }),
+        )
+        .unwrap();
 
     // Polyline trimmed + C2 erased = 2
     assert_eq!(result["trimmed"], 2, "expected 2 entities trimmed/erased in pass 1");
 
     // Verify polyline geometry: surviving pieces must be 0->25 and 75->100
-    let mut polylines_pass1: Vec<Vec<(f64, f64)>> = s.doc().unwrap().model.iter().filter_map(|e| {
-        if let EntityKind::LwPolyline(p) = &e.kind {
-            Some(p.vertices.iter().map(|v| (r(v.p.x), r(v.p.y))).collect())
-        } else {
-            None
-        }
-    }).collect();
+    let mut polylines_pass1: Vec<Vec<(f64, f64)>> = s
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .filter_map(|e| if let EntityKind::LwPolyline(p) = &e.kind { Some(p.vertices.iter().map(|v| (r(v.p.x), r(v.p.y))).collect()) } else { None })
+        .collect();
     polylines_pass1.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let expected_polylines = vec![
-        vec![(0.0, 0.0), (25.0, 0.0)],
-        vec![(75.0, 0.0), (100.0, 0.0)],
-    ];
+    let expected_polylines = vec![vec![(0.0, 0.0), (25.0, 0.0)], vec![(75.0, 0.0), (100.0, 0.0)]];
     assert_eq!(polylines_pass1, expected_polylines, "polyline intervals 25-50 and 50-75 removed");
 
     // Pass 2: repeat the exact same crossing window without undo
-    let res2 = s.execute("trim", &json!({
-        "crossing": [[70.0, -10.0], [30.0, 10.0]],
-        "mode": "quick"
-    }));
+    let res2 = s.execute(
+        "trim",
+        &json!({
+            "crossing": [[70.0, -10.0], [30.0, 10.0]],
+            "mode": "quick"
+        }),
+    );
     assert!(res2.is_err(), "pass 2 finds no objects to trim in window");
 
-    let mut polylines_pass2: Vec<Vec<(f64, f64)>> = s.doc().unwrap().model.iter().filter_map(|e| {
-        if let EntityKind::LwPolyline(p) = &e.kind {
-            Some(p.vertices.iter().map(|v| (r(v.p.x), r(v.p.y))).collect())
-        } else {
-            None
-        }
-    }).collect();
+    let mut polylines_pass2: Vec<Vec<(f64, f64)>> = s
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .filter_map(|e| if let EntityKind::LwPolyline(p) = &e.kind { Some(p.vertices.iter().map(|v| (r(v.p.x), r(v.p.y))).collect()) } else { None })
+        .collect();
     polylines_pass2.sort_by(|a, b| a.partial_cmp(b).unwrap());
     assert_eq!(polylines_pass1, polylines_pass2, "no change after second pass");
 }
@@ -822,14 +835,17 @@ fn fallback_closed_polyline_selects_closest_to_first_corner_a() {
 
     // a = (-5.0, 15.0), b = (25.0, 5.0). Window spans x in [-5, 25], y in [5, 15].
     // Center is (10.0, 10.0). Corner 'a' is on left (dist 5 to left side x=0 vs dist 25 to right side x=20).
-    s1.execute("trim", &json!({
-        "crossing": [[-5.0, 15.0], [25.0, 5.0]],
-        "mode": "quick"
-    })).unwrap();
+    s1.execute(
+        "trim",
+        &json!({
+            "crossing": [[-5.0, 15.0], [25.0, 5.0]],
+            "mode": "quick"
+        }),
+    )
+    .unwrap();
 
-    let plines1: Vec<_> = s1.doc().unwrap().model.iter().filter_map(|e| {
-        if let EntityKind::LwPolyline(p) = &e.kind { Some(p.clone()) } else { None }
-    }).collect();
+    let plines1: Vec<_> =
+        s1.doc().unwrap().model.iter().filter_map(|e| if let EntityKind::LwPolyline(p) = &e.kind { Some(p.clone()) } else { None }).collect();
     assert_eq!(plines1.len(), 1);
     // Kept piece must be the right piece (all vertices have x >= 10)
     for v in &plines1[0].vertices {
@@ -844,14 +860,17 @@ fn fallback_closed_polyline_selects_closest_to_first_corner_a() {
     s2.doc_mut().unwrap().header.set_i64("TRIMEXTENDMODE", 1);
 
     // a = (25.0, 15.0), b = (-5.0, 5.0). Exact same window box, but corner 'a' is on the right.
-    s2.execute("trim", &json!({
-        "crossing": [[25.0, 15.0], [-5.0, 5.0]],
-        "mode": "quick"
-    })).unwrap();
+    s2.execute(
+        "trim",
+        &json!({
+            "crossing": [[25.0, 15.0], [-5.0, 5.0]],
+            "mode": "quick"
+        }),
+    )
+    .unwrap();
 
-    let plines2: Vec<_> = s2.doc().unwrap().model.iter().filter_map(|e| {
-        if let EntityKind::LwPolyline(p) = &e.kind { Some(p.clone()) } else { None }
-    }).collect();
+    let plines2: Vec<_> =
+        s2.doc().unwrap().model.iter().filter_map(|e| if let EntityKind::LwPolyline(p) = &e.kind { Some(p.clone()) } else { None }).collect();
     assert_eq!(plines2.len(), 1);
     // Kept piece must be the left piece (all vertices have x <= 10)
     for v in &plines2[0].vertices {
@@ -986,12 +1005,10 @@ fn window_vs_crossing_same_box_opposite_drag_directions() {
     // Case 1: Drag left (Crossing) -> Trims H1 (y=0) and H2 (y=2) between 0 and 10!
     let mut s_left = ladder();
     s_left.script("TRIM 6,-15 4,15\n\n").unwrap();
-    assert_eq!(lines(&s_left), with_edges(&[
-        ((-5.0, 0.0), (0.0, 0.0)),
-        ((-5.0, 2.0), (0.0, 2.0)),
-        ((10.0, 0.0), (15.0, 0.0)),
-        ((10.0, 2.0), (15.0, 2.0)),
-    ]));
+    assert_eq!(
+        lines(&s_left),
+        with_edges(&[((-5.0, 0.0), (0.0, 0.0)), ((-5.0, 2.0), (0.0, 2.0)), ((10.0, 0.0), (15.0, 0.0)), ((10.0, 2.0), (15.0, 2.0)),])
+    );
 
     // Case 2: Drag right (Window) -> Segments of H1 and H2 are NOT fully contained (0 and 10 outside) -> NOTHING trimmed!
     let mut s_right = ladder();
@@ -1022,10 +1039,14 @@ fn window_trims_fully_contained_interior_segment_of_long_entity() {
     // T3 (50..75): ends at 75 outside -> not trimmed
     // V1 (25,-10..25,10) is fully inside [20, 55] x [-15, 15] -> trimmed/erased!
     // V2 (50,-10..50,10) is fully inside -> trimmed/erased!
-    s.execute("trim", &json!({
-        "window": [[20.0, -15.0], [55.0, 15.0]],
-        "mode": "quick"
-    })).unwrap();
+    s.execute(
+        "trim",
+        &json!({
+            "window": [[20.0, -15.0], [55.0, 15.0]],
+            "mode": "quick"
+        }),
+    )
+    .unwrap();
 
     let remaining = lines(&s);
     // H now has kept T1 (0..25) and T3+T4 (50..100) or T3 (50..75) and T4 (75..100)
@@ -1068,10 +1089,13 @@ fn window_curve_bounds_strictly_checked_not_just_three_points() {
     let mut s_curve = Session::new();
     s_curve.cmdline(&format!("ARC {},{} {},{} {},{}", p_start.x, p_start.y, p_mid.x, p_mid.y, p_end.x, p_end.y)).unwrap();
     // Window selection from (-15, 0) to (15, 9) (drag right: window mode)
-    let res = s_curve.execute("trim", &json!({
-        "window": [[-15.0, 0.0], [15.0, 9.0]],
-        "mode": "quick"
-    }));
+    let res = s_curve.execute(
+        "trim",
+        &json!({
+            "window": [[-15.0, 0.0], [15.0, 9.0]],
+            "mode": "quick"
+        }),
+    );
     assert!(res.is_err(), "arc protruding beyond y=9 is not contained in window, must not be trimmed");
 }
 
@@ -1083,18 +1107,24 @@ fn quick_fallback_partial_vs_fully_contained() {
     s.cmdline("").unwrap();
 
     // 1. Window partially covering line (5 to 15) -> NOT erased
-    let r1 = s.execute("trim", &json!({
-        "window": [[5.0, -5.0], [15.0, 5.0]],
-        "mode": "quick"
-    }));
+    let r1 = s.execute(
+        "trim",
+        &json!({
+            "window": [[5.0, -5.0], [15.0, 5.0]],
+            "mode": "quick"
+        }),
+    );
     assert!(r1.is_err());
     assert_eq!(lines(&s).len(), 1, "partially covered uncut line is not erased in window mode");
 
     // 2. Crossing partially covering line (5 to 15) -> ERASED
-    let r2 = s.execute("trim", &json!({
-        "crossing": [[15.0, 5.0], [5.0, -5.0]],
-        "mode": "quick"
-    }));
+    let r2 = s.execute(
+        "trim",
+        &json!({
+            "crossing": [[15.0, 5.0], [5.0, -5.0]],
+            "mode": "quick"
+        }),
+    );
     assert!(r2.is_ok());
     assert_eq!(lines(&s).len(), 0, "partially covered uncut line is erased in crossing mode");
 
@@ -1102,10 +1132,13 @@ fn quick_fallback_partial_vs_fully_contained() {
     let mut s3 = Session::new();
     s3.cmdline("LINE 0,0 20,0").unwrap();
     s3.cmdline("").unwrap();
-    let r3 = s3.execute("trim", &json!({
-        "window": [[-5.0, -5.0], [25.0, 5.0]],
-        "mode": "quick"
-    }));
+    let r3 = s3.execute(
+        "trim",
+        &json!({
+            "window": [[-5.0, -5.0], [25.0, 5.0]],
+            "mode": "quick"
+        }),
+    );
     assert!(r3.is_ok());
     assert_eq!(lines(&s3).len(), 0, "fully covered uncut line is erased in window mode");
 }
@@ -1115,8 +1148,11 @@ fn explicit_crossing_keyword_forces_crossing_regardless_of_drag_direction() {
     let mut s = ladder();
     // Using explicit 'Crossing' keyword, then dragging to the RIGHT (4,-1 to 6,1)
     s.script("TRIM C 4,-1 6,1\n\n").unwrap();
-    assert_eq!(lines(&s), with_edges(&[((-5.0, 0.0), (0.0, 0.0)), ((-5.0, 2.0), (15.0, 2.0)), ((10.0, 0.0), (15.0, 0.0))]),
-        "explicit Crossing keyword forces crossing trim even when dragging to the right");
+    assert_eq!(
+        lines(&s),
+        with_edges(&[((-5.0, 0.0), (0.0, 0.0)), ((-5.0, 2.0), (15.0, 2.0)), ((10.0, 0.0), (15.0, 0.0))]),
+        "explicit Crossing keyword forces crossing trim even when dragging to the right"
+    );
 }
 
 #[test]
@@ -1192,10 +1228,14 @@ fn click_trim_and_extend_vertical_lines_in_explicit_view_mode() {
         s.start(command).unwrap();
         s.input(Input::EntityPoint { handle: Some(target), point: pick.xy(), point3: Some(pick) }).unwrap();
         let doc = s.doc().unwrap();
-        let line = doc.model.iter().find_map(|e| match &e.kind {
-            EntityKind::Line(line) if line.a == a => Some(line),
-            _ => None,
-        }).unwrap();
+        let line = doc
+            .model
+            .iter()
+            .find_map(|e| match &e.kind {
+                EntityKind::Line(line) if line.a == a => Some(line),
+                _ => None,
+            })
+            .unwrap();
         assert!(line.b.near(Vec3::new(0.0, 0.0, expected), 1e-9), "{command}: {line:?}");
     }
 }
@@ -1394,12 +1434,16 @@ fn projmode_none_tolerates_small_depth_noise_without_crossing_real_gaps() {
             let (kind, a, b, pick) = if circle {
                 (
                     EntityKind::Circle(Circle { center: Vec3::ZERO, radius: 22.0 }),
-                    Vec3::new(-44.0, 0.0, dz), Vec3::new(44.0, 0.0, dz), Vec3::new(0.0, 22.0, 0.0),
+                    Vec3::new(-44.0, 0.0, dz),
+                    Vec3::new(44.0, 0.0, dz),
+                    Vec3::new(0.0, 22.0, 0.0),
                 )
             } else {
                 (
                     EntityKind::Line(Line { a: Vec3::new(-52.0, 0.0, 0.0), b: Vec3::new(52.0, 0.0, 0.0) }),
-                    Vec3::new(0.0, -40.0, dz), Vec3::new(0.0, 40.0, dz), Vec3::new(-25.0, 0.0, 0.0),
+                    Vec3::new(0.0, -40.0, dz),
+                    Vec3::new(0.0, 40.0, dz),
+                    Vec3::new(-25.0, 0.0, 0.0),
                 )
             };
             let target = s.add_entity(kind).unwrap();
@@ -1430,10 +1474,7 @@ fn projmode_none_uses_coplanar_ellipse_and_spline_edges_like_ucs() {
     use cadcraft_engine::doc::{Circle, Line};
     use cadcraft_geom::Vec3;
 
-    for (command, params) in [
-        ("ellipse", json!({"center":[0,0], "major":[20,0], "ratio":0.5})),
-        ("spline", json!({"fit":[[-40,0],[0,0],[40,0]]})),
-    ] {
+    for (command, params) in [("ellipse", json!({"center":[0,0], "major":[20,0], "ratio":0.5})), ("spline", json!({"fit":[[-40,0],[0,0],[40,0]]}))] {
         for circle in [false, true] {
             let mut results = Vec::new();
             for mode in [0, 1] {
@@ -1482,10 +1523,7 @@ fn trim_successive_cuts_circle_none_ucs_view_identical() {
         let mut s = Session::new();
         s.doc_mut().unwrap().header.set_i64("PROJMODE", mode);
         let circle = s.add_entity(EntityKind::Circle(Circle { center: Vec3::ZERO, radius: 10.0 })).unwrap();
-        let _cutter = s.add_entity(EntityKind::Line(Line {
-            a: Vec3::new(-20.0, 0.0, 0.0),
-            b: Vec3::new(20.0, 0.0, 0.0),
-        })).unwrap();
+        let _cutter = s.add_entity(EntityKind::Line(Line { a: Vec3::new(-20.0, 0.0, 0.0), b: Vec3::new(20.0, 0.0, 0.0) })).unwrap();
 
         s.start("trim").unwrap();
         s.is_interactive_ui = true;
@@ -1499,7 +1537,11 @@ fn trim_successive_cuts_circle_none_ucs_view_identical() {
 
         let doc1 = s.doc().unwrap();
         assert!(doc1.entity(circle).is_none(), "original circle handle must be gone for mode {mode}");
-        let remaining_arc = doc1.model.iter().find(|e| matches!(e.kind, EntityKind::Arc(_))).map(|e| e.handle)
+        let remaining_arc = doc1
+            .model
+            .iter()
+            .find(|e| matches!(e.kind, EntityKind::Arc(_)))
+            .map(|e| e.handle)
             .expect(&format!("remaining arc must exist after cut 1 for mode {mode}"));
 
         // Cut 2: remaining bottom semicircle (pick at (0, -10))
@@ -1524,18 +1566,9 @@ fn trim_successive_cuts_line_none_ucs_view_identical() {
     for mode in [0, 1, 2] {
         let mut s = Session::new();
         s.doc_mut().unwrap().header.set_i64("PROJMODE", mode);
-        let target = s.add_entity(EntityKind::Line(Line {
-            a: Vec3::new(0.0, 0.0, 0.0),
-            b: Vec3::new(30.0, 0.0, 0.0),
-        })).unwrap();
-        let _c1 = s.add_entity(EntityKind::Line(Line {
-            a: Vec3::new(10.0, -10.0, 0.0),
-            b: Vec3::new(10.0, 10.0, 0.0),
-        })).unwrap();
-        let _c2 = s.add_entity(EntityKind::Line(Line {
-            a: Vec3::new(20.0, -10.0, 0.0),
-            b: Vec3::new(20.0, 10.0, 0.0),
-        })).unwrap();
+        let target = s.add_entity(EntityKind::Line(Line { a: Vec3::new(0.0, 0.0, 0.0), b: Vec3::new(30.0, 0.0, 0.0) })).unwrap();
+        let _c1 = s.add_entity(EntityKind::Line(Line { a: Vec3::new(10.0, -10.0, 0.0), b: Vec3::new(10.0, 10.0, 0.0) })).unwrap();
+        let _c2 = s.add_entity(EntityKind::Line(Line { a: Vec3::new(20.0, -10.0, 0.0), b: Vec3::new(20.0, 10.0, 0.0) })).unwrap();
 
         s.start("trim").unwrap();
         s.is_interactive_ui = true;
@@ -1548,7 +1581,9 @@ fn trim_successive_cuts_line_none_ucs_view_identical() {
         s.input(Input::EntityPoint { handle: Some(target), point: pick1.xy(), point3: Some(pick1) }).unwrap();
 
         let doc1 = s.doc().unwrap();
-        let target2 = doc1.model.iter()
+        let target2 = doc1
+            .model
+            .iter()
             .find(|e| matches!(&e.kind, EntityKind::Line(l) if l.a.near(Vec3::new(10.0, 0.0, 0.0), 1e-6)))
             .map(|e| e.handle)
             .expect(&format!("segment 10..30 must exist for mode {mode}"));
@@ -1561,8 +1596,12 @@ fn trim_successive_cuts_line_none_ucs_view_identical() {
         s.input(Input::EntityPoint { handle: Some(target2), point: pick2.xy(), point3: Some(pick2) }).unwrap();
 
         let doc2 = s.doc().unwrap();
-        let target3 = doc2.model.iter()
-            .find(|e| matches!(&e.kind, EntityKind::Line(l) if l.a.near(Vec3::new(10.0, 0.0, 0.0), 1e-6) && l.b.near(Vec3::new(20.0, 0.0, 0.0), 1e-6)))
+        let target3 = doc2
+            .model
+            .iter()
+            .find(
+                |e| matches!(&e.kind, EntityKind::Line(l) if l.a.near(Vec3::new(10.0, 0.0, 0.0), 1e-6) && l.b.near(Vec3::new(20.0, 0.0, 0.0), 1e-6)),
+            )
             .map(|e| e.handle)
             .expect(&format!("middle segment 10..20 must exist for mode {mode}"));
 
@@ -1578,4 +1617,34 @@ fn trim_successive_cuts_line_none_ucs_view_identical() {
         assert!(doc3.entity(target3).is_none(), "middle segment must be trimmed away for mode {mode}");
         assert_eq!(doc3.model.len(), 2, "only 2 cutters should remain for mode {mode}");
     }
+}
+
+#[test]
+fn trim_none_requires_two_distinct_contacts_to_erase_a_short_arc() {
+    use cadcraft_engine::doc::{Arc, Line};
+    use cadcraft_geom::Vec3;
+
+    let mut s = Session::new();
+    s.doc_mut().unwrap().header.set_i64("PROJMODE", 0);
+    let end: f64 = 1e-5;
+    let arc = s.add_entity(EntityKind::Arc(Arc { center: Vec3::ZERO, radius: 10.0, start: 0.0, end })).unwrap();
+
+    let radial = |angle: f64| {
+        let direction = Vec3::new(angle.cos(), angle.sin(), 0.0);
+        EntityKind::Line(Line { a: direction * 9.0, b: direction * 11.0 })
+    };
+    s.add_entity(radial(0.0)).unwrap();
+    let mid = end / 2.0;
+    let params = json!({
+        "handle": arc.hex(),
+        "pick": [10.0 * mid.cos(), 10.0 * mid.sin(), 0.0],
+        "mode": "quick"
+    });
+
+    s.execute("trim", &params).unwrap();
+    assert!(s.doc().unwrap().entity(arc).is_some());
+
+    s.add_entity(radial(end)).unwrap();
+    s.execute("trim", &params).unwrap();
+    assert!(s.doc().unwrap().entity(arc).is_none());
 }
