@@ -1317,16 +1317,20 @@ fn projmode_none_elevated_circle_ignores_ground_and_trims_only_the_selected_semi
     for end in [None, Some(0), Some(8)] {
         let mut s = Session::new();
         assert_eq!(header(&s, "PROJMODE"), 0);
-        let center = Vec3::new(0.0, 0.0, 30.0);
+        let center = Vec3::new(0.0, 0.0, 50.0);
         let target = s.add_entity(EntityKind::Circle(Circle { center, radius: 5.0 })).unwrap();
         for x in [-2, 2] {
             s.execute("line", &json!({ "points": [[x,-8,0], [x,8,0]] })).unwrap();
         }
         if let Some(end) = end {
-            s.execute("line", &json!({ "points": [[-8,0,30], [end,0,30]] })).unwrap();
+            s.execute("line", &json!({ "points": [[-8,0,50], [end,0,50]] })).unwrap();
         }
+        if end == Some(8) {
+            s.execute("line", &json!({ "points": [[0,0,50], [8,0,50]] })).unwrap();
+        }
+        let common = s.doc().unwrap().entity(target).unwrap().common.clone();
         let pick = Vec2::new(0.0, 5.0);
-        let point3 = Some(pick.to3(30.0));
+        let point3 = Some(pick.to3(50.0));
         s.start("trim").unwrap();
         s.is_interactive_ui = true;
         s.cursor_entity_point = Some((target, pick, point3));
@@ -1345,12 +1349,17 @@ fn projmode_none_elevated_circle_ignores_ground_and_trims_only_the_selected_semi
         assert_eq!(removed.common.extrusion, Vec3::Z);
         assert!(doc.entity(target).is_none());
         let mut kept = doc.model.iter().filter_map(|e| match &e.kind {
-            EntityKind::Arc(a) => Some((a, e.common.extrusion)),
+            EntityKind::Arc(a) => Some((e, a)),
             _ => None,
         });
-        let (kept_arc, normal) = kept.next().expect("surviving semicircle");
+        let (replacement, kept_arc) = kept.next().expect("surviving semicircle");
         assert_eq!((kept_arc.center, kept_arc.radius, kept_arc.start, kept_arc.end), (center, 5.0, arc.end, arc.start));
-        assert_eq!(normal, Vec3::Z);
+        assert_eq!(replacement.common, common);
+        assert!(doc.is_visible(replacement));
+        assert!(doc.space(&s.space()).unwrap().get(replacement.handle).is_some());
+        let bounds = cadcraft_engine::doc::entity_bounds(doc, replacement, 0);
+        assert!(bounds.min.near(Vec2::new(-5.0, -5.0), 1e-9));
+        assert!(bounds.max.near(Vec2::new(5.0, 0.0), 1e-9));
         assert!(kept.next().is_none());
     }
 }

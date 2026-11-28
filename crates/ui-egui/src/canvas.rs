@@ -1717,6 +1717,10 @@ pub(crate) fn build_3d_mesh(
                     crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
                 }
             }
+            cadcraft_doc::EntityKind::Arc(arc) if arc.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) => {
+                let points = arc.sample_points_3d(e.common.extrusion, 64);
+                push_3d_polyline(&mut m.lines, origin, &points, edge_col);
+            }
             cadcraft_doc::EntityKind::LwPolyline(pl)
                 if pl.elevation.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
             {
@@ -7422,13 +7426,14 @@ mod hatch_pick_tests {
     }
 
     #[test]
-    fn trim_arc_preview_is_painted_at_the_circle_height() {
+    fn trim_elevated_circle_paints_preview_and_keeps_spatial_mesh() {
         let mut app = CadApp::new(Session::new(), Services::default());
         app.session.execute("view.swiso", &json!({})).unwrap();
-        let center = Vec3::new(0.0, 0.0, 30.0);
+        let center = Vec3::new(0.0, 0.0, 50.0);
         app.session.set_camera(OrbitCamera { target: center, height: 40.0, ..app.session.camera() });
         let target = app.session.add_entity(cadcraft_doc::EntityKind::Circle(cadcraft_doc::Circle { center, radius: 5.0 })).unwrap();
-        app.session.execute("line", &json!({ "points": [[-8,0,30], [8,0,30]] })).unwrap();
+        app.session.execute("line", &json!({ "points": [[0,0,50], [8,0,50]] })).unwrap();
+        app.session.execute("line", &json!({ "points": [[8,0,50], [-8,0,50]] })).unwrap();
         for x in [-2, 2] {
             app.session.execute("line", &json!({ "points": [[x,-8,0], [x,8,0]] })).unwrap();
         }
@@ -7465,11 +7470,29 @@ mod hatch_pick_tests {
         frame(&mut app, vec![button(true), button(false)], 0.2);
         let doc = app.session.doc().unwrap();
         assert!(doc.entity(target).is_none());
-        let kept = doc.model.iter().find_map(|e| match &e.kind {
-            cadcraft_doc::EntityKind::Arc(arc) => Some(arc),
-            _ => None,
-        }).expect("surviving semicircle");
+        let kept = doc
+            .model
+            .iter()
+            .find_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Arc(arc) => Some(arc),
+                _ => None,
+            })
+            .expect("surviving semicircle");
         assert_eq!((kept.center, kept.radius, kept.start, kept.end), (center, 5.0, removed.end, removed.start));
+        let mesh = super::build_3d_mesh(&app.session, Vec3::ZERO, app.session.camera().view_dir(), false, None);
+        let vertices = mesh.lines.chunks_exact(crate::gpu::VERTEX3D_SIZE);
+        let mut arc_vertices = 0;
+        for vertex in vertices {
+            let coord = |axis| f32::from_le_bytes(vertex[axis..axis + 4].try_into().unwrap());
+            let (x, y, z) = (coord(0), coord(4), coord(8));
+            if y.abs() > 0.01 {
+                assert!(y < 0.0, "the removed half must not appear in the mesh");
+                assert_eq!(z, 50.0);
+                assert!((x.hypot(y) - 5.0).abs() < 1e-5);
+                arc_vertices += 1;
+            }
+        }
+        assert!(arc_vertices > 0, "the retained elevated semicircle must appear in the GPU mesh");
     }
 
     #[test]
