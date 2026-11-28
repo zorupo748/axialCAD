@@ -1471,3 +1471,111 @@ fn projmode_none_uses_coplanar_ellipse_and_spline_edges_like_ucs() {
         }
     }
 }
+
+#[test]
+fn trim_successive_cuts_circle_none_ucs_view_identical() {
+    use cadcraft_engine::Input;
+    use cadcraft_engine::doc::{Circle, Line};
+    use cadcraft_geom::Vec3;
+
+    for mode in [0, 1, 2] {
+        let mut s = Session::new();
+        s.doc_mut().unwrap().header.set_i64("PROJMODE", mode);
+        let circle = s.add_entity(EntityKind::Circle(Circle { center: Vec3::ZERO, radius: 10.0 })).unwrap();
+        let _cutter = s.add_entity(EntityKind::Line(Line {
+            a: Vec3::new(-20.0, 0.0, 0.0),
+            b: Vec3::new(20.0, 0.0, 0.0),
+        })).unwrap();
+
+        s.start("trim").unwrap();
+        s.is_interactive_ui = true;
+
+        // Cut 1: top semicircle (pick at (0, 10))
+        let pick1 = Vec3::new(0.0, 10.0, 0.0);
+        s.cursor_entity_point = Some((circle, pick1.xy(), Some(pick1)));
+        let prev1 = s.preview(pick1.xy());
+        assert_eq!(prev1.len(), 1, "cut 1 preview must exist for mode {mode}");
+        s.input(Input::EntityPoint { handle: Some(circle), point: pick1.xy(), point3: Some(pick1) }).unwrap();
+
+        let doc1 = s.doc().unwrap();
+        assert!(doc1.entity(circle).is_none(), "original circle handle must be gone for mode {mode}");
+        let remaining_arc = doc1.model.iter().find(|e| matches!(e.kind, EntityKind::Arc(_))).map(|e| e.handle)
+            .expect(&format!("remaining arc must exist after cut 1 for mode {mode}"));
+
+        // Cut 2: remaining bottom semicircle (pick at (0, -10))
+        let pick2 = Vec3::new(0.0, -10.0, 0.0);
+        s.cursor_entity_point = Some((remaining_arc, pick2.xy(), Some(pick2)));
+        let prev2 = s.preview(pick2.xy());
+        assert_eq!(prev2.len(), 1, "cut 2 preview on remaining arc must exist for mode {mode}");
+        s.input(Input::EntityPoint { handle: Some(remaining_arc), point: pick2.xy(), point3: Some(pick2) }).unwrap();
+
+        let doc2 = s.doc().unwrap();
+        assert!(doc2.entity(remaining_arc).is_none(), "remaining arc must be trimmed away for mode {mode}");
+        assert_eq!(doc2.model.len(), 1, "only cutter line should remain for mode {mode}");
+    }
+}
+
+#[test]
+fn trim_successive_cuts_line_none_ucs_view_identical() {
+    use cadcraft_engine::Input;
+    use cadcraft_engine::doc::Line;
+    use cadcraft_geom::Vec3;
+
+    for mode in [0, 1, 2] {
+        let mut s = Session::new();
+        s.doc_mut().unwrap().header.set_i64("PROJMODE", mode);
+        let target = s.add_entity(EntityKind::Line(Line {
+            a: Vec3::new(0.0, 0.0, 0.0),
+            b: Vec3::new(30.0, 0.0, 0.0),
+        })).unwrap();
+        let _c1 = s.add_entity(EntityKind::Line(Line {
+            a: Vec3::new(10.0, -10.0, 0.0),
+            b: Vec3::new(10.0, 10.0, 0.0),
+        })).unwrap();
+        let _c2 = s.add_entity(EntityKind::Line(Line {
+            a: Vec3::new(20.0, -10.0, 0.0),
+            b: Vec3::new(20.0, 10.0, 0.0),
+        })).unwrap();
+
+        s.start("trim").unwrap();
+        s.is_interactive_ui = true;
+
+        // Cut 1: trim segment 0..10 (pick at (5, 0))
+        let pick1 = Vec3::new(5.0, 0.0, 0.0);
+        s.cursor_entity_point = Some((target, pick1.xy(), Some(pick1)));
+        let prev1 = s.preview(pick1.xy());
+        assert_eq!(prev1.len(), 1, "cut 1 preview must exist for mode {mode}");
+        s.input(Input::EntityPoint { handle: Some(target), point: pick1.xy(), point3: Some(pick1) }).unwrap();
+
+        let doc1 = s.doc().unwrap();
+        let target2 = doc1.model.iter()
+            .find(|e| matches!(&e.kind, EntityKind::Line(l) if l.a.near(Vec3::new(10.0, 0.0, 0.0), 1e-6)))
+            .map(|e| e.handle)
+            .expect(&format!("segment 10..30 must exist for mode {mode}"));
+
+        // Cut 2: trim segment 20..30 (pick at (25, 0))
+        let pick2 = Vec3::new(25.0, 0.0, 0.0);
+        s.cursor_entity_point = Some((target2, pick2.xy(), Some(pick2)));
+        let prev2 = s.preview(pick2.xy());
+        assert_eq!(prev2.len(), 1, "cut 2 preview must exist for mode {mode}");
+        s.input(Input::EntityPoint { handle: Some(target2), point: pick2.xy(), point3: Some(pick2) }).unwrap();
+
+        let doc2 = s.doc().unwrap();
+        let target3 = doc2.model.iter()
+            .find(|e| matches!(&e.kind, EntityKind::Line(l) if l.a.near(Vec3::new(10.0, 0.0, 0.0), 1e-6) && l.b.near(Vec3::new(20.0, 0.0, 0.0), 1e-6)))
+            .map(|e| e.handle)
+            .expect(&format!("middle segment 10..20 must exist for mode {mode}"));
+
+        // Cut 3: trim remaining middle segment 10..20 (pick at (15, 0))
+        // Its endpoints (10, 0) and (20, 0) both lie on cutting edges.
+        let pick3 = Vec3::new(15.0, 0.0, 0.0);
+        s.cursor_entity_point = Some((target3, pick3.xy(), Some(pick3)));
+        let prev3 = s.preview(pick3.xy());
+        assert_eq!(prev3.len(), 1, "cut 3 preview on middle segment must exist for mode {mode}");
+        s.input(Input::EntityPoint { handle: Some(target3), point: pick3.xy(), point3: Some(pick3) }).unwrap();
+
+        let doc3 = s.doc().unwrap();
+        assert!(doc3.entity(target3).is_none(), "middle segment must be trimmed away for mode {mode}");
+        assert_eq!(doc3.model.len(), 2, "only 2 cutters should remain for mode {mode}");
+    }
+}
