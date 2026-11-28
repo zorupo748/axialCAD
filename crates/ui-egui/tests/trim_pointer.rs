@@ -135,3 +135,31 @@ fn elevated_trim_keeps_the_complement_of_the_preview_with_exact_and_noisy_secant
 fn elevated_trim_uses_release_position_when_pointer_moves_later_in_the_same_frame() {
     elevated_trim(0.0, true, true);
 }
+
+#[test]
+fn elevated_bulged_polyline_is_picked_on_the_arc_instead_of_its_chord() {
+    use cadcraft_engine::doc::LwPolyline;
+    use cadcraft_engine::geom::{PolyVertex, Polyline, Vec2};
+
+    let mut app = CadApp::new(Session::new(), Services::default());
+    app.session.execute("view.swiso", &json!({})).unwrap();
+    let elevation = 30.0;
+    let mut camera = app.session.camera();
+    camera.target = Vec3::new(0.0, 0.0, elevation);
+    camera.height = 35.0;
+    app.session.set_camera(camera);
+    app.canvas.zoom_pending = false;
+    let mut first = PolyVertex::new(Vec2::new(-5.0, 0.0));
+    first.bulge = 1.0;
+    let vertices = vec![first, PolyVertex::new(Vec2::new(5.0, 0.0))];
+    let point_on_arc = Polyline { vertices: vertices.clone(), closed: false }.segments()[0].at(0.5).to3(elevation);
+    let h =
+        app.session.add_entity(EntityKind::LwPolyline(LwPolyline { vertices, closed: false, const_width: 0.0, elevation, plinegen: false })).unwrap();
+    let mut canvas = Canvas { app, ctx: Context::default(), time: 0.0 };
+    canvas.app.session.start("trim").unwrap();
+    canvas.frame(Vec::new());
+    canvas.frame(vec![Event::PointerMoved(canvas.screen(point_on_arc))]);
+    assert_eq!(canvas.app.session.cursor_entity_point.map(|(handle, _, _)| handle), Some(h));
+    canvas.frame(vec![Event::PointerMoved(canvas.screen(Vec3::new(0.0, 0.0, elevation)))]);
+    assert!(canvas.app.session.cursor_entity_point.is_none());
+}

@@ -979,6 +979,12 @@ fn spatial_line_pick_at(app: &CadApp, xf: &Xf, at: Pos2) -> Option<Handle> {
     spatial_line_at_screen(&st.doc, &st.edit_space(), xf, at, (app.session.settings.pickbox.max(1.0) * 1.5) as f32)
 }
 
+fn spatial_lwpolyline_path(pl: &cadcraft_doc::LwPolyline, extrusion: Vec3, pixel_size: f64) -> Vec<Vec3> {
+    let polyline = cadcraft_geom::Polyline { vertices: pl.vertices.clone(), closed: pl.closed };
+    let ocs = cadcraft_geom::Mat4::ocs(extrusion);
+    polyline.tessellate((0.5 * pixel_size).max(1e-9)).into_iter().map(|p| ocs.apply(p.to3(pl.elevation))).collect()
+}
+
 fn screen_entity_polylines(doc: &cadcraft_doc::Drawing, entity: &cadcraft_doc::Entity, xf: &Xf) -> Vec<Vec<Pos2>> {
     let paths = match &entity.kind {
         cadcraft_doc::EntityKind::Line(line) if line.a.z != 0.0 || line.b.z != 0.0 => {
@@ -993,11 +999,8 @@ fn screen_entity_polylines(doc: &cadcraft_doc::Drawing, entity: &cadcraft_doc::E
             vec![points.into_iter().map(|p| xf.to_screen3(p)).collect()]
         }
         cadcraft_doc::EntityKind::LwPolyline(pl) if !entity.common.extrusion.near(Vec3::Z, 1e-6) || pl.elevation.abs() > 1e-6 => {
-            let mut pts = pl.vertices_3d(entity.common.extrusion);
-            if pl.closed && !pts.is_empty() {
-                pts.push(pts[0]);
-            }
-            vec![pts.into_iter().map(|p| xf.to_screen3(p)).collect()]
+            let path = spatial_lwpolyline_path(pl, entity.common.extrusion, 1.0 / xf.scale.max(1e-12));
+            vec![path.into_iter().map(|p| xf.to_screen3(p)).collect()]
         }
         cadcraft_doc::EntityKind::Polyline3d(pl) if pl.is_spatial() => {
             vec![pl.path_3d().into_iter().map(|p| xf.to_screen3(p)).collect()]
@@ -1249,10 +1252,7 @@ fn draw_spatial_lines(app: &CadApp, painter: &egui::Painter, xf: &Xf) {
             cadcraft_doc::EntityKind::LwPolyline(pl)
                 if pl.elevation.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
             {
-                let mut pts3 = pl.vertices_3d(e.common.extrusion);
-                if pl.closed && !pts3.is_empty() {
-                    pts3.push(pts3[0]);
-                }
+                let pts3 = spatial_lwpolyline_path(pl, e.common.extrusion, 1.0 / xf.scale.max(1e-12));
                 draw_spatial_polyline(painter, xf, &pts3, stroke, look.is_some_and(|l| l.dashed));
             }
             cadcraft_doc::EntityKind::Polyline3d(pl) if pl.is_spatial() => {
@@ -1720,10 +1720,7 @@ pub(crate) fn build_3d_mesh(
             cadcraft_doc::EntityKind::LwPolyline(pl)
                 if pl.elevation.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
             {
-                let mut pts3 = pl.vertices_3d(e.common.extrusion);
-                if pl.closed && !pts3.is_empty() {
-                    pts3.push(pts3[0]);
-                }
+                let pts3 = spatial_lwpolyline_path(pl, e.common.extrusion, session.pixel_size());
                 push_3d_polyline(&mut m.lines, origin, &pts3, edge_col);
             }
             cadcraft_doc::EntityKind::Polyline3d(pl) if pl.is_spatial() => {
@@ -4425,10 +4422,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                         if pl.elevation.abs() > 1e-6 || !k.common.extrusion.near(Vec3::Z, 1e-6) || !ucs.z_axis.near(Vec3::Z, 1e-6) =>
                     {
                         let ext = if !k.common.extrusion.near(Vec3::Z, 1e-6) { k.common.extrusion } else { ucs.z_axis };
-                        let mut pts3 = pl.vertices_3d(ext);
-                        if pl.closed && !pts3.is_empty() {
-                            pts3.push(pts3[0]);
-                        }
+                        let pts3 = spatial_lwpolyline_path(pl, ext, 1.0 / xf.scale.max(1e-12));
                         let screen_pts: Vec<Pos2> = pts3.into_iter().map(|p| xf.to_screen3(p)).collect();
                         if screen_pts.len() >= 2 {
                             painter.add(Shape::line(screen_pts, Stroke::new(1.0, t.canvas_ink)));
