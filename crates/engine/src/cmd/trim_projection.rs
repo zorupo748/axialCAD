@@ -249,7 +249,14 @@ fn line_pick(line: SpatialLine, pick: CurvePick) -> Result<Vec3> {
     Ok(line.a + (line.b - line.a) * xy.param_of(pick.xy))
 }
 
-pub(super) fn line_hits(s: &Session, entity: &Entity, line: &cadcraft_doc::Line, pick: CurvePick, edges: Edges, extend: bool) -> Result<(f64, Vec<f64>)> {
+pub(super) fn line_hits(
+    s: &Session,
+    entity: &Entity,
+    line: &cadcraft_doc::Line,
+    pick: CurvePick,
+    edges: Edges,
+    extend: bool,
+) -> Result<(f64, Vec<f64>)> {
     let mut target = SpatialLine::finite(line.a, line.b);
     let length = (line.b - line.a).len();
     if !length.is_finite() || length <= 1e-12 {
@@ -272,24 +279,35 @@ pub(super) fn line_hits(s: &Session, entity: &Entity, line: &cadcraft_doc::Line,
     target.after = extend && tp > 0.5;
 
     let hits = if mode == 0 {
-        physical_cutters(s, edges, entity)?.into_iter().flat_map(|c| match c {
-            Cutter::Line(line) => line_contact(target, line).into_iter().collect(),
-            Cutter::Round(round) => round.intersect_line(target).into_iter().map(|p| target.param(p)).collect::<Vec<_>>(),
-        }).collect()
+        physical_cutters(s, edges, entity)?
+            .into_iter()
+            .flat_map(|c| match c {
+                Cutter::Line(line) => line_contact(target, line).into_iter().collect(),
+                Cutter::Round(round) => round.intersect_line(target).into_iter().map(|p| target.param(p)).collect::<Vec<_>>(),
+            })
+            .collect()
     } else {
-        projected_cutters(s, edges, entity, &project, &vector)?.iter().flat_map(|c| match c {
-            Cut2::Line(l, before, after) => line_line_infinite(projected.a, projected.b, l.a, l.b)
-                .filter(|&(_, _, u)| (*before || u >= -REL_TOL) && (*after || u <= 1.0 + REL_TOL))
-                .map(|(_, t, _)| t).into_iter().collect(),
-            Cut2::Arc(arc) => line_circle(&projected, &Circle::new(arc.center, arc.radius)).into_iter()
-                .filter(|(p, _)| arc.contains_angle(arc.center.angle_to(*p))).map(|(_, t)| t).collect::<Vec<_>>(),
-        }).collect()
+        projected_cutters(s, edges, entity, &project, &vector, None)?
+            .iter()
+            .flat_map(|c| match c {
+                Cut2::Line { line: l, implied, endpoint_tol } => line_line_infinite(projected.a, projected.b, l.a, l.b)
+                    .filter(|&(_, _, u)| *implied || (-endpoint_tol..=1.0 + endpoint_tol).contains(&u))
+                    .map(|(_, t, _)| t)
+                    .into_iter()
+                    .collect(),
+                Cut2::Arc(arc) => line_circle(&projected, &Circle::new(arc.center, arc.radius))
+                    .into_iter()
+                    .filter(|(p, _)| arc.contains_angle(arc.center.angle_to(*p)))
+                    .map(|(_, t)| t)
+                    .collect::<Vec<_>>(),
+            })
+            .collect()
     };
     Ok((tp, hits))
 }
 
 enum Cut2 {
-    Line(Line, bool, bool),
+    Line { line: Line, implied: bool, endpoint_tol: f64 },
     Arc(Arc),
 }
 
@@ -299,20 +317,25 @@ fn projected_cutters(
     target: &Entity,
     project: &impl Fn(Vec3) -> Vec2,
     vector: &impl Fn(Vec3) -> Vec2,
+    round_radius: Option<f64>,
 ) -> Result<Vec<Cut2>> {
     let mut out = Vec::new();
     for e in cutting_entities(s, edges, target.handle)? {
         if let EntityKind::Line(l) = &e.kind {
             let (a, b) = (project(l.a), project(l.b));
-            if a.is_finite() && b.is_finite() && a.dist(b) > 1e-12 {
-                out.push(Cut2::Line(Line::new(a, b), edges.implied, edges.implied));
+            let length = a.dist(b);
+            if a.is_finite() && b.is_finite() && length.is_finite() && length > 1e-12 {
+                // Round targets solve in the circle's local metric. Allow a LINE
+                // endpoint the same linear contact tolerance as in the physical path.
+                let endpoint_tol = round_radius.map_or(REL_TOL, |radius| contact_tolerance(length, radius) / length);
+                out.push(Cut2::Line { line: Line::new(a, b), implied: edges.implied, endpoint_tol });
             }
         } else if let EntityKind::Polyline3d(p) = &e.kind {
             for pair in p.path_3d().windows(2) {
                 let [a, b] = pair else { continue };
                 let (a, b) = (project(*a), project(*b));
                 if a.is_finite() && b.is_finite() && a.dist(b) > 1e-12 {
-                    out.push(Cut2::Line(Line::new(a, b), false, false));
+                    out.push(Cut2::Line { line: Line::new(a, b), implied: false, endpoint_tol: REL_TOL });
                 }
             }
         } else if let Some(round) = round_cutter(e, edges.implied) {
@@ -334,7 +357,7 @@ fn projected_cutters(
                     let a = point(start + sweep * f64::from(i) / 256.0);
                     let b = point(start + sweep * f64::from(i + 1) / 256.0);
                     if a.is_finite() && b.is_finite() && a.dist(b) > 1e-12 {
-                        out.push(Cut2::Line(Line::new(a, b), false, false));
+                        out.push(Cut2::Line { line: Line::new(a, b), implied: false, endpoint_tol: REL_TOL });
                     }
                 }
             }
@@ -354,7 +377,7 @@ fn projected_cutters(
                     let a = project_point(segment.at(f64::from(i) / f64::from(count)));
                     let b = project_point(segment.at(f64::from(i + 1) / f64::from(count)));
                     if a.is_finite() && b.is_finite() && a.dist(b) > 1e-12 {
-                        out.push(Cut2::Line(Line::new(a, b), false, false));
+                        out.push(Cut2::Line { line: Line::new(a, b), implied: false, endpoint_tol: REL_TOL });
                     }
                 }
             }
@@ -414,12 +437,12 @@ pub(super) fn round_hits(s: &Session, entity: &Entity, center: Vec3, radius: f64
     let flatten = |p| vector(p - center);
     let circle = Circle::new(Vec2::ZERO, radius);
     let full = Segment::Arc { arc: Arc::new(Vec2::ZERO, radius, 0.0, 0.0), ccw: true };
-    let hits: Vec<_> = projected_cutters(s, edges, entity, &flatten, &vector)?
+    let hits: Vec<_> = projected_cutters(s, edges, entity, &flatten, &vector, Some(radius))?
         .iter()
         .flat_map(|c| match c {
-            Cut2::Line(l, before, after) => line_circle(l, &circle)
+            Cut2::Line { line, implied, endpoint_tol } => line_circle(line, &circle)
                 .into_iter()
-                .filter(|&(_, t)| (*before || t >= -REL_TOL) && (*after || t <= 1.0 + REL_TOL))
+                .filter(|&(_, t)| *implied || (-endpoint_tol..=1.0 + endpoint_tol).contains(&t))
                 .map(|(p, _)| p)
                 .collect(),
             Cut2::Arc(arc) => intersect_ext(&full, &Segment::Arc { arc: *arc, ccw: true }, false),

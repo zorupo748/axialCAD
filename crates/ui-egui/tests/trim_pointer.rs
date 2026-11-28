@@ -184,3 +184,124 @@ fn elevated_bulged_polyline_is_picked_on_the_arc_instead_of_its_chord() {
     canvas.frame(vec![Event::PointerMoved(canvas.screen(Vec3::new(0.0, 0.0, elevation)))]);
     assert!(canvas.app.session.cursor_entity_point.is_none());
 }
+
+fn circle_with_radial_cutters(nominal_radius: f64, gap: f64) -> (Canvas, cadcraft_engine::doc::Handle, cadcraft_engine::doc::Circle) {
+    let mut app = CadApp::new(Session::new(), Services::default());
+    app.session.execute("line", &json!({"points": [[0, 0, 0], [0, 0, 50]]})).unwrap();
+    app.session.execute("view.swiso", &json!({})).unwrap();
+    app.session.set_drawing_plane_automatic();
+    app.session.set_drawing_plane_offset_automatic();
+    app.session.settings.orthomode = false;
+    app.session.settings.axistrack = false;
+    app.session.settings.osmode = 0;
+    app.canvas.zoom_pending = false;
+    let center = Vec3::new(0.0, 0.0, 50.0);
+    let mut camera = app.session.camera();
+    camera.target = center;
+    camera.height = 200.0;
+    app.session.set_camera(camera);
+    let mut canvas = Canvas { app, ctx: Context::default(), time: 0.0 };
+    canvas.frame(Vec::new());
+
+    canvas.app.session.start("circle").unwrap();
+    canvas.app.session.cmdline("_END").unwrap();
+    canvas.click(center, None);
+    canvas.click(center + Vec3::X * nominal_radius, None);
+    let (target, circle) = canvas
+        .app
+        .session
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .find_map(|e| match &e.kind {
+            EntityKind::Circle(circle) => Some((e.handle, circle.clone())),
+            _ => None,
+        })
+        .expect("circle drawn with a free pointer radius");
+    assert_eq!(circle.center, center);
+    assert!((circle.radius - nominal_radius).abs() < 1e-4, "free radius: {}", circle.radius);
+
+    for sign in [1.0, -1.0] {
+        let edge = center + Vec3::X * (sign * (circle.radius + gap));
+        // Use a node snap only for the outer endpoint, to control its WCS gap.
+        let node = canvas.app.session.add_entity(EntityKind::Point(Point { p: edge, angle: 0.0 })).unwrap();
+        canvas.app.session.start("line").unwrap();
+        canvas.app.session.cmdline("_END").unwrap();
+        canvas.click(center, None);
+        canvas.app.session.settings.osmode = cadcraft_engine::snap::mode::NOD;
+        canvas.click(edge, None);
+        canvas.app.session.settings.osmode = 0;
+        canvas.app.session.input(Input::Enter).unwrap();
+        canvas.app.session.doc_mut().unwrap().remove_entity(node);
+        assert!(canvas.app.session.doc().unwrap().model.iter().any(|e| matches!(&e.kind, EntityKind::Line(l) if l.a == center && l.b == edge)));
+    }
+    (canvas, target, circle)
+}
+
+#[test]
+fn oblique_auto_trim_with_two_radial_endpoint_cutters() {
+    use cadcraft_engine::geom::{TAU, norm_angle};
+
+    let mut failures = Vec::new();
+    for mode in [0, 1] {
+        for (nominal_radius, gap) in [(64.0, 0.0), (64.0, 1e-6), (64.0, -1e-6), (64.0, 1e-3), (64.0, -1e-3), (10.0, -1e-3)] {
+            for upper in [true, false] {
+                let (mut canvas, target, circle) = circle_with_radial_cutters(nominal_radius, gap);
+                let center = circle.center;
+                let case = format!("mode={mode} radius={nominal_radius} gap={gap:+} upper={upper}");
+                eprintln!("radial endpoint test: {case}");
+                canvas.app.session.doc_mut().unwrap().header.set_i64("PROJMODE", mode);
+                canvas.app.session.start("trim").unwrap();
+                let pick = center + Vec3::Y * if upper { circle.radius } else { -circle.radius };
+                canvas.frame(vec![Event::PointerMoved(canvas.screen(pick))]);
+                assert_eq!(canvas.app.session.cursor_entity_point.unwrap().0, target, "{case}");
+                let preview = canvas.app.session.preview(canvas.app.session.cursor);
+                canvas.click(pick, None);
+
+                let doc = canvas.app.session.doc().unwrap();
+                assert_eq!(doc.model.iter().filter(|e| matches!(e.kind, EntityKind::Line(_))).count(), 3, "{case}");
+                let kept = doc.model.iter().find_map(|e| match &e.kind {
+                    EntityKind::Arc(a) => Some(a),
+                    _ => None,
+                });
+                // At radius 10 the 1e-3 gap exceeds the drawing-scale tolerance.
+                if nominal_radius == 10.0 {
+                    assert!(kept.is_none(), "{case}");
+                    if mode == 0 {
+                        assert!(preview.is_empty(), "{case}");
+                        assert_eq!(doc.entity(target).unwrap().kind, EntityKind::Circle(circle), "{case}");
+                    } else {
+                        assert_eq!(preview.len(), 1, "{case}");
+                        assert_eq!(preview[0].kind, EntityKind::Circle(circle), "{case}");
+                        assert!(doc.entity(target).is_none(), "{case}");
+                    }
+                    continue;
+                }
+                let [preview_entity] = preview.as_slice() else {
+                    failures.push(format!("{case}: preview count={}, target survived={}", preview.len(), doc.entity(target).is_some()));
+                    continue;
+                };
+                let (EntityKind::Arc(removed), Some(kept)) = (&preview_entity.kind, kept) else {
+                    failures.push(format!(
+                        "{case}: preview={}, surviving arc={}, target survived={}",
+                        preview_entity.kind.type_name(),
+                        kept.is_some(),
+                        doc.entity(target).is_some()
+                    ));
+                    continue;
+                };
+                let close_angle = |a: f64, b: f64| {
+                    let d = norm_angle(a - b);
+                    d.min(TAU - d) < 1e-9
+                };
+                let (start, end) = if upper { (0.0, PI) } else { (PI, 0.0) };
+                assert!(close_angle(removed.start, start) && close_angle(removed.end, end), "{case}: {removed:?}");
+                assert!(close_angle(kept.start, removed.end) && close_angle(kept.end, removed.start), "{case}: {kept:?}");
+                assert_eq!((kept.center, kept.radius), (circle.center, circle.radius), "{case}");
+                assert!(doc.entity(target).is_none(), "{case}");
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
