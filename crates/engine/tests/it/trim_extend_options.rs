@@ -1376,7 +1376,7 @@ fn projmode_vertical_json_distinguishes_physical_contact_ucs_degeneracy_and_view
             result.unwrap();
         }
         let doc = s.doc().unwrap();
-        assert_eq!(doc.entity(target).is_none(), expect_cut);
+        assert_eq!(doc.entity(target).is_none(), expect_cut || mode == 0);
         if expect_cut {
             let expected = Vec3::new(0.0, 0.0, 30.0);
             assert!(doc.model.iter().any(|e| matches!(&e.kind, EntityKind::Line(l) if l.a == a && l.b.near(expected, 1e-9))));
@@ -1455,8 +1455,13 @@ fn projmode_none_tolerates_small_depth_noise_without_crossing_real_gaps() {
             s.input(Input::EntityPoint { handle: Some(target), point: pick.xy(), point3: Some(pick) }).unwrap();
             let doc = s.doc().unwrap();
             let should_cut = dz < 1.0;
-            assert_eq!(preview.len(), usize::from(should_cut), "preview, dz={dz}, circle={circle}");
-            assert_eq!(doc.entity(target).is_none(), should_cut, "apply, dz={dz}, circle={circle}");
+            let should_remove = should_cut || !circle;
+            assert_eq!(preview.len(), usize::from(should_remove), "preview, dz={dz}, circle={circle}");
+            assert_eq!(doc.entity(target).is_none(), should_remove, "apply, dz={dz}, circle={circle}");
+            if !should_cut && !circle {
+                assert!(matches!(&preview[0].kind, EntityKind::Line(l) if l.a.x == -52.0 && l.b.x == 52.0));
+                assert_eq!(doc.model.len(), 1, "the whole line goes, with no fragment at the projected crossing");
+            }
             if should_cut {
                 let fragment = doc.model.iter().find(|e| e.handle != cutter).unwrap();
                 match &fragment.kind {
@@ -1757,4 +1762,27 @@ fn projected_trim_uses_the_elevation_of_polyline_cutters() {
             assert!(s.doc().unwrap().model.iter().any(|e| matches!(&e.kind, EntityKind::Arc(a) if (a.start - PI).abs() < 1e-8)));
         }
     }
+}
+
+#[test]
+fn quick_none_previews_and_erases_a_line_without_contacts() {
+    use cadcraft_engine::Input;
+    use cadcraft_engine::doc::Line;
+    use cadcraft_geom::Vec3;
+
+    let mut s = Session::new();
+    let line = EntityKind::Line(Line { a: Vec3::new(-5.0, 0.0, 30.0), b: Vec3::new(5.0, 0.0, 30.0) });
+    let h = s.add_entity(line.clone()).unwrap();
+    // The ground line crosses in plan only.
+    let cutter = s.add_entity(EntityKind::Line(Line { a: Vec3::new(0.0, -5.0, 0.0), b: Vec3::new(0.0, 5.0, 0.0) })).unwrap();
+    let pick = Vec3::new(2.0, 0.0, 30.0);
+    s.start("trim").unwrap();
+    s.is_interactive_ui = true;
+    s.cursor_entity_point = Some((h, pick.xy(), Some(pick)));
+    let preview = s.preview(pick.xy());
+    assert_eq!(preview.len(), 1);
+    assert_eq!(preview[0].kind, line);
+    s.input(Input::EntityPoint { handle: Some(h), point: pick.xy(), point3: Some(pick) }).unwrap();
+    assert!(s.doc().unwrap().entity(h).is_none());
+    assert!(s.doc().unwrap().entity(cutter).is_some());
 }

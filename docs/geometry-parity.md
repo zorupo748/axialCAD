@@ -87,14 +87,24 @@ UCS and View project lightweight and 3D polyline cutters from their WCS geometry
 Contact allows 2e-5 of the local operand size, bounded between 1e-8 and 1e-2 drawing
 units. With no interior cut, direct Quick TRIM can remove a line or arc with a
 contact at one endpoint. A lone hit that is within contact tolerance of both arc
-ends is ambiguous. Line fragments keep their cut endpoint for the duration of
-the same Quick TRIM command, even after a later pick removes the cutter.
+ends is ambiguous. Quick TRIM also previews and erases an entire line with no
+physical contacts. In None, a circle or arc with zero contacts is kept.
 Window, Crossing, Fence and arc EXTEND
 still use WCS XY, even in None. Direct edits of other target types retain their planar
-algorithms. Direct circle and arc targets still require world-Z extrusion.
+algorithms. The extrusion guard rejects direct TRIM of circles and arcs whose
+extrusion differs from world +Z by more than 1e-6. The target stays in the drawing.
+
+For diagnostics, launch with `AXIAL_TRIM_DEBUG=1` and capture standard error.
+The trace records the pick route, resolved WCS coordinates, projection, circle
+contacts and the planned outcome for preview and apply.
+
+In an oblique view, `screen_projected_pick_at` took a median of 54 ms per search
+(P95 57 ms) with 10,000 elevated circles. The measurement used 51 samples in the
+optimized test profile and covered hit testing alone.
 
 | Command | AutoCAD supports | axialCAD supports |
 |---|---|---|
+| 2026-11-28 | minor | Quick TRIM previews and erases lines without physical contacts. Documented extrusion validation, opt-in TRIM tracing and oblique hit-test timings. |
 | 2026-11-28 | minor | Direct TRIM preserves elevation when projecting polyline cutters into UCS and View. |
 | 2026-11-28 | minor | Direct Quick TRIM in None accepts a single unambiguous endpoint contact and can finish trimming a pair of crossing lines within one command. |
 | TRIM | every curve type, quick and standard modes | line, arc, circle, polyline; ellipse and spline via sampled cutting (`modify.rs:485-656`, `modify2.rs` `trim_other`); a closed spline leaves one open spline On a closed polyline a pick before the first or after the last cut keeps the run between the cuts and nothing more (#726). |

@@ -34,6 +34,18 @@ pub(crate) fn no_intersection(msg: impl Into<String>) -> EngineError {
     EngineError::NoIntersection(msg.into())
 }
 
+pub(crate) fn trim_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("AXIAL_TRIM_DEBUG").is_some_and(|value| value == "1"))
+}
+
+pub(crate) fn trim_trace(args: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    if trim_debug_enabled() {
+        let _ = writeln!(std::io::stderr().lock(), "[axial-trim] {args}");
+    }
+}
+
 /// Whether a trim error says the object meets no cutting edge (a Quick-mode trim then erases it).
 pub(crate) fn misses_edges(e: &EngineError) -> bool {
     matches!(e, EngineError::NoIntersection(_))
@@ -1162,32 +1174,64 @@ pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Resu
     replace_trimmed(s, h, pieces)
 }
 
-pub(crate) fn trim_at_pick(s: &mut Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool, known_line_endpoint: bool) -> Result<Vec<Handle>> {
-    let pieces = direct_trim(s, h, pick, edges, quick, known_line_endpoint)?;
+pub(crate) fn trim_at_pick(s: &mut Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool) -> Result<Vec<Handle>> {
+    let pieces = direct_trim(s, h, pick, edges, quick, "apply")?;
     if pieces.removed.is_empty() {
         return Ok(vec![h]);
     }
-    replace_trimmed(s, h, pieces)
+    let handles = replace_trimmed(s, h, pieces)?;
+    if trim_debug_enabled() {
+        trim_trace(format_args!("phase=apply committed handle={} replacements={handles:?}", h.hex()));
+    }
+    Ok(handles)
 }
 
-fn direct_trim(s: &Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool, known_line_endpoint: bool) -> Result<TrimPieces> {
-    match trim_geometry_impl(s, h, pick.xy, edges, Some(pick), quick) {
+fn direct_trim(s: &Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool, phase: &str) -> Result<TrimPieces> {
+    let debug = trim_debug_enabled();
+    if debug {
+        let kind = s.doc().ok().and_then(|d| d.entity(h)).map(|e| e.kind.type_name());
+        trim_trace(format_args!(
+            "phase={phase} route=direct handle={} kind={kind:?} projmode={} quick={quick} xy={:?} wcs={:?}",
+            h.hex(),
+            proj_mode(s),
+            pick.xy,
+            pick.world,
+        ));
+    }
+    let result = match trim_geometry_impl(s, h, pick.xy, edges, Some(pick), quick) {
         Err(e) if misses_edges(&e) => {
             let Some(entity) = s.doc()?.entity(h) else { return Err(e) };
-            if quick
-                && proj_mode(s) == 0
-                && !known_line_endpoint
-                && matches!(entity.kind, EntityKind::Line(_) | EntityKind::Arc(_) | EntityKind::Circle(_))
-            {
-                return Ok(TrimPieces { kept: vec![], removed: vec![] });
+            if debug {
+                trim_trace(format_args!("phase={phase} no_intersection handle={} detail={e}", h.hex()));
             }
-            if quick {
-                return Ok(TrimPieces { kept: vec![], removed: vec![entity.kind.clone()] });
+            if quick && proj_mode(s) == 0 && matches!(entity.kind, EntityKind::Arc(_) | EntityKind::Circle(_)) {
+                Ok(TrimPieces { kept: vec![], removed: vec![] })
+            } else if quick {
+                Ok(TrimPieces { kept: vec![], removed: vec![entity.kind.clone()] })
+            } else {
+                Err(e)
             }
-            Err(e)
         }
         result => result,
+    };
+    if debug {
+        match &result {
+            Ok(pieces) => {
+                trim_trace(format_args!(
+                    "phase={phase} handle={} kept={} removed={} removed_kind={:?}",
+                    h.hex(),
+                    pieces.kept.len(),
+                    pieces.removed.len(),
+                    pieces.removed.first().map(EntityKind::type_name),
+                ));
+                if let Some(EntityKind::Arc(arc)) = pieces.removed.first() {
+                    trim_trace(format_args!("phase={phase} removed_arc center={:?} start={} end={}", arc.center, arc.start, arc.end));
+                }
+            }
+            Err(error) => trim_trace(format_args!("phase={phase} handle={} error={error}", h.hex())),
+        }
     }
+    result
 }
 
 fn replace_trimmed(s: &mut Session, h: Handle, pieces: TrimPieces) -> Result<Vec<Handle>> {
@@ -1208,8 +1252,8 @@ fn replace_trimmed(s: &mut Session, h: Handle, pieces: TrimPieces) -> Result<Vec
 }
 
 /// The piece of `h` that would be removed by a trim at `pick`.
-pub(crate) fn trim_preview(s: &Session, h: Handle, pick: CurvePick, edges: Edges, known_line_endpoint: bool) -> Result<Vec<EntityKind>> {
-    direct_trim(s, h, pick, edges, quick_mode(s), known_line_endpoint).map(|pieces| pieces.removed)
+pub(crate) fn trim_preview(s: &Session, h: Handle, pick: CurvePick, edges: Edges) -> Result<Vec<EntityKind>> {
+    direct_trim(s, h, pick, edges, quick_mode(s), "preview").map(|pieces| pieces.removed)
 }
 
 /// Sub-polyline between length parameters `a` and `b` (open polylines).

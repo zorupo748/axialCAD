@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 
 use super::helpers::line;
 use super::modify::{
-    CurvePick, Edges, edge_mode, extend, extend_at_pick, misses_edges, proj_mode, quick_mode, trim, trim_at_pick, trim_window_entity,
+    CurvePick, Edges, edge_mode, extend, extend_at_pick, misses_edges, proj_mode, quick_mode, trim, trim_at_pick, trim_debug_enabled, trim_trace,
+    trim_window_entity,
 };
 use super::{bad, point_param, point3_param, points_param};
 use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Session, Step};
@@ -42,6 +43,9 @@ fn finish_trim(s: &mut Session, h: Handle, quick: bool, result: Result<Vec<Handl
 /// Trim (or extend) every object the fence `pts` crosses, at each crossing (extend: at the first).
 /// Returns how many trims or extends were made and which handles were replaced.
 fn fence(s: &mut Session, pts: &[Vec2], extending: bool, edges: Edges, quick: bool) -> Result<(usize, Vec<(Handle, Vec<Handle>)>)> {
+    if !extending {
+        trim_trace(format_args!("phase=apply route=fence points={} quick={quick}", pts.len()));
+    }
     let space = s.space();
     let d = s.doc()?;
     let fb = Bounds2::from_points(pts.iter().copied());
@@ -80,6 +84,9 @@ fn crossing(
     quick: bool,
     crossing_mode: bool,
 ) -> Result<(usize, Vec<(Handle, Vec<Handle>)>)> {
+    if !extending {
+        trim_trace(format_args!("phase=apply route=window crossing={crossing_mode} a={a:?} b={b:?} quick={quick}"));
+    }
     let space = s.space();
     let d = s.doc()?;
     let bx = Bounds2::new(a, b);
@@ -281,7 +288,10 @@ fn run(s: &mut Session, p: &Value, extending: bool) -> Result<Value> {
         extend_at_pick(s, h, pick, edges)?;
         vec![h]
     } else {
-        trim_at_pick(s, h, pick, edges, quick, false)?
+        if trim_debug_enabled() {
+            trim_trace(format_args!("source=json handle={} supplied_z={has_z}", h.hex()));
+        }
+        trim_at_pick(s, h, pick, edges, quick)?
     };
     if extending { Ok(Value::Null) } else { Ok(json!({ "handles": r.iter().map(|h| h.hex()).collect::<Vec<_>>() })) }
 }
@@ -316,7 +326,6 @@ enum Stage {
 struct TrimUndo {
     doc: Arc<Drawing>,
     edges: Option<Vec<Handle>>,
-    line_fragments: usize,
 }
 
 pub(crate) struct TrimM {
@@ -325,13 +334,11 @@ pub(crate) struct TrimM {
     edges: Option<Vec<Handle>>,
     stage: Stage,
     undo: Vec<TrimUndo>,
-    /// Lines produced by physical Quick TRIM have a real cut endpoint, even after its cutter is trimmed away.
-    line_fragments: Vec<Handle>,
 }
 
 impl TrimM {
     pub(crate) fn new(extend: bool) -> Self {
-        TrimM { extend, edges: None, stage: Stage::Pick, undo: Vec::new(), line_fragments: Vec::new() }
+        TrimM { extend, edges: None, stage: Stage::Pick, undo: Vec::new() }
     }
     fn edges(&self, quick: bool, implied: bool) -> Edges<'_> {
         Edges { only: self.edges.as_deref(), implied: !quick && implied }
@@ -353,10 +360,9 @@ impl TrimM {
     fn step(&mut self, s: &mut Session, f: impl FnOnce(&mut Self, &mut Session) -> Result<()>) -> Result<()> {
         let before_doc = s.state()?.doc.clone();
         let before_edges = self.edges.clone();
-        let line_fragments = self.line_fragments.len();
         let r = f(self, s);
         if !Arc::ptr_eq(&before_doc, &s.state()?.doc) {
-            self.undo.push(TrimUndo { doc: before_doc, edges: before_edges, line_fragments });
+            self.undo.push(TrimUndo { doc: before_doc, edges: before_edges });
         }
         r
     }
@@ -612,6 +618,9 @@ impl Interactive for TrimM {
                     }
                     let Some(h) = handle else {
                         // A pick in empty space opens a crossing window there.
+                        if !extending {
+                            trim_trace(format_args!("source=entity_point route=begin_window xy={p:?}"));
+                        }
                         self.stage = Stage::Crossing(Some(p), false);
                         s.pending_window = Some(crate::PendingWindow { corner: p, during_command: true, force_crossing: false });
                         return Ok(Step::Continue);
@@ -626,13 +635,11 @@ impl Interactive for TrimM {
                         if extending {
                             return extend_at_pick(s, h, pick, edges);
                         }
-                        let physical_line =
-                            quick && proj_mode(s) == 0 && s.doc()?.entity(h).is_some_and(|entity| matches!(entity.kind, EntityKind::Line(_)));
-                        let new_hs = trim_at_pick(s, h, pick, edges, quick, m.line_fragments.contains(&h))?;
+                        if trim_debug_enabled() {
+                            trim_trace(format_args!("source=entity_point handle={} canvas={}", h.hex(), s.is_interactive_ui));
+                        }
+                        let new_hs = trim_at_pick(s, h, pick, edges, quick)?;
                         if new_hs.as_slice() != [h] {
-                            if physical_line {
-                                m.line_fragments.extend(new_hs.iter().copied());
-                            }
                             m.update_edge_handles(h, &new_hs);
                         }
                         Ok(())
@@ -662,7 +669,6 @@ impl Interactive for TrimM {
                                 s.state_mut()?.doc = undo.doc;
                                 s.doc_mut()?.header = header;
                                 self.edges = undo.edges;
-                                self.line_fragments.truncate(undo.line_fragments);
                             }
                             None => s.echo("Nothing to undo."),
                         },
@@ -701,7 +707,7 @@ impl Interactive for TrimM {
                 let pieces = if self.extend {
                     super::modify::extend_preview(s, h, pick, edges).map(|piece| piece.into_iter().collect::<Vec<_>>())
                 } else {
-                    super::modify::trim_preview(s, h, pick, edges, self.line_fragments.contains(&h))
+                    super::modify::trim_preview(s, h, pick, edges)
                 };
                 if let Ok(removed) = pieces {
                     let mut common = d.entity(h).map(|e| e.common.clone()).unwrap_or_else(|| s.current_common());

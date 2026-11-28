@@ -4,7 +4,7 @@ use cadcraft_geom::{Arc, Circle, Line, Mat4, Polyline, Segment, TAU, Vec2, Vec3,
 
 use crate::{EngineError, Result, Session};
 
-use super::{CurvePick, Edges, cutting_entities, implied_edge, prim_to_segments, proj_mode};
+use super::{CurvePick, Edges, cutting_entities, implied_edge, prim_to_segments, proj_mode, trim_debug_enabled, trim_trace};
 
 const REL_TOL: f64 = 1e-9;
 // Linear contact tolerance in drawing units. Use the local extent of the two
@@ -365,14 +365,37 @@ fn projected_cutters(
 
 pub(super) fn round_hits(s: &Session, entity: &Entity, center: Vec3, radius: f64, pick: CurvePick, edges: Edges) -> Result<(Vec2, Vec<f64>)> {
     let mode = proj_mode(s);
+    let debug = trim_debug_enabled();
     let world = pick.world.unwrap_or_else(|| pick.xy.to3(center.z));
     let local_pick = (world - center).xy();
     if mode == 0 {
         let round = Round::new(center, radius, entity.common.extrusion, None);
-        let hits = physical_cutters(s, edges, entity)?.into_iter().flat_map(|c| match c {
-            Cutter::Line(line) => round.intersect_line(line),
-            Cutter::Round(other) => round.intersect_round(other),
-        }).map(|p| norm_angle(round.local(p).angle())).collect();
+        let cutters = physical_cutters(s, edges, entity)?;
+        let count = cutters.len();
+        let hits: Vec<_> = cutters
+            .into_iter()
+            .enumerate()
+            .flat_map(|(i, c)| match c {
+                Cutter::Line(line) => {
+                    let contacts = round.intersect_line(line);
+                    if debug && i < 8 {
+                        let tolerance = contact_tolerance((line.b - line.a).len(), radius);
+                        trim_trace(format_args!(
+                            "round_cutter index={i} a={:?} b={:?} tolerance={tolerance} contacts={}",
+                            line.a,
+                            line.b,
+                            contacts.len()
+                        ));
+                    }
+                    contacts
+                }
+                Cutter::Round(other) => round.intersect_round(other),
+            })
+            .map(|p| norm_angle(round.local(p).angle()))
+            .collect();
+        if debug {
+            trim_trace(format_args!("round_hits projmode=0 center={center:?} radius={radius} cutters={count} hits={}", hits.len()));
+        }
         return Ok((local_pick, hits));
     }
 
@@ -391,10 +414,20 @@ pub(super) fn round_hits(s: &Session, entity: &Entity, center: Vec3, radius: f64
     let flatten = |p| vector(p - center);
     let circle = Circle::new(Vec2::ZERO, radius);
     let full = Segment::Arc { arc: Arc::new(Vec2::ZERO, radius, 0.0, 0.0), ccw: true };
-    let hits = projected_cutters(s, edges, entity, &flatten, &vector)?.iter().flat_map(|c| match c {
-        Cut2::Line(l, before, after) => line_circle(l, &circle).into_iter()
-            .filter(|&(_, t)| (*before || t >= -REL_TOL) && (*after || t <= 1.0 + REL_TOL)).map(|(p, _)| p).collect(),
-        Cut2::Arc(arc) => intersect_ext(&full, &Segment::Arc { arc: *arc, ccw: true }, false),
-    }).map(|p| norm_angle(p.angle())).collect();
+    let hits: Vec<_> = projected_cutters(s, edges, entity, &flatten, &vector)?
+        .iter()
+        .flat_map(|c| match c {
+            Cut2::Line(l, before, after) => line_circle(l, &circle)
+                .into_iter()
+                .filter(|&(_, t)| (*before || t >= -REL_TOL) && (*after || t <= 1.0 + REL_TOL))
+                .map(|(p, _)| p)
+                .collect(),
+            Cut2::Arc(arc) => intersect_ext(&full, &Segment::Arc { arc: *arc, ccw: true }, false),
+        })
+        .map(|p| norm_angle(p.angle()))
+        .collect();
+    if debug {
+        trim_trace(format_args!("round_hits projmode={mode} center={center:?} radius={radius} hits={}", hits.len()));
+    }
     Ok((flatten(world), hits))
 }

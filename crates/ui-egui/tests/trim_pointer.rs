@@ -41,7 +41,7 @@ impl Canvas {
     }
 }
 
-fn elevated_trim(noise: f64, pointer_secant: bool, move_after_release: bool) {
+fn elevated_trim(projmode: i64, noise: f64, pointer_secant: bool, move_after_release: bool) {
     let mut app = CadApp::new(Session::new(), Services::default());
     app.session.execute("view.swiso", &json!({})).unwrap();
     app.session.set_drawing_plane_automatic();
@@ -97,15 +97,26 @@ fn elevated_trim(noise: f64, pointer_secant: bool, move_after_release: bool) {
         canvas.app.session.execute("line", &json!({"points": [[x, -14, 0], [x, 14, 0]]})).unwrap();
     }
 
-    assert_eq!(canvas.app.session.doc().unwrap().header.i64("PROJMODE", 0), 0);
+    canvas.app.session.doc_mut().unwrap().header.set_i64("PROJMODE", projmode);
     canvas.app.session.start("trim").unwrap();
     let picked = center + Vec3::Y * radius;
     canvas.frame(vec![Event::PointerMoved(canvas.screen(picked))]);
     assert_eq!(canvas.app.session.cursor_entity_point.unwrap().0, target);
     let preview = canvas.app.session.preview(canvas.app.session.cursor);
+    if projmode == 0 && noise > 2e-5 * a.dist(b) {
+        assert!(preview.is_empty(), "the secant is outside physical contact tolerance");
+        canvas.click(picked, None);
+        let doc = canvas.app.session.doc().unwrap();
+        assert_eq!(doc.entity(target).unwrap().kind, EntityKind::Circle(circle));
+        assert_eq!(doc.model.len(), 4);
+        return;
+    }
     assert_eq!(preview.len(), 1);
     let EntityKind::Arc(removed) = &preview[0].kind else { panic!("expected an arc preview") };
-    assert_eq!((removed.center, removed.radius, removed.start, removed.end), (center, radius, 0.0, PI));
+    assert_eq!((removed.center, removed.radius), (center, radius));
+    let expected_start = if projmode == 1 { (4.0 / radius).acos() } else { 0.0 };
+    assert!((removed.start - expected_start).abs() < 1e-9);
+    assert!((removed.end - (PI - expected_start)).abs() < 1e-9);
 
     canvas.click(picked, move_after_release.then_some(center - Vec3::Y * radius));
     let doc = canvas.app.session.doc().unwrap();
@@ -126,14 +137,24 @@ fn elevated_trim(noise: f64, pointer_secant: bool, move_after_release: bool) {
 fn elevated_trim_keeps_the_complement_of_the_preview_with_exact_and_noisy_secants() {
     for noise in [0.0, 1e-6, 1e-3] {
         for pointer_secant in [false, true] {
-            elevated_trim(noise, pointer_secant, false);
+            elevated_trim(0, noise, pointer_secant, false);
         }
     }
 }
 
 #[test]
 fn elevated_trim_uses_release_position_when_pointer_moves_later_in_the_same_frame() {
-    elevated_trim(0.0, true, true);
+    elevated_trim(0, 0.0, true, true);
+}
+
+#[test]
+fn elevated_trim_in_ucs_applies_the_preview_including_ground_cutters() {
+    elevated_trim(1, 1e-3, true, false);
+}
+
+#[test]
+fn elevated_trim_in_none_preserves_the_circle_when_the_secant_misses() {
+    elevated_trim(0, 0.01, true, false);
 }
 
 #[test]
