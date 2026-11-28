@@ -3928,13 +3928,21 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         && app.canvas.selection_window.is_none()
         && cycle_click(app, &xf, hover_pos, raw_world.filter(|_| inside), mods.shift);
     let mut screen_selection_handled = false;
-    if inside
-        && pressed_primary
-        && !middle_down
-        && picks_entity_point
-        && let Some(at) = hover_pos
-    {
-        if let Err(error) = screen_entity_point(app, &xf, at).and_then(|input| app.session.input(input)) {
+    if pressed_primary && !middle_down && picks_entity_point {
+        // A later pointer move in the frame updates hover independently of this click.
+        let release = ui.input(|i| {
+            i.events.iter().rev().find_map(|event| match event {
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, .. } => Some(*pos),
+                _ => None,
+            })
+        });
+        if let Some(at) = release.filter(|&at| {
+            !popup_blocked
+                && rect.contains(at)
+                && ui.ctx().layer_id_at(at) == Some(ui.layer_id())
+                && !crate::viewcube::Layout::blocks_canvas_pointer(rect, at)
+        }) && let Err(error) = screen_entity_point(app, &xf, at).and_then(|input| app.session.input(input))
+        {
             app.session.echo(error.to_string());
         }
         screen_selection_handled = true;
