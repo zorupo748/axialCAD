@@ -186,6 +186,60 @@ Cada flujo se clasifica según los criterios establecidos:
 - **STLOUT con diálogo y extensión automática:** Apertura de selector de archivos nativo con anexado automático de extensión `.stl` y cabecera neutra (`axialCAD binary STL`).
 - **COPYBASE y copia de sólidos entre dibujos:** Copia relativa con punto base 3D (`Ctrl+Shift+C`), preservación de la receta B-Rep y volumen de `Solid3d`, e inserción en el mismo dibujo y entre dibujos distintos.
 
+### Pegado con punto base al cambiar de SCP
+
+**Verificado por inspección en axialCAD.** `COPYBASE` guarda el punto base en coordenadas mundiales (WCS) y conserva las entidades en sus coordenadas originales. El portapapeles interno carece de una captura de los ejes del SCP de origen y `PASTECLIP` solo traslada las entidades. La prueba `copybase_acceptance_f_spatial_nonzero_z_and_inclined_ucs`, añadida en `df2b468`, espera explícitamente esa traslación. La reproducción del caso vertical a horizontal confirmó la traslación sin giro.
+
+**Flujo del usuario.** Situar el XY del SCP sobre la cara, elegir una esquina con `COPYBASE`, cambiar al SCP de destino y marcar la inserción en `PASTECLIP`. Si la cara estaba en el XY de origen, quedará paralela al XY de destino, y estará en ese plano si la inserción está en él. La orientación depende del SCP activo al copiar, sin deducir un plano de la geometría.
+
+**Caso para reproducir.** En un dibujo desechable, copiar un contorno vertical con X del SCP hacia +X mundial e Y hacia +Z mundial. Usar una base WCS en `(10,20,30)` y un vértice en `(14,20,33)`. Cambiar al SCP mundial y pegar en `(100,200,0)`. La reproducción usó `COPYBASE` por JSON, `PASTECLIP` por la línea de comandos y `drawing.inspect` para medir la copia seleccionada (entidad `101`). El binario ya construido correspondía a `c6d34c94f608e5ba9630f7addc918f8c2c0eaca4`. La ejecución se realizó en X11 virtual, con perfil privado y el supervisor acordado.
+
+| Punto | Medido con `drawing.inspect` | Predicción del código actual | Resultado esperado según la regla acordada |
+|---|---|---|---|
+| Base | `(100,200,0)` | `(100,200,0)` | `(100,200,0)` |
+| Vértice | `(104,200,3)` | `(104,200,3)` | `(104,203,0)` |
+
+**Regla de diseño acordada para axialCAD.** Al insertar con `PASTECLIP` contenido de `COPYBASE` cuyo SCP de origen esté disponible, hacer coincidir sus ejes con los del SCP vigente mediante un giro rígido y llevar el punto base al punto indicado. Para cada punto mundial `p`, el resultado es `inserción + R_destino · R_origenᵀ · (p − base)`. Con los mismos ejes se aplica exactamente la traslación actual. La regla también cubre otro dibujo abierto en la misma sesión si se conserva el SCP de origen. `PASTEBLOCK`, `PASTEORIG`, `COPYCLIP` y `CUTCLIP` conservan su comportamiento. La primera versión aplica una sola regla y prescinde de un selector de orientación.
+
+- Si el pegado requiere un giro y alguno de los marcos es degenerado, no ortogonal o contiene valores no finitos, informar del error antes de modificar el dibujo.
+- Si el portapapeles externo carece del SCP de origen, usar el punto base disponible y conservar la orientación WCS. Al completar el pegado, mostrar una sola vez por operación, en el historial de la línea de comandos: «El portapapeles no incluye el SCP de origen. Se ha conservado la orientación original en coordenadas mundiales (WCS).» La automatización debe recibir ese mismo aviso como parte del resultado exitoso del comando. El aviso es informativo y el pegado no requiere confirmación.
+
+La alineación de ejes es una decisión de diseño de axialCAD. La rotación en el caso equivalente de AutoCAD, BricsCAD y DraftSight queda sin verificar.
+
+#### Plan de implementación pendiente de aprobación
+
+| Archivo | Cambio previsto |
+|---|---|
+| `crates/engine/src/cmd/edit.rs` | Capturar el SCP junto al punto base en `COPYBASE` interactivo y en JSON. Unificar la colocación de `PASTECLIP` en ambos caminos, preservando la conversión existente de puntos interactivos y el contrato WCS de JSON. Si se omite `at`, mantener el comportamiento documentado de coordenadas originales. Emitir el aviso en el historial y devolverlo en el resultado JSON según la ruta. |
+| `crates/engine/src/cmd/clipboard.rs` | Guardar el marco en la procedencia del portapapeles interno y distinguir una copia externa sin marco de una copia normal interna. Preparar y validar toda la selección en copias antes de mezclar definiciones, reservar identificadores o insertar. Con los mismos ejes, reutilizar la traslación actual. Conservar la resolución de capas, estilos y bloques entre dibujos. |
+| `crates/geom/src/ucs.rs` y `crates/geom/src/mat.rs` | Reutilizar `Mat4` y las bases del SCP cuando sirvan. Validar finitud, longitudes unitarias, perpendicularidad y orientación dextrógira con una tolerancia explícita. Distinguir la transformación de puntos y vectores. |
+| `crates/doc/src/entity.rs` y módulos de entidades | Preparar una transformación rígida que pueda devolver un error. Trabajar con la entidad completa cuando intervenga su normal de extrusión y respetar si cada campo está en WCS o en el sistema propio del objeto (OCS). |
+| `crates/doc/src/solid3d.rs` y `crates/brep/src/recipe.rs` | Añadir, si el evaluador lo permite, una operación rígida al final de la receta, evaluar el sólido colocado y mantener coherentes sus caras en caché y caja envolvente. Revisar los consumidores y la persistencia de la receta. |
+| `crates/ui-egui/src/canvas.rs` y `crates/engine/src/cmd/edit.rs` | Revisar la previsualización de pegado, que hoy usa una traslación 2D. Usar la misma colocación que la confirmación para `PASTECLIP`, manteniendo la ruta de `PASTEBLOCK`. |
+| `crates/engine/src/cmd/clipboard_tests.rs` y `crates/engine/tests/clipboard.rs` | Sustituir la expectativa antigua de traslación con SCP inclinado y añadir casos de compatibilidad, atomicidad y transferencia entre dibujos. |
+
+| Tipo de entidad | Tratamiento previsto |
+|---|---|
+| 2D, incluidos arcos, círculos y polilíneas ligeras | Transformar puntos y normal, reconstruir coordenadas OCS, elevación y ángulos donde corresponda. Conservar radios, segmentos curvos, anchos y cierre. Verificar el contorno en WCS. |
+| Líneas y polilíneas 3D | Transformar extremos y vértices WCS. Conservar longitud, topología y cierre. |
+| Texto, MTEXT y atributos | Transformar inserción, punto de justificación y dirección de lectura. Recalcular normal y giro en su plano y conservar contenido y estilo. |
+| Referencias de bloque | Componer el giro con la colocación de la referencia, sin rotar la definición compartida. Conservar escala, atributos y referencias anidadas. Rechazar la selección si una colocación 3D no se puede representar, renderizar y guardar fielmente. |
+| Cotas | Transformar puntos de definición y texto, plano y ángulos. Verificar que se conserva la medida y que la geometría de representación se regenera o queda coherente con su bloque. Respetar la política actual de asociaciones al pegar. |
+| Líderes y multilíderes | Transformar vértices, punto de llegada y contenido de texto o bloque. Verificar la dirección del tramo horizontal y de la flecha en el nuevo plano. |
+| Sólidos B-Rep | Conservar la receta original como antecedente de la colocación rígida. Comprobar que el resultado sigue siendo un sólido reevaluable y conserva volumen, posición y representación. |
+
+#### Pruebas de aceptación previstas
+
+1. Sustituir `copybase_acceptance_f_spatial_nonzero_z_and_inclined_ucs` por `copybase_acceptance_maps_source_axes_to_inclined_destination_ucs`. Mantener una polilínea 3D y base con Z distinto de cero. En el marco de la prueba anterior, X apunta a +X mundial, Y a +Z y Z a −Y. Con origen mundial al copiar, el desplazamiento local `(10,20,20)` pasa a `(10,-20,20)`. La base debe quedar en `(100,100,50)` y el otro vértice en `(110,80,70)`. El comentario debe explicar que la aserción anterior, `(110,120,70)`, fijaba una traslación WCS, y que la nueva comprueba que el contenido sigue los ejes del SCP de destino.
+2. Reproducir el flujo con un contorno vertical de referencia y otro oblicuo, con base distinta del origen del SCP. Comprobar base, vértices y normal en WCS. Comparar la previsualización con la inserción. Para la reproducción previa a la implementación, usar un binario ya construido, perfil privado, puerto propio y el supervisor acordado con `MemAvailable >= 8 GiB`, tras la confirmación de Antigravity.
+3. Comparar el resultado con el pegado actual cuando los SCP son iguales y cuando solo cambia su origen. Comprobar también el caso JSON sin `at`.
+4. Pegar varias entidades en el mismo dibujo y en otro dibujo de la sesión. Comprobar que se aplica el mismo giro a todas, que la copia original permanece intacta y que se resuelven las dependencias. Comparar la vía interactiva con JSON suministrando el mismo destino WCS mediante sus coordenadas de entrada respectivas.
+5. Probar los tipos de la tabla, incluido texto justificado, un bloque anidado, una cota, un multilíder y un sólido con receta booleana. Verificar volumen tras reevaluar el sólido y comprobar el guardado y la reapertura en los formatos que admitan estas representaciones.
+6. Forzar un marco inválido y una selección con una entidad válida seguida de otra que no admite el giro. En ambos casos comprobar el error y la igualdad del dibujo, las definiciones, la selección, los identificadores y el historial de deshacer antes y después.
+7. Pegar DXF externo con punto base y sin SCP de origen. Comprobar la traslación WCS y el texto exacto del aviso una sola vez por pegado en su canal correspondiente. Comprobar que una copia interna normal no genera el aviso y que `PASTEBLOCK` y `PASTEORIG` mantienen sus resultados actuales.
+
+**Riesgos y dudas abiertas.** Las entidades con campos OCS pueden verse correctas y guardarse con orientación incorrecta si cada consumidor interpreta el plano de forma distinta. Hay que comprobar qué orientaciones admiten el renderizador de bloques y anotaciones, y los lectores y escritores DXF/DWG. Para los sólidos queda por verificar qué operación rígida ofrece el evaluador y cómo versionar una receta que incluya esa colocación. Una representación insuficiente debe producir un rechazo atómico.
+
 ### Limitaciones Abiertas
 - **El caso de placa perforada falla la validación a 0.05 mm:** El mallador genera aristas abiertas (discrepancias entre subdivisiones de caras adyacentes) en la costura cilíndrica a tolerancia fina, impidiendo superar la validación estricta de manifoldness de STL.
 - **Casos ensayados a 0.15 / 0.25 mm:** Aunque superan la validación geométrica y pueden exportarse, el agujero se muestra visiblemente poligonal en OrcaSlicer en comparación con modelos de referencia, por lo que no resuelven el objetivo de calidad fina.
