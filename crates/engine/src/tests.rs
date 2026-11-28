@@ -434,7 +434,7 @@ fn copy_and_rotate_drag_as_a_transform_of_the_selection() {
     s.cmdline("pasteclip").unwrap();
     let (d, _) = s.drag(Vec2::new(5.0, 5.0)).expect("PASTECLIP drags the clipboard");
     assert!(d.clipboard && d.handles.is_empty());
-    assert!(d.matrix.apply(s.clipboard_base).near(Vec2::new(5.0, 5.0), 1e-9));
+    assert!(d.matrix.apply(s.clipboard_base.xy()).near(Vec2::new(5.0, 5.0), 1e-9));
 }
 
 #[test]
@@ -770,6 +770,7 @@ fn osnap_toggle() {
 #[test]
 fn dimlinear_interactive_and_continue() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     s.cmdline("dimlinear 0,0 10,0 5,2").unwrap();
     assert!(s.running.is_none());
     s.cmdline("dimcontinue 25,0").unwrap();

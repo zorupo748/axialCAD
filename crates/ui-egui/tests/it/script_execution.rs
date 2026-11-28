@@ -633,7 +633,7 @@ _LINE
 0,0,0
 10,10,0
 
-_VSCURRENT
+_UNSUPPORTED_TEST_CMD
 2
 _LINE
 10,10,0
@@ -651,15 +651,15 @@ _LINE
             cadcraft_engine::ScriptStep::Progress { .. } => {}
             cadcraft_engine::ScriptStep::Done { .. } => break,
             cadcraft_engine::ScriptStep::Error { line, error, .. } => {
-                assert_eq!(line, 13, "Must halt at line 13 on _VSCURRENT, halted at {line}: {error}");
-                assert!(error.contains("_VSCURRENT"), "Error must mention _VSCURRENT: {error}");
+                assert_eq!(line, 13, "Must halt at line 13 on _UNSUPPORTED_TEST_CMD, halted at {line}: {error}");
+                assert!(error.contains("_UNSUPPORTED_TEST_CMD"), "Error must mention _UNSUPPORTED_TEST_CMD: {error}");
                 halted = true;
                 break;
             }
             cadcraft_engine::ScriptStep::EofPending { .. } | cadcraft_engine::ScriptStep::Cancelled { .. } => break,
         }
     }
-    assert!(halted, "Synthetic script must halt on line 13 _VSCURRENT");
+    assert!(halted, "Synthetic script must halt on line 13 _UNSUPPORTED_TEST_CMD");
     let _ = std::fs::remove_file(path);
 }
 
@@ -730,4 +730,187 @@ fn test_invalid_option_keyword_halts_script_with_diagnosis() {
     assert!(app.session.running.is_none(), "Running command state must be cleaned up");
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_synthetic_script_full_3d_pipeline() {
+    let scr = "\
+; Synthetic test script for 3D pipeline
+_3DFACE
+0,0,0
+5,0,0
+5,5,0
+0,5,0
+
+_CYLINDER
+1,1,0
+0.2
+3
+_SPHERE
+2,2,4
+0.5
+_VSCURRENT
+_CONCEPTUAL
+_-VIEW
+_SWISO
+_ZOOM
+_E
+";
+    let path = temp_script("synthetic_3d.scr", scr.as_bytes());
+    let mut session = Session::new();
+
+    let res = session.start_script_file(&path, scr);
+    assert!(res.is_ok());
+
+    while session.is_script_running() {
+        match session.step_script() {
+            cadcraft_engine::ScriptStep::Progress { .. } => {}
+            cadcraft_engine::ScriptStep::Done { .. } => break,
+            cadcraft_engine::ScriptStep::Error { line, error, .. } => {
+                panic!("Synthetic script failed at line {line}: {error}");
+            }
+            cadcraft_engine::ScriptStep::EofPending { .. } | cadcraft_engine::ScriptStep::Cancelled { .. } => break,
+        }
+    }
+
+    assert!(!session.is_script_running());
+    assert!(session.running.is_none(), "No pending running command");
+
+    // Check visual style
+    assert_eq!(session.settings.vscurrent, "Conceptual");
+
+    // Check camera orientation
+    let cam = session.camera();
+    assert!(!cam.is_plan(), "Camera must be in SWISO orientation");
+
+    // Check entities
+    let doc = session.doc().unwrap();
+    let mut face_count = 0;
+    let mut cylinder_count = 0;
+    let mut sphere_count = 0;
+
+    for ent in doc.model.iter() {
+        match &ent.kind {
+            cadcraft_doc::EntityKind::Face3d(f) => {
+                face_count += 1;
+                assert_eq!(f.corners[0], cadcraft_geom::Vec3::new(0.0, 0.0, 0.0));
+                assert_eq!(f.corners[1], cadcraft_geom::Vec3::new(5.0, 0.0, 0.0));
+                assert_eq!(f.corners[2], cadcraft_geom::Vec3::new(5.0, 5.0, 0.0));
+                assert_eq!(f.corners[3], cadcraft_geom::Vec3::new(0.0, 5.0, 0.0));
+            }
+            cadcraft_doc::EntityKind::Solid3d(s) => {
+                if let Some(op) = s.recipe.features.first().map(|f| &f.op) {
+                    match op {
+                        cadcraft_doc::solid3d::FeatureOp::Cylinder { center, radius, height, axis } => {
+                            cylinder_count += 1;
+                            assert_eq!(*center, cadcraft_geom::Vec3::new(1.0, 1.0, 0.0));
+                            assert_eq!(*radius, 0.2);
+                            assert!((*height - 3.0).abs() < 1e-6);
+                            assert_eq!(*axis, cadcraft_geom::Vec3::Z);
+                            assert!(!s.faces.is_empty(), "Cylinder must have mesh faces");
+                        }
+                        cadcraft_doc::solid3d::FeatureOp::Sphere { center, radius } => {
+                            sphere_count += 1;
+                            assert_eq!(*center, cadcraft_geom::Vec3::new(2.0, 2.0, 4.0));
+                            assert_eq!(*radius, 0.5);
+                            assert!(!s.faces.is_empty(), "Sphere must have mesh faces");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(face_count, 1);
+    assert_eq!(cylinder_count, 1);
+    assert_eq!(sphere_count, 1);
+
+    // Check extents
+    let ext = doc.extents(&cadcraft_doc::Space::Model);
+    assert!(!ext.is_empty(), "Model extents must not be empty");
+    assert!(ext.min.x <= 0.0 && ext.min.y <= 0.0);
+    assert!(ext.max.x >= 5.0 && ext.max.y >= 5.0);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_vscurrent_interactive_and_programmatic() {
+    let mut session = Session::new();
+
+    // 1. Programmatic conceptual
+    let res = session.execute("vscurrent", &serde_json::json!({ "style": "conceptual" }));
+    assert!(res.is_ok());
+    assert_eq!(session.settings.vscurrent, "Conceptual");
+
+    // 2. Programmatic unsupported style returns error
+    let res = session.execute("vscurrent", &serde_json::json!({ "style": "shaded" }));
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("not supported yet"));
+
+    // 3. Programmatic unknown style
+    let res = session.execute("vscurrent", &serde_json::json!({ "style": "unknown_style" }));
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("Unknown visual style"));
+
+    // 4. Interactive via typed tokens with international prefixes
+    session.start("_VSCURRENT").unwrap();
+    let res = session.input(cadcraft_engine::Input::Text("_CONCEPTUAL".into()));
+    assert!(res.is_ok());
+    assert_eq!(session.settings.vscurrent, "Conceptual");
+}
+
+#[test]
+fn test_view_preset_swiso_interactive_and_programmatic() {
+    let mut session = Session::new();
+
+    // 1. Programmatic SWISO preset via VIEW
+    let res = session.execute("view", &serde_json::json!({ "option": "_swiso" }));
+    assert!(res.is_ok(), "view swiso must succeed: {res:?}");
+    let cam = session.camera();
+    assert!(!cam.is_plan());
+
+    // 2. Interactive via prompt machine
+    session.start("_-VIEW").unwrap();
+    let res = session.input(cadcraft_engine::Input::Text("_SWISO".into()));
+    assert!(res.is_ok());
+    let cam2 = session.camera();
+    assert!(!cam2.is_plan());
+}
+
+#[test]
+fn test_epaint_tessellate_polygon_behavior() {
+    use egui::epaint::{Mesh, TessellationOptions, Tessellator};
+    let options_aa = TessellationOptions {
+        feathering: true,
+        ..Default::default()
+    };
+    let mut tess_aa = Tessellator::new(1.0, options_aa, [1, 1], Default::default());
+
+    // Test 1: Clockwise vs CCW quad
+    let p_ccw = vec![egui::pos2(100.0, 100.0), egui::pos2(200.0, 100.0), egui::pos2(200.0, 200.0), egui::pos2(100.0, 200.0)];
+    let p_cw = vec![egui::pos2(100.0, 100.0), egui::pos2(100.0, 200.0), egui::pos2(200.0, 200.0), egui::pos2(200.0, 100.0)];
+
+    let mut mesh1 = Mesh::default();
+    tess_aa.tessellate_shape(egui::Shape::convex_polygon(p_ccw, egui::Color32::RED, egui::Stroke::NONE), &mut mesh1);
+
+    let mut mesh2 = Mesh::default();
+    tess_aa.tessellate_shape(egui::Shape::convex_polygon(p_cw, egui::Color32::RED, egui::Stroke::NONE), &mut mesh2);
+
+    assert_eq!(mesh1.vertices.len(), 8);
+    assert_eq!(mesh2.vertices.len(), 8);
+
+    // Test 2: Extreme aspect ratio quad
+    let p_flat = vec![egui::pos2(100.0, 100.0), egui::pos2(200.0, 100.0), egui::pos2(200.0, 100.01), egui::pos2(100.0, 100.01)];
+    let mut mesh3 = Mesh::default();
+    tess_aa.tessellate_shape(egui::Shape::convex_polygon(p_flat, egui::Color32::RED, egui::Stroke::NONE), &mut mesh3);
+    assert!(!mesh3.vertices.is_empty());
+
+    // Test 3: Quad with identical first two points [P, P, Q, R] (North pole sphere quad)
+    let p_pole = vec![egui::pos2(150.0, 100.0), egui::pos2(150.0, 100.0), egui::pos2(180.0, 140.0), egui::pos2(120.0, 140.0)];
+    let mut mesh4 = Mesh::default();
+    tess_aa.tessellate_shape(egui::Shape::convex_polygon(p_pole, egui::Color32::RED, egui::Stroke::NONE), &mut mesh4);
+    assert_eq!(mesh4.vertices.len(), 8);
 }

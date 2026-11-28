@@ -1030,12 +1030,12 @@ fn oversized_dwg_and_dxf_are_rejected_early() {
 
     let limits = cadcraft_dwg::Limits { max_dwg_bytes: 100_000, ..cadcraft_dwg::Limits::DEFAULT };
     let e = cadcraft_dwg::dwg_to_dxf_with(&dwg, limits).unwrap_err();
-    assert!(e.starts_with("DWG: the file is 0.") && e.ends_with("MB, larger than the 0.1 MB CADCraft opens"), "{e}");
+    assert!(e.starts_with("DWG: the file is 0.") && e.ends_with("MB, larger than the 0.1 MB axialCAD opens"), "{e}");
 
     // Lines that aren't even group codes: the size is reported before anything is parsed.
     let text = "not a group code\nx\n".repeat(60);
     let e = cadcraft_dxf::parse_with_limit(text.as_bytes(), 50).unwrap_err();
-    assert_eq!(e.to_string(), "drawing too large: 60 DXF group codes, more than the 50 CADCraft reads");
+    assert_eq!(e.to_string(), "drawing too large: 60 DXF group codes, more than the 50 axialCAD reads");
 }
 
 /// Issue #800: one unreadable object record doesn't fail the whole DWG. The reader skips it, the
@@ -2074,6 +2074,22 @@ fn autocad_header_dim_variables_are_not_overrides() {
 }
 
 #[test]
+fn dimclayer_hatchclayer_roundtrip_dxf() {
+    let mut d = Drawing::new_imperial();
+    d.header.set_str("DIMCLAYER", "01 Cotas 0.18");
+    d.header.set_str("HATCHCLAYER", "01 Rayados 0.18");
+    let back = roundtrip(&d);
+    assert_eq!(back.header.str("DIMCLAYER", ""), "01 Cotas 0.18");
+    assert_eq!(back.header.str("HATCHCLAYER", ""), "01 Rayados 0.18");
+    // Custom values also survive.
+    d.header.set_str("DIMCLAYER", "MyCotasLayer");
+    d.header.set_str("HATCHCLAYER", "MyRayadosLayer");
+    let back = roundtrip(&d);
+    assert_eq!(back.header.str("DIMCLAYER", ""), "MyCotasLayer");
+    assert_eq!(back.header.str("HATCHCLAYER", ""), "MyRayadosLayer");
+}
+
+#[test]
 fn mirrored_insert_extrusion_maps_to_negative_x_scale() {
     // A block reference mirrored in AutoCAD is stored with extrusion (0,0,-1); its insertion point,
     // scale and rotation are in that OCS, where x runs the other way: OCS (-10,5) is WCS (10,5).
@@ -2335,7 +2351,7 @@ fn svg_left_out_content_is_noted() {
     assert_eq!(kinds(&d), ["Polyline", "Polyline"]);
     assert_eq!(
         d.read_notes,
-        ["SVG: CADCraft doesn't read these yet, so they were left out: 2 texts, 1 raster image, 2 `<use>` copies, \
+        ["SVG: axialCAD doesn't read these yet, so they were left out: 2 texts, 1 raster image, 2 `<use>` copies, \
           1 `<style>` sheet (its class rules aren't applied), 1 rectangle with rounded corners (drawn square)"]
     );
     let plain = read(format!("{SVG_PAGE}<rect x=\"1\" y=\"1\" width=\"4\" height=\"3\"/></svg>").as_bytes(), "a.svg").unwrap();

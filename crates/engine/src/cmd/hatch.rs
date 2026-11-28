@@ -510,8 +510,9 @@ fn add_hatches(s: &mut Session, st: &HatchSettings, groups: Vec<Vec<HatchLoop>>)
         vec![all]
     };
     let mut out = Vec::new();
+    let layer = s.doc().map(|d| d.header.str("HATCHCLAYER", "01 Rayados 0.18")).unwrap_or_else(|_| "01 Rayados 0.18".into());
     for loops in groups.into_iter().filter(|g| !g.is_empty()) {
-        let h = s.add_entity(st.hatch(loops))?;
+        let h = s.add_entity_on_layer(st.hatch(loops), &layer, Color::Index(8))?;
         // Hatches go under other objects (HPDRAWORDER = behind boundary).
         let space = s.space();
         if let Some(store) = s.doc_mut()?.space_mut(&space) {
@@ -904,10 +905,19 @@ impl Interactive for HatchM {
         }
     }
     fn preview(&self, _s: &Session, _c: Vec2) -> Vec<EntityKind> {
+        Vec::new()
+    }
+    fn preview_objects(&self, s: &Session, _c: Vec2) -> Vec<Entity> {
         if self.loops.is_empty() {
             return Vec::new();
         }
-        vec![self.settings.hatch(self.loops.iter().flatten().cloned().collect())]
+        let layer = s.doc().map(|d| d.header.str("HATCHCLAYER", "01 Rayados 0.18")).unwrap_or_else(|_| "01 Rayados 0.18".into());
+        let common = match s.annotation_preview_common(&layer, Color::Index(8)) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let kind = self.settings.hatch(self.loops.iter().flatten().cloned().collect());
+        vec![Entity { handle: Handle(0), common, kind }]
     }
 }
 

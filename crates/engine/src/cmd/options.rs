@@ -152,6 +152,7 @@ pub fn reset(s: &mut Session) {
     st.pickadd = d.pickadd;
     st.pickdrag = d.pickdrag;
     st.maxarray = d.maxarray;
+    st.measureinit = d.measureinit;
     st.drawing_plane_offset = d.drawing_plane_offset;
     st.drawing_plane_offset_manual = d.drawing_plane_offset_manual;
     if let Ok(doc) = s.doc_mut() {

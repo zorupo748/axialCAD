@@ -40,6 +40,12 @@ pub struct Prompt {
     /// 3D base point when available (e.g. continuing a 3D line from an elevated vertex).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base3: Option<Vec3>,
+    /// Retain the WCS point in input and resolve free Auto points in the plane through the base.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub spatial_point: bool,
+    /// Fixed plane for a point prompt whose geometry is confined to that plane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point_plane: Option<cadcraft_geom::UcsFrame>,
     /// The command resolves deferred tangent/perpendicular snaps ([`Input::Deferred`]) at this
     /// prompt (a point with no base yet, e.g. the first point of a line). Elsewhere a deferred
     /// pick arrives as the plain point it was picked at.
@@ -72,6 +78,13 @@ pub struct Prompt {
     /// the routine writes, so it cannot be read for the word "Select" (#1598).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub picks_one: bool,
+    /// Suppress generic whole-object hover highlight at this prompt (e.g. TRIM in pick mode,
+    /// where the command previews the specific fragment being removed).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub suppress_hover: bool,
+    /// The command needs both the entity picked in the view and a point on it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub picks_entity_point: bool,
 }
 
 /// Parse `@distance<angle` (relative polar), returning `(distance, angle in radians)`.
@@ -90,6 +103,8 @@ pub fn parse_polar_text(text: &str, angles: &crate::units::AngleSettings) -> Opt
 pub enum Picker {
     /// A hatch pattern by name (see [`crate::pattern_choices`]); holds the current pattern.
     HatchPattern(String),
+    /// A save-file dialog for a path prompt; holds the suggested filename and default extension.
+    SaveFile { default_name: String, extension: String },
 }
 
 impl Prompt {
@@ -126,6 +141,10 @@ impl Prompt {
     pub fn base3_opt(mut self, p: Option<Vec3>) -> Self {
         self.base = p.map(|pt| pt.xy());
         self.base3 = p;
+        self
+    }
+    pub fn spatial_point(mut self) -> Self {
+        self.spatial_point = true;
         self
     }
     /// The base is a window's first corner (the `corner` field).
@@ -223,6 +242,13 @@ pub enum Input {
     Text(String),
     /// Objects picked during a selection prompt.
     Pick(Vec<Handle>),
+    /// A view-space pick resolved to a drawing-space point, with its entity if any.
+    EntityPoint {
+        handle: Option<Handle>,
+        point: Vec2,
+        /// Closest point on the visible entity, when the view can recover it.
+        point3: Option<Vec3>,
+    },
     Enter,
     Cancel,
 }
@@ -285,6 +311,14 @@ pub trait Interactive: Send {
     }
     /// An entity being edited by an in-place text editor.
     fn editing_text_entity(&self) -> Option<Handle> {
+        None
+    }
+    /// Candidate User Coordinate System (UCS) under preview during interactive definition.
+    fn preview_ucs(&self, _s: &Session) -> Option<cadcraft_geom::UcsFrame> {
+        None
+    }
+    /// Candidate camera orientation/view under preview during interactive UCS definition.
+    fn preview_camera(&self, _s: &Session) -> Option<cadcraft_geom::OrbitCamera> {
         None
     }
 }

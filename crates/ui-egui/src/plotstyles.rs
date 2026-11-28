@@ -118,7 +118,7 @@ fn window(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) -> Action {
             if ui.button(crate::tl!("New STB")).clicked() {
                 action = Some(("stylesmanager", json!({ "action": "new", "name": "new.stb" })));
             }
-            if ui.button(crate::tl!("Import JSON...")).on_hover_text(crate::tl!("Import a CADcraft plot style table (.json) into the drawing")).clicked() {
+            if ui.button(crate::tl!("Import JSON...")).on_hover_text(crate::tl!("Import an axialCAD plot style table (.json) into the drawing")).clicked() {
                 if let Some(pick) = app.services.pick_open.as_ref() {
                     if let Some(path) = pick(None) {
                         action = Some(("stylesmanager", json!({ "action": "load", "path": path })));

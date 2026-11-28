@@ -1,21 +1,20 @@
 # Parity checklist
 
-> **Generated:** 2026-10-15 by `cargo xtask parity`. Do not edit by hand.
-> **Generated:** 2026-10-16 by `cargo xtask parity`. Do not edit by hand.
+> **Generated:** 2026-11-23 by `cargo xtask parity`. Do not edit by hand.
 
-Menu-breadth parity: a reference menu item counts as covered when a CADCraft command is registered under the same menu label. It measures breadth, not depth; see [target-app-parity.md](target-app-parity.md) for the weighted assessment.
+Menu-breadth parity: a reference menu item counts as covered when an axialCAD command is registered under the same menu label. It measures breadth, not depth; see [target-app-parity.md](target-app-parity.md) for the weighted assessment.
 
-**Menu breadth: 283 / 491 items (58%)** · 427 registered commands.
+**Menu breadth: 313 / 491 items (64%)** · 500 registered commands.
 
 | Menu | Items | Covered | % |
 |---|---|---|---|
 | File | 22 | 13 | 59% |
 | Edit | 13 | 11 | 85% |
-| View | 75 | 31 | 41% |
+| View | 75 | 43 | 57% |
 | Insert | 11 | 5 | 45% |
 | Format | 27 | 25 | 93% |
-| Tools | 85 | 60 | 71% |
-| Draw | 87 | 55 | 63% |
+| Tools | 85 | 71 | 84% |
+| Draw | 87 | 62 | 71% |
 | Dimension | 28 | 28 | 100% |
 | Modify | 113 | 52 | 46% |
 | Window | 22 | 3 | 14% |
@@ -40,18 +39,7 @@ Menu-breadth parity: a reference menu item counts as covered when a CADCraft com
 - View > Camera > Adjust Distance
 - View > Camera > Swivel
 - View > Viewports > Named Viewports...
-- View > 3D Views > Viewpoint
-- View > 3D Views > Plan View > Current UCS
-- View > 3D Views > Plan View > World UCS
 - View > 3D Views > Plan View > Named UCS
-- View > 3D Views > Top
-- View > 3D Views > Bottom
-- View > 3D Views > Front
-- View > 3D Views > Back
-- View > 3D Views > SW Isometric
-- View > 3D Views > SE Isometric
-- View > 3D Views > NE Isometric
-- View > 3D Views > NW Isometric
 - View > Hide
 - View > Visual Styles > 2D Wireframe
 - View > Visual Styles > Wireframe
@@ -69,7 +57,6 @@ Menu-breadth parity: a reference menu item counts as covered when a CADCraft com
 - View > Render > Light > Light Glyphs
 - View > Render > Materials Browser
 - View > UCS Icon > On
-- View > UCS Icon > Origin
 - View > UCS Icon > Properties...
 - View > ViewCube > On
 - View > ViewCube > Settings
@@ -90,24 +77,12 @@ Menu-breadth parity: a reference menu item counts as covered when a CADCraft com
 - Tools > Inquiry > Volume
 - Tools > Update Fields
 - Tools > Edit Xref in Place
-- Tools > New UCS > World
-- Tools > New UCS > Face
-- Tools > New UCS > View
-- Tools > New UCS > Origin
 - Tools > New UCS > Z Axis Vector
 - Tools > New UCS > 3 Point
-- Tools > New UCS > X
-- Tools > New UCS > Y
-- Tools > New UCS > Z
 - Tools > Named UCS...
 - Tools > Customize > Interface (CUI)...
-- Tools > Customize > Edit Command Aliases (PGP)...
 - Tools > Import Settings
 - Tools > Export Settings
-- Tools > Express Tools > Convert Text to Mtext
-- Tools > Express Tools > Break-line Symbol
-- Tools > Express Tools > Move/Copy/Rotate
-- Tools > Express Tools > Explode Attributes to Text
 - Tools > Express Tools > Replace Block...
 - Tools > Express Tools > Super Hatch > Image...
 - Tools > Express Tools > Super Hatch > Xref...
@@ -116,11 +91,8 @@ Menu-breadth parity: a reference menu item counts as covered when a CADCraft com
 - Draw > 3D Modeling > Box
 - Draw > 3D Modeling > Wedge
 - Draw > 3D Modeling > Cone
-- Draw > 3D Modeling > Sphere
-- Draw > 3D Modeling > Cylinder
 - Draw > 3D Modeling > Torus
 - Draw > 3D Modeling > Pyramid
-- Draw > 3D Modeling > Extrude
 - Draw > 3D Modeling > Revolve
 - Draw > 3D Modeling > Sweep
 - Draw > 3D Modeling > Loft
@@ -131,18 +103,14 @@ Menu-breadth parity: a reference menu item counts as covered when a CADCraft com
 - Draw > 3D Modeling > Meshes > Primitives > Box
 - Draw > 3D Modeling > Meshes > Primitives > Wedge
 - Draw > 3D Modeling > Meshes > Primitives > Cone
-- Draw > 3D Modeling > Meshes > Primitives > Sphere
-- Draw > 3D Modeling > Meshes > Primitives > Cylinder
 - Draw > 3D Modeling > Meshes > Primitives > Torus
 - Draw > 3D Modeling > Meshes > Primitives > Pyramid
 - Draw > 3D Modeling > Meshes > Smooth Mesh
-- Draw > 3D Modeling > Meshes > 3D Face
 - Draw > 3D Modeling > Meshes > Meshes, Revolved Surface
 - Draw > 3D Modeling > Meshes > Meshes, Tabulated Surface
 - Draw > 3D Modeling > Meshes > Meshes, Ruled Surface
 - Draw > 3D Modeling > Meshes > Meshes, Edge Surface
 - Draw > 3D Modeling > Setup > Drawing
-- Draw > 3D Modeling > Setup > View
 - Draw > 3D Modeling > Setup > Profile
 - Modify > Object > External Reference > Frame
 - Modify > Object > Image > Adjust...

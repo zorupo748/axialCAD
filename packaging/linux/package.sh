@@ -39,10 +39,10 @@ case "$ARCH" in
   aarch64 | arm64) ARCH=aarch64; DEB_ARCH=arm64 ;;
   *) echo "unsupported architecture $ARCH" >&2; exit 2 ;;
 esac
-export CADCRAFT_MAINTAINER="${CADCRAFT_MAINTAINER:-CADCraft maintainers <cadcraft@storyteller.ai>}"
-BASENAME="cadcraft-$VERSION-linux-$ARCH"
+export CADCRAFT_MAINTAINER="${CADCRAFT_MAINTAINER:-axialCAD contributors}"
+BASENAME="axialcad-$VERSION-linux-$ARCH"
 
-echo "==> CADCraft $VERSION for Linux $ARCH ($FORMATS)"
+echo "==> axialCAD $VERSION for Linux $ARCH ($FORMATS)"
 
 if [[ "$SKIP_BUILD" = 0 ]]; then
   if [[ -n "${CROSS_TARGET:-}" ]]; then
@@ -57,9 +57,11 @@ STAGE="$WORK/root"
 rm -rf "$WORK"
 
 # ---- stage an FHS tree (shared by every format) -------------------------------------------------
-install -Dm755 "$BIN/cadcraft" "$STAGE/usr/bin/cadcraft"
-install -Dm755 "$BIN/cadcraft-cli" "$STAGE/usr/bin/cadcraft-cli"
-"${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/cadcraft" "$STAGE/usr/bin/cadcraft-cli" 2>/dev/null || true
+install -Dm755 "$BIN/cadcraft" "$STAGE/usr/bin/axialcad"
+install -Dm755 "$BIN/cadcraft-cli" "$STAGE/usr/bin/axialcad-cli"
+ln -s axialcad "$STAGE/usr/bin/cadcraft"
+ln -s axialcad-cli "$STAGE/usr/bin/cadcraft-cli"
+"${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/axialcad" "$STAGE/usr/bin/axialcad-cli" 2>/dev/null || true
 install -Dm644 "$HERE/$APP_ID.desktop" "$STAGE/usr/share/applications/$APP_ID.desktop"
 install -Dm644 "$HERE/$APP_ID.mime.xml" "$STAGE/usr/share/mime/packages/$APP_ID.xml"
 mkdir -p "$STAGE/usr/share/metainfo"
@@ -95,7 +97,7 @@ CADCRAFT_ARCH="$ARCH"
 EOF
 
   cat > "$TAR_DIR/README.txt" <<EOF
-CADCraft for Linux ($ARCH)
+axialCAD for Linux ($ARCH)
 Version: $VERSION ($CADCRAFT_BUILD_SHA)
 Date:    $CADCRAFT_BUILD_DATE
 
@@ -105,7 +107,7 @@ INSTALLATION (Per-User, No Root Required):
      ./install.sh
 
    By default, this installs to: \$HOME/.local
-   - Binaries: ~/.local/bin/cadcraft, ~/.local/bin/cadcraft-cli
+   - Binaries: ~/.local/bin/axialcad, ~/.local/bin/axialcad-cli (and compatibility symlinks cadcraft, cadcraft-cli)
    - Desktop launcher: ~/.local/share/applications/$APP_ID.desktop
    - Icons: ~/.local/share/icons/hicolor/...
    - MIME / file associations: ~/.local/share/mime/packages/...
@@ -115,28 +117,28 @@ INSTALLATION (Per-User, No Root Required):
      ./install.sh --prefix /path/to/custom/prefix
 
 LAUNCHING:
-- Desktop Menu: Search for "CADCraft" in your desktop application menu.
-- File Manager: Right-click any DWG or DXF file and choose "Open With -> CADCraft".
-- Terminal:     ~/.local/bin/cadcraft [drawing.dwg|drawing.dxf]
-  (Ensure ~/.local/bin is in your PATH to run 'cadcraft' directly)
+- Desktop Menu: Search for "axialCAD" in your desktop application menu.
+- File Manager: Right-click any DWG or DXF file and choose "Open With -> axialCAD".
+- Terminal:     ~/.local/bin/axialcad [drawing.dwg|drawing.dxf]
+  (Ensure ~/.local/bin is in your PATH to run 'axialcad' directly; 'cadcraft' also works)
 
 UPDATING:
-To update CADCraft while keeping all your drawings, templates, and preferences intact:
+To update axialCAD while keeping all your drawings, templates, and preferences intact:
 1. Extract the new version package.
 2. Run:
      ./install.sh --update
 
 ROLLBACK:
 To roll back to the previously installed version at any time:
-     ~/.local/share/cadcraft/install.sh --rollback
-   or run './install.sh --rollback' from any extracted CADCraft package.
+     ~/.local/share/axialcad/install.sh --rollback
+   or run './install.sh --rollback' from any extracted axialCAD package.
 
    Notice: Rolling back the binary executable does not revert configuration
    or drawing schema migrations made by a newer version.
 
 UNINSTALLATION:
-To cleanly remove CADCraft (preserving personal preferences and drawings):
-     ~/.local/share/cadcraft/uninstall.sh
+To cleanly remove axialCAD (preserving personal preferences and drawings):
+     ~/.local/share/axialcad/uninstall.sh
    or run './uninstall.sh' from this package directory.
 EOF
 
@@ -165,7 +167,7 @@ if has appimage; then
   APPDIR="$WORK/CADCraft.AppDir"
   cp -R "$STAGE" "$APPDIR"
   mv "$APPDIR/usr/share/doc" "$WORK/doc-unused"
-  ln -s usr/bin/cadcraft "$APPDIR/AppRun"
+  ln -s usr/bin/axialcad "$APPDIR/AppRun"
   cp "$HERE/$APP_ID.desktop" "$APPDIR/$APP_ID.desktop"
   cp "$ROOT/assets/app-icon/hicolor/256x256/apps/$APP_ID.png" "$APPDIR/$APP_ID.png"
   ln -s "$APP_ID.png" "$APPDIR/.DirIcon"
@@ -189,8 +191,8 @@ if has appimage; then
   # fetch only the blocks that changed in a newer release, through the .zsync published next to
   # each AppImage on GitHub Releases. `latest` is the newest published release that is not a
   # pre-release. A fork's builds point at its own releases through GITHUB_REPOSITORY.
-  REPO="${GITHUB_REPOSITORY:-storytold/cadcraft}"
-  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|cadcraft-*-linux-$ARCH.AppImage.zsync"
+  REPO="${GITHUB_REPOSITORY:-zorupo748/axialCAD}"
+  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|axialcad-*-linux-$ARCH.AppImage.zsync"
   # Extract-and-run: works without FUSE (containers, CI). The output embeds the static runtime,
   # so users don't need libfuse2 either. With zsyncmake on the host (CI installs the zsync
   # package) appimagetool also writes the .zsync, into its working directory, hence the cd.
@@ -206,9 +208,9 @@ if has appimage; then
 fi
 
 if [[ -z "${CROSS_TARGET:-}" ]]; then
-  "$STAGE/usr/bin/cadcraft-cli" --version
+  "$STAGE/usr/bin/axialcad-cli" --version
 elif [[ -n "${EMULATOR:-}" ]]; then
-  "$EMULATOR" "$STAGE/usr/bin/cadcraft-cli" --version
+  "$EMULATOR" "$STAGE/usr/bin/axialcad-cli" --version
 fi
 echo "==> done"
 ls -lh "$DIST"

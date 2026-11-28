@@ -20,6 +20,7 @@ fn the_dim(s: &Session) -> Dimension {
 #[test]
 fn dimtedit_moves_justifies_rotates_and_homes_typed_text() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     s.script("dimlinear 0,0 10,0 5,3\n").unwrap();
     // Pick the dimension on its dimension line, then a new text location.
     s.script("dimtedit 2,3\n").unwrap();

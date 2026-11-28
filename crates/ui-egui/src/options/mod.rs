@@ -56,6 +56,31 @@ pub const SNAP_MARKER_SIZES: std::ops::RangeInclusive<f32> = 5.0..=31.0;
 /// Interface scales the JSON form accepts (1: the system's own size).
 pub const INTERFACE_SCALES: std::ops::RangeInclusive<f32> = 0.5..=3.0;
 
+/// Navigation device preference for scrolling/panning behaviour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NavDevice {
+    #[default]
+    Auto,
+    Trackpad,
+    Mouse,
+}
+
+impl NavDevice {
+    pub const ALL: [NavDevice; 3] = [NavDevice::Auto, NavDevice::Trackpad, NavDevice::Mouse];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NavDevice::Auto => "auto",
+            NavDevice::Trackpad => "trackpad",
+            NavDevice::Mouse => "mouse",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        NavDevice::ALL.into_iter().find(|d| d.as_str().eq_ignore_ascii_case(s.trim()))
+    }
+}
+
 /// The interface's own preferences (the drafting ones are engine settings).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiOptions {
@@ -74,6 +99,8 @@ pub struct UiOptions {
     pub interface_scale: f32,
     /// Show vertical drop helper to Z=0 for elevated base points in LINE.
     pub z_zero_drop_helper: bool,
+    /// Preferred navigation device for scrolling/panning.
+    pub nav_device: NavDevice,
 }
 
 impl Default for UiOptions {
@@ -86,6 +113,7 @@ impl Default for UiOptions {
             time_sensitive_right_click: true,
             interface_scale: 1.0,
             z_zero_drop_helper: true,
+            nav_device: NavDevice::Auto,
         }
     }
 }
@@ -156,6 +184,7 @@ struct UiChanges {
     interface_scale: Option<f32>,
     startup_create_drawing: Option<bool>,
     z_zero_drop_helper: Option<bool>,
+    nav_device: Option<NavDevice>,
 }
 
 fn color_param(key: &str, v: &Value) -> Result<Option<Color32>, String> {
@@ -218,6 +247,9 @@ fn parse_ui(key: &str, v: &Value, c: &mut UiChanges) -> Result<bool, String> {
             c.save_version = Some(crate::SaveVersion::parse(name.trim()).ok_or("saveVersion must be 2000, 2004, 2007, 2010, 2013 or 2018")?);
         }
         "timeSensitiveRightClick" => c.time_sensitive_right_click = Some(v.as_bool().ok_or("timeSensitiveRightClick must be true or false")?),
+        "navDevice" | "navigationDevice" => {
+            c.nav_device = Some(NavDevice::parse(text()?).ok_or("navDevice must be auto, trackpad or mouse")?);
+        }
         k if k.eq_ignore_ascii_case("SAVETIME") => {
             let max = cadcraft_engine::autosave::MAX_SAVETIME;
             let n = v
@@ -258,6 +290,7 @@ fn ui_json(app: &CadApp) -> Map<String, Value> {
     m.insert("timeSensitiveRightClick".into(), json!(o.time_sensitive_right_click));
     m.insert("startupCreateDrawing".into(), json!(app.ui.startup_create_drawing));
     m.insert("zZeroDropHelper".into(), json!(o.z_zero_drop_helper));
+    m.insert("navDevice".into(), json!(o.nav_device.as_str()));
     m
 }
 
@@ -343,6 +376,9 @@ fn run_json(app: &mut CadApp, params: &Value) -> Result<Value, String> {
     if let Some(b) = ui.z_zero_drop_helper {
         app.options.z_zero_drop_helper = b;
     }
+    if let Some(nd) = ui.nav_device {
+        app.options.nav_device = nd;
+    }
     Ok(report(app))
 }
 
@@ -379,6 +415,7 @@ impl CadApp {
             "interfaceScale": self.options.interface_scale,
             "startupCreateDrawing": self.ui.startup_create_drawing,
             "zZeroDropHelper": self.options.z_zero_drop_helper,
+            "navDevice": self.options.nav_device.as_str(),
             "drawingsDir": self.ui.default_drawings_dir,
             "templatesDir": self.ui.default_templates_dir,
         })
@@ -408,6 +445,7 @@ impl CadApp {
             "zZeroDropHelper",
             "drawingsDir",
             "templatesDir",
+            "navDevice",
         ] {
             if let Some(value) = v.get(key) {
                 let _ = parse_ui(key, value, &mut c);
@@ -440,6 +478,9 @@ impl CadApp {
         }
         if let Some(b) = c.z_zero_drop_helper {
             self.options.z_zero_drop_helper = b;
+        }
+        if let Some(nd) = c.nav_device {
+            self.options.nav_device = nd;
         }
         if let Some(dir) = c.drawings_dir {
             self.ui.default_drawings_dir = dir;

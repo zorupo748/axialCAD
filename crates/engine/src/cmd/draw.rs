@@ -352,22 +352,34 @@ pub(crate) fn justify(j: &str) -> Option<(HAlign, VAlign)> {
     })
 }
 
-pub(crate) fn make_text(s: &Session, at: Vec2, value: &str, height: f64, rotation: f64, j: (HAlign, VAlign)) -> EntityKind {
+pub(crate) fn make_text_entity(
+    s: &Session,
+    at_wcs: Vec3,
+    value: &str,
+    height: f64,
+    rotation_ocs: f64,
+    j: (HAlign, VAlign),
+) -> EntityKind {
     let style = s.doc().map(|d| d.header.str("TEXTSTYLE", "Standard")).unwrap_or_else(|_| "Standard".into());
     let (h, v) = j;
     let left = h == HAlign::Left && v == VAlign::Baseline;
     EntityKind::Text(Text {
-        insert: v3(at),
-        align_pt: if left { None } else { Some(v3(at)) },
+        insert: at_wcs,
+        align_pt: if left { None } else { Some(at_wcs) },
         height,
         value: value.into(),
-        rotation,
+        rotation: rotation_ocs,
         width_factor: 1.0,
         oblique: 0.0,
         style,
         halign: h,
         valign: v,
     })
+}
+
+#[allow(dead_code)]
+pub(crate) fn make_text(s: &Session, at: Vec2, value: &str, height: f64, rotation: f64, j: (HAlign, VAlign)) -> EntityKind {
+    make_text_entity(s, v3(at), value, height, rotation, j)
 }
 
 fn run_text(s: &mut Session, p: &Value) -> Result<Value> {
@@ -378,8 +390,15 @@ fn run_text(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("text", "height must be positive"));
     }
     let j = justify(str_param(p, "justify").unwrap_or("L")).ok_or_else(|| bad("text", "unknown justification"))?;
-    let k = make_text(s, at, text, height, f64_or(p, "rotation", 0.0).to_radians(), j);
-    added(s.add_entity(k)?)
+    let rot = f64_or(p, "rotation", 0.0).to_radians();
+    let ucs = s.ucs();
+    let at_wcs = ucs.to_world2(at);
+    let n = ucs.z_axis;
+    let (ax, ay, _) = cadcraft_geom::Mat4::ocs_basis(n);
+    let d = ucs.x_axis * rot.cos() + ucs.y_axis * rot.sin();
+    let rot_ocs = d.dot(ay).atan2(d.dot(ax));
+    let k = make_text_entity(s, at_wcs, text, height, rot_ocs, j);
+    added(s.add_entity_with_extrusion(k, n)?)
 }
 
 fn run_mtext(s: &mut Session, p: &Value) -> Result<Value> {
@@ -933,6 +952,7 @@ struct CircleM {
     mode: u8, // 0 center-radius, 1 = 3P, 2 = 2P, 3 = TTR
     pts: Vec<Vec3>,
     diameter: bool,
+    radius_plane: Option<cadcraft_geom::UcsFrame>,
     /// The `Ttr` option hands over to the tangent-circle machine.
     delegate: Option<Box<dyn Interactive>>,
 }
@@ -940,10 +960,14 @@ struct CircleM {
 impl CircleM {
     fn process_point(&mut self, s: &mut Session, p3: Vec3) -> Result<Step> {
         if self.pts.is_empty() {
+            if self.mode == 0 {
+                self.radius_plane = Some(s.ucs().with_origin(p3));
+            }
             self.pts.push(p3);
             return Ok(Step::Continue);
         }
-        if self.mode == 0 && self.pts.first().is_some_and(|c| c.dist(p3) < 1e-12) {
+        let p3 = self.radius_plane.map_or(p3, |plane| plane.to_world2(plane.to_local(p3).xy()));
+        if !p3.is_finite() || (self.mode == 0 && self.pts.first().is_some_and(|c| c.dist(p3) < 1e-12)) {
             return Err(crate::EngineError::Other("Value must be positive and nonzero.".into()));
         }
         self.pts.push(p3);
@@ -964,7 +988,7 @@ impl CircleM {
             _ => None,
         };
         if let Some((center, r)) = done {
-            finish_circle(s, center, r)?;
+            finish_circle(s, center, r, self.radius_plane)?;
             return Ok(Step::Done);
         }
         Ok(Step::Continue)
@@ -981,14 +1005,19 @@ impl Interactive for CircleM {
         }
         let n = self.pts.len();
         let last_r = s.doc().map(|d| d.header.f64("CIRCLERAD", 0.0)).unwrap_or(0.0);
+        let radius_prompt = |mut prompt: Prompt| {
+            prompt.point_plane = self.radius_plane;
+            prompt
+        };
         match (self.mode, n) {
             (0, 0) => Prompt::new("Specify center point for circle", Accept::POINT).kw(&["3P", "2P", "Ttr (tan tan radius)"]),
             (0, _) if self.diameter => {
-                Prompt::new("Specify diameter of circle", Accept::POINT_OR_NUMBER).base_opt(self.pts.first().map(|p| p.xy())).distance()
+                radius_prompt(Prompt::new("Specify diameter of circle", Accept::POINT_OR_NUMBER).base3_opt(self.pts.first().copied()).distance())
             }
             (0, _) => {
-                let p =
-                    Prompt::new("Specify radius of circle", Accept::POINT_OR_NUMBER).kw(&["Diameter"]).base_opt(self.pts.first().map(|p| p.xy())).distance();
+                let p = radius_prompt(
+                    Prompt::new("Specify radius of circle", Accept::POINT_OR_NUMBER).kw(&["Diameter"]).base3_opt(self.pts.first().copied()).distance(),
+                );
                 if last_r > 0.0 { p.default(format!("{last_r:.4}")) } else { p }
             }
             (1, k) => Prompt::new(
@@ -1035,13 +1064,13 @@ impl Interactive for CircleM {
                 if r <= 0.0 {
                     return Err(crate::EngineError::Other("Value must be positive and nonzero.".into()));
                 }
-                finish_circle(s, self.pts[0], r)?;
+                finish_circle(s, self.pts[0], r, self.radius_plane)?;
                 Ok(Step::Done)
             }
             Input::Enter if self.mode == 0 && self.pts.len() == 1 => {
                 let r = s.doc()?.header.f64("CIRCLERAD", 0.0);
                 if r > 0.0 {
-                    finish_circle(s, self.pts[0], r)?;
+                    finish_circle(s, self.pts[0], r, self.radius_plane)?;
                     Ok(Step::Done)
                 } else {
                     Ok(Step::Continue)
@@ -1057,7 +1086,7 @@ impl Interactive for CircleM {
         if let Some(d) = &self.delegate {
             return d.preview(s, c);
         }
-        let cur_3d = s.cursor3;
+        let cur_3d = self.radius_plane.map_or(s.cursor3, |plane| plane.to_world2(plane.to_local(s.cursor3).xy()));
         match (self.mode, self.pts.as_slice()) {
             (0, [center]) => {
                 vec![EntityKind::Line(cadcraft_doc::Line { a: *center, b: cur_3d })]
@@ -1071,13 +1100,13 @@ impl Interactive for CircleM {
         }
     }
     fn preview_objects(&self, s: &Session, _c: Vec2) -> Vec<cadcraft_doc::Entity> {
-        let cur_3d = s.cursor3;
+        let cur_3d = self.radius_plane.map_or(s.cursor3, |plane| plane.to_world2(plane.to_local(s.cursor3).xy()));
         match (self.mode, self.pts.as_slice()) {
             (0, [center]) => {
                 let r = if self.diameter { center.dist(cur_3d) / 2.0 } else { center.dist(cur_3d) };
                 let mut common = s.current_common();
-                if !s.ucs().is_world() {
-                    common.extrusion = s.ucs().z_axis;
+                if let Some(plane) = self.radius_plane {
+                    common.extrusion = plane.z_axis;
                 }
                 vec![cadcraft_doc::Entity {
                     handle: cadcraft_doc::Handle(0),
@@ -1090,8 +1119,8 @@ impl Interactive for CircleM {
     }
 }
 
-fn finish_circle(s: &mut Session, center_wcs: Vec3, radius: f64) -> Result<()> {
-    let ucs = s.ucs();
+fn finish_circle(s: &mut Session, center_wcs: Vec3, radius: f64, plane: Option<cadcraft_geom::UcsFrame>) -> Result<()> {
+    let ucs = plane.unwrap_or_else(|| s.ucs());
     s.add_entity_with_extrusion(
         cadcraft_doc::EntityKind::Circle(cadcraft_doc::Circle {
             center: center_wcs,
@@ -1672,6 +1701,7 @@ impl Interactive for DonutM {
 
 struct TextM {
     at: Option<Vec2>,
+    at_z: f64,
     height: Option<f64>,
     rotation: Option<f64>,
     justify: (HAlign, VAlign),
@@ -1684,14 +1714,17 @@ struct TextM {
 
 impl TextM {
     fn new(s: &Session) -> Self {
+        let single_line = s.lisp_running()
+            || s.script_runner.as_ref().is_some_and(|r| r.check_eof_pending);
         TextM {
             at: None,
+            at_z: 0.0,
             height: None,
             rotation: None,
             justify: (HAlign::Left, VAlign::Baseline),
             asking_justify: false,
             line: 0,
-            single_line: s.lisp_running(),
+            single_line,
         }
     }
 }
@@ -1716,9 +1749,14 @@ impl Interactive for TextM {
     fn begin(&mut self, s: &mut Session) -> Result<Step> {
         let d = s.doc()?;
         let style = d.header.str("TEXTSTYLE", "Standard");
+        if let Some(st) = d.text_style(&style) {
+            if st.height > 0.0 {
+                self.height = Some(st.height);
+            }
+        }
         let anno = if d.text_style(&style).is_some_and(|st| st.annotative) { "Yes" } else { "No" };
         let msg =
-            format!("Current text style:  \"{style}\"  Text height:  {:.4}  Annotative:  {anno}  Justify:  Left", d.header.f64("TEXTSIZE", 0.2));
+            format!("Current text style:  \"{style}\"  Text height:  {:.4}  Annotative:  {anno}  Justify:  Left", self.height.unwrap_or_else(|| d.header.f64("TEXTSIZE", 0.2)));
         s.echo(msg);
         Ok(Step::Continue)
     }
@@ -1735,9 +1773,18 @@ impl Interactive for TextM {
         let th = s.doc()?.header.f64("TEXTSIZE", 0.2);
         match (self.at, self.height, self.rotation, i) {
             (None, _, _, Input::Keyword(k)) if k == "Justify" => self.asking_justify = true,
-            (None, _, _, Input::Point(p)) => self.at = Some(p),
+            (None, _, _, Input::Point(p)) => {
+                self.at = Some(p);
+                self.at_z = 0.0;
+            }
+            (None, _, _, Input::Point3(p3)) => {
+                let loc = s.ucs().to_local(p3);
+                self.at = Some(loc.xy());
+                self.at_z = loc.z;
+            }
             (Some(_), None, _, Input::Enter) => self.height = Some(th),
             (Some(a), None, _, Input::Point(p)) => self.height = Some(a.dist(p).max(1e-9)),
+            (Some(a), None, _, Input::Point3(p3)) => self.height = Some(a.dist(s.ucs().to_local(p3).xy()).max(1e-9)),
             (Some(_), None, _, Input::Text(t)) => {
                 let h = number(&t).filter(|h| *h > 0.0).ok_or_else(|| crate::EngineError::Other("Requires a positive height.".into()))?;
                 self.height = Some(h);
@@ -1745,13 +1792,20 @@ impl Interactive for TextM {
             }
             (Some(_), Some(_), None, Input::Enter) => self.rotation = Some(0.0),
             (Some(a), Some(_), None, Input::Point(p)) => self.rotation = Some(a.angle_to(p)),
+            (Some(a), Some(_), None, Input::Point3(p3)) => self.rotation = Some(a.angle_to(s.ucs().to_local(p3).xy())),
             (Some(_), Some(_), None, Input::Text(t)) => {
                 self.rotation = Some(s.angle_settings().direction(&t).ok_or_else(|| crate::EngineError::Other("Requires an angle.".into()))?)
             }
             (Some(a), Some(h), Some(r), Input::Text(t)) => {
-                let at = a + Vec2::from_angle(r - std::f64::consts::FRAC_PI_2) * (h * 5.0 / 3.0 * self.line as f64);
-                let k = make_text(s, at, &t, h, r, self.justify);
-                s.add_entity(k)?;
+                let at_ucs = a + Vec2::from_angle(r - std::f64::consts::FRAC_PI_2) * (h * 5.0 / 3.0 * self.line as f64);
+                let ucs = s.ucs();
+                let at_wcs = ucs.to_world(Vec3::new(at_ucs.x, at_ucs.y, self.at_z));
+                let n = ucs.z_axis;
+                let (ax, ay, _) = cadcraft_geom::Mat4::ocs_basis(n);
+                let d = ucs.x_axis * r.cos() + ucs.y_axis * r.sin();
+                let rot_ocs = d.dot(ay).atan2(d.dot(ax));
+                let k = make_text_entity(s, at_wcs, &t, h, rot_ocs, self.justify);
+                s.add_entity_with_extrusion(k, n)?;
                 self.line += 1;
                 if self.single_line {
                     return Ok(Step::Done);

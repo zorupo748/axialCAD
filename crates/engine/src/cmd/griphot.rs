@@ -9,12 +9,12 @@
 use std::sync::Arc;
 
 use cadcraft_doc::{Drawing, EntityKind, Handle};
-use cadcraft_geom::{Mat3, Vec2};
+use cadcraft_geom::{Mat3, Vec2, Vec3};
 
 use super::gripcmds::stretch_grips;
-use super::helpers::line;
+use super::helpers::line3;
 use super::machines::number;
-use super::modify::transform_entities;
+use super::modify::{transform_entities, translate_entities_3d};
 use crate::grips::{GripAction, GripMode, grip_action, grip_actions, mode_matrix};
 use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Running, Session, Step};
 
@@ -31,7 +31,7 @@ enum Ask {
     /// Reference: the reference angle/length, typed or as a first point.
     RefFirst,
     /// Reference: the second point of the reference angle/length.
-    RefSecond(Vec2),
+    RefSecond(Vec3),
     /// Reference: the new angle/length (the reference value is known).
     RefNew(f64),
     /// A multifunctional grip option that takes a point or value (Add Vertex, Lengthen…).
@@ -45,7 +45,7 @@ pub(crate) struct GripEdit {
     picking: bool,
     /// What MOVE/ROTATE/SCALE/MIRROR transform: the hot grips' objects and the selection.
     targets: Vec<Handle>,
-    base: Vec2,
+    base: Vec3,
     mode: GripMode,
     copy: bool,
     ask: Ask,
@@ -75,7 +75,7 @@ impl GripEdit {
             hot: Vec::new(),
             picking: false,
             targets: Vec::new(),
-            base: Vec2::ZERO,
+            base: Vec3::ZERO,
             mode: GripMode::Stretch,
             copy: false,
             ask: Ask::Mode,
@@ -92,7 +92,7 @@ impl GripEdit {
         if self.hot.contains(&(h, i)) || self.hot.len() >= MAX_HOT {
             return Ok(());
         }
-        let p = s.grips_of(h)?.get(i).copied().ok_or_else(|| other("no such grip"))?;
+        let p = s.doc()?.entity(h).and_then(|e| e.kind.grips3().get(i).copied()).ok_or_else(|| other("no such grip"))?;
         if self.hot.is_empty() {
             self.base = p;
             self.targets.push(h);
@@ -149,14 +149,16 @@ impl GripEdit {
     }
 
     /// The transform of the current mode for the point `to` (not STRETCH).
-    fn matrix(&self, to: Vec2) -> Option<Mat3> {
+    fn matrix(&self, to: Vec3) -> Option<Mat3> {
+        let base = self.base.xy();
+        let to = to.xy();
         match self.ask {
-            Ask::RefNew(r) if self.mode == GripMode::Rotate => Some(Mat3::rotate_about(self.base, self.base.angle_to(to) - r)),
+            Ask::RefNew(r) if self.mode == GripMode::Rotate => Some(Mat3::rotate_about(base, base.angle_to(to) - r)),
             Ask::RefNew(r) if self.mode == GripMode::Scale => {
-                let f = self.base.dist(to) / r;
-                (f.is_finite() && f > 1e-12).then(|| Mat3::scale_about(self.base, f))
+                let f = base.dist(to) / r;
+                (f.is_finite() && f > 1e-12).then(|| Mat3::scale_about(self.base.xy(), f))
             }
-            _ => mode_matrix(self.mode, self.base, to),
+            _ => mode_matrix(self.mode, base, to),
         }
     }
 
@@ -207,10 +209,18 @@ impl GripEdit {
     }
 
     /// Edit with the dragged point `to` (STRETCH) or the transform `m` (the other modes).
-    fn edit(&mut self, s: &mut Session, to: Vec2, m: Option<Mat3>) -> Result<Step> {
+    fn edit(&mut self, s: &mut Session, to: Vec3, m: Option<Mat3>) -> Result<Step> {
         let before = s.state()?.doc.clone();
+        let delta = if s.input_is_explicit || (s.drawing_plane_offset_is_manual() && !s.input_is_snapped) {
+            (to.xy() - self.base.xy()).to3(0.0)
+        } else {
+            to - self.base
+        };
         let changed = match (self.mode, m) {
-            (GripMode::Stretch, _) => !stretch_grips(s, &self.hot, &self.targets, to - self.base, self.copy)?.is_empty(),
+            (GripMode::Stretch, _) => !stretch_grips(s, &self.hot, &self.targets, delta, self.copy)?.is_empty(),
+            (GripMode::Move, _) if s.input_is_spatial_end_override => {
+                !translate_entities_3d(s, &self.targets, to - self.base, self.copy)?.is_empty()
+            }
             (_, Some(m)) => !transform_entities(s, &self.targets, &m, self.copy)?.is_empty(),
             (_, None) => return Err(other("Invalid point.")),
         };
@@ -272,30 +282,31 @@ impl GripEdit {
                 Ok(Step::Continue)
             }
             Input::Point(p) => {
-                let m = self.matrix(p);
-                self.edit(s, p, m)
+                let to = p.to3(self.base.z);
+                let m = self.matrix(to);
+                self.edit(s, to, m)
             }
             Input::Point3(p) => {
-                let p = p.xy();
                 let m = self.matrix(p);
                 self.edit(s, p, m)
             }
             Input::Deferred(d) => {
-                let m = self.matrix(d.at);
-                self.edit(s, d.at, m)
+                let to = d.at.to3(self.base.z);
+                let m = self.matrix(to);
+                self.edit(s, to, m)
             }
             Input::Text(t) => match self.mode {
                 GripMode::Rotate => {
                     let a = s.angle_settings().rotation(&t).filter(|a| a.is_finite()).ok_or_else(|| other("Requires an angle or point."))?;
-                    self.edit(s, self.base, Some(Mat3::rotate_about(self.base, a)))
+                    self.edit(s, self.base, Some(Mat3::rotate_about(self.base.xy(), a)))
                 }
                 GripMode::Scale => {
                     let f = positive(number(&t))?;
-                    self.edit(s, self.base, Some(Mat3::scale_about(self.base, f)))
+                    self.edit(s, self.base, Some(Mat3::scale_about(self.base.xy(), f)))
                 }
                 _ => Err(other("Requires a point or an option keyword.")),
             },
-            Input::Pick(_) | Input::Cancel => Ok(Step::Continue),
+            Input::Pick(_) | Input::EntityPoint { .. } | Input::Cancel => Ok(Step::Continue),
         }
     }
 
@@ -303,7 +314,7 @@ impl GripEdit {
     /// then the new value typed or measured from the base point to a picked point.
     fn reference_input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
         let i = match i {
-            Input::Point3(p) => Input::Point(p.xy()),
+            Input::Point(p) => Input::Point3(p.to3(self.base.z)),
             other => other,
         };
         let rotate = self.mode == GripMode::Rotate;
@@ -318,17 +329,17 @@ impl GripEdit {
             Ok(if rotate { a.angle_to(b) } else { a.dist(b) })
         };
         match (self.ask, i) {
-            (Ask::RefFirst, Input::Point(p)) => self.ask = Ask::RefSecond(p),
+            (Ask::RefFirst, Input::Point3(p)) => self.ask = Ask::RefSecond(p),
             (Ask::RefFirst, Input::Text(t)) => self.ask = Ask::RefNew(value(&t)?),
             (Ask::RefFirst, Input::Enter) => self.ask = Ask::RefNew(if rotate { 0.0 } else { 1.0 }),
-            (Ask::RefSecond(a), Input::Point(p)) => self.ask = Ask::RefNew(between(a, p)?),
-            (Ask::RefNew(_), Input::Point(p)) => {
+            (Ask::RefSecond(a), Input::Point3(p)) => self.ask = Ask::RefNew(between(a.xy(), p.xy())?),
+            (Ask::RefNew(_), Input::Point3(p)) => {
                 let m = self.matrix(p).ok_or_else(|| other("Requires a positive length."))?;
                 return self.edit(s, p, Some(m));
             }
             (Ask::RefNew(r), Input::Text(t)) => {
                 let v = value(&t)?;
-                let m = if rotate { Mat3::rotate_about(self.base, v - r) } else { Mat3::scale_about(self.base, positive(Some(v / r))?) };
+                let m = if rotate { Mat3::rotate_about(self.base.xy(), v - r) } else { Mat3::scale_about(self.base.xy(), positive(Some(v / r))?) };
                 return self.edit(s, self.base, Some(m));
             }
             (_, Input::Enter) => self.ask = Ask::Mode,
@@ -354,12 +365,12 @@ impl Interactive for GripEdit {
         }
         let base = self.base;
         match self.ask {
-            Ask::Base => Prompt::new("Specify base point", Accept::POINT),
-            Ask::RefFirst if self.mode == GripMode::Rotate => Prompt::new("Specify reference angle", Accept::POINT_OR_NUMBER).default("0"),
-            Ask::RefFirst => Prompt::new("Specify reference length", Accept::POINT_OR_NUMBER).default("1"),
-            Ask::RefSecond(a) => Prompt::new("Specify second point", Accept::POINT).base(a),
-            Ask::RefNew(_) if self.mode == GripMode::Rotate => Prompt::new("Specify new angle", Accept::POINT_OR_NUMBER).base(base),
-            Ask::RefNew(_) => Prompt::new("Specify new length", Accept::POINT_OR_NUMBER).base(base),
+            Ask::Base => Prompt::new("Specify base point", Accept::POINT).base3(base).spatial_point(),
+            Ask::RefFirst if self.mode == GripMode::Rotate => Prompt::new("Specify reference angle", Accept::POINT_OR_NUMBER).default("0").spatial_point(),
+            Ask::RefFirst => Prompt::new("Specify reference length", Accept::POINT_OR_NUMBER).default("1").spatial_point(),
+            Ask::RefSecond(a) => Prompt::new("Specify second point", Accept::POINT).base3(a).spatial_point(),
+            Ask::RefNew(_) if self.mode == GripMode::Rotate => Prompt::new("Specify new angle", Accept::POINT_OR_NUMBER).base3(base).spatial_point(),
+            Ask::RefNew(_) => Prompt::new("Specify new length", Accept::POINT_OR_NUMBER).base3(base).spatial_point(),
             Ask::Action(a) => {
                 let (msg, accept) = match a {
                     GripAction::AddVertex => ("Specify new vertex point", Accept::POINT),
@@ -368,7 +379,7 @@ impl Interactive for GripEdit {
                     GripAction::Radius => ("Specify radius", Accept::POINT_OR_NUMBER),
                     GripAction::RemoveVertex | GripAction::ToLine => ("", Accept::POINT),
                 };
-                Prompt::new(format!("{} {msg}", a.title()), accept).kw(&["eXit"]).base(base)
+                Prompt::new(format!("{} {msg}", a.title()), accept).kw(&["eXit"]).base(base.xy())
             }
             Ask::Mode => {
                 let (msg, accept, kw): (&str, Accept, &[&str]) = match self.mode {
@@ -382,7 +393,7 @@ impl Interactive for GripEdit {
                     }
                     GripMode::Mirror => ("** MIRROR ** Specify second point", Accept::POINT, &["Base point", "Copy", "Undo", "eXit"]),
                 };
-                let mut p = Prompt::new(msg, accept).kw(kw).base(base);
+                let mut p = Prompt::new(msg, accept).kw(kw).base3(base).spatial_point();
                 // A single hot grip's multifunctional options (Add vertex, Lengthen…) before eXit.
                 let at = p.keywords.len().saturating_sub(1);
                 for (n, a) in self.actions(s).into_iter().enumerate() {
@@ -422,8 +433,8 @@ impl Interactive for GripEdit {
         match self.ask {
             Ask::Mode => self.mode_input(s, i),
             Ask::Base => match i {
-                Input::Point(p) => {
-                    self.base = p;
+                Input::Point(_) | Input::Point3(_) => {
+                    self.base = i.point3().unwrap_or(self.base);
                     self.ask = Ask::Mode;
                     Ok(Step::Continue)
                 }
@@ -445,18 +456,29 @@ impl Interactive for GripEdit {
         let base = match self.ask {
             Ask::Action(a) => {
                 let mut out: Vec<EntityKind> = self.acted(s, a, Some(c), None).map(|(_, k)| k).into_iter().collect();
-                out.push(line(self.base, c));
+                out.push(line3(self.base, c.to3(self.base.z)));
                 return out;
             }
             Ask::Mode | Ask::RefNew(_) => self.base,
-            Ask::RefSecond(a) => return vec![line(a, c)],
+            Ask::RefSecond(a) => return vec![line3(a, s.preview_point3(c, a))],
             Ask::Base | Ask::RefFirst => return Vec::new(),
         };
         let Ok(d) = s.doc() else { return Vec::new() };
+        let to = s.preview_point3(c, base);
         let mut out: Vec<EntityKind> = if self.mode == GripMode::Stretch {
-            super::gripcmds::stretched(s, &self.hot, &self.targets, c - base).into_iter().take(500).map(|(_, k)| k).collect()
+            let delta = if s.drawing_plane_offset_is_manual() && !s.cursor3_snapped {
+                (to.xy() - base.xy()).to3(0.0)
+            } else {
+                to - base
+            };
+            super::gripcmds::stretched(s, &self.hot, &self.targets, delta).into_iter().take(500).map(|(_, k)| k).collect()
         } else {
-            match self.matrix(c) {
+            let spatial_move = if self.mode == GripMode::Move {
+                s.preview_spatial_end_override(c, base).map(|p| p - base)
+            } else {
+                None
+            };
+            match self.matrix(to).or_else(|| spatial_move.map(|_| Mat3::IDENTITY)) {
                 Some(m) => self
                     .targets
                     .iter()
@@ -464,14 +486,18 @@ impl Interactive for GripEdit {
                     .filter_map(|h| d.entity(*h))
                     .map(|e| {
                         let mut k = e.kind.clone();
-                        k.transform(&m);
+                        if let Some(delta) = spatial_move {
+                            k.translate_3d(delta);
+                        } else {
+                            k.transform(&m);
+                        }
                         k
                     })
                     .collect(),
                 None => Vec::new(),
             }
         };
-        out.push(line(base, c));
+        out.push(line3(base, to));
         out
     }
 }

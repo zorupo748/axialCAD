@@ -26,7 +26,7 @@ pub use cadcraft_color as color;
 pub use cadcraft_geom as geom;
 pub use constraint::*;
 pub use entity::*;
-pub use extents::{MAX_BLOCK_DEPTH, entity_bounds};
+pub use extents::{MAX_BLOCK_DEPTH, entity_bounds, entity_bounds3};
 pub use gdt::*;
 pub use header::{HVal, Header};
 pub use plotstyle::*;
@@ -224,6 +224,26 @@ impl Drawing {
         self.dim_styles.iter().find(|l| l.name.eq_ignore_ascii_case(name))
     }
 
+    /// Resolve the effective multileader style for `CMLEADERSTYLE` (case-insensitive), falling
+    /// back to the first table entry or to the metric/imperial default when the table is empty.
+    pub fn effective_mleader_style(&self) -> (String, MLeaderStyle) {
+        let name = self.header.str("CMLEADERSTYLE", "Standard");
+        let style = self
+            .mleader_styles
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(&name))
+            .or(self.mleader_styles.first())
+            .cloned()
+            .unwrap_or_else(|| {
+                if self.header.i64("MEASUREMENT", 0) == 1 {
+                    MLeaderStyle::metric()
+                } else {
+                    MLeaderStyle::default()
+                }
+            });
+        (name, style)
+    }
+
     /// The DIM* variables in the header that differ from the current dimension style, as
     /// [`DimStyle`] fields: AutoCAD's style overrides (set with SETVAR), which new dimensions
     /// take on.
@@ -377,6 +397,19 @@ impl Drawing {
             for e in store.iter() {
                 if self.is_visible(e) {
                     b = b.union(&entity_bounds(self, e, 0));
+                }
+            }
+        }
+        b
+    }
+
+    /// Bounds of all visible entities in a space in 3D.
+    pub fn extents3(&self, space: &Space) -> Bounds3 {
+        let mut b = Bounds3::EMPTY;
+        if let Some(store) = self.space(space) {
+            for e in store.iter() {
+                if self.is_visible(e) {
+                    b = b.union(&entity_bounds3(self, e));
                 }
             }
         }

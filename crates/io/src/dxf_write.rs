@@ -259,6 +259,7 @@ const HEADER_VARS: &[(&str, i32)] = &[
     ("SNAPMODE", 70),
     ("GRIDMODE", 70),
     ("ORTHOMODE", 70),
+    ("PROJMODE", 70),
     ("FILLMODE", 70),
     ("MIRRTEXT", 70),
     ("LTSCALE", 40),
@@ -275,6 +276,8 @@ const HEADER_VARS: &[(&str, i32)] = &[
     ("CELTSCALE", 40),
     ("DIMSCALE", 40),
     ("DIMSTYLE", 2),
+    ("DIMCLAYER", 2),
+    ("HATCHCLAYER", 2),
     ("LUNITS", 70),
     ("LUPREC", 70),
     ("AUNITS", 70),
@@ -1288,7 +1291,13 @@ fn entity(w: &mut W, d: &Drawing, e: &Entity, owner: &str, paper: bool, cx: &Ctx
 
             for (idx, face) in faces.iter().enumerate() {
                 w.s(0, "3DFACE");
-                common(w, e, owner, paper, "AcDbFace");
+                if idx == 0 {
+                    common(w, e, owner, paper, "AcDbFace");
+                } else {
+                    let sub_h = Handle::parse_hex(&w.h()).unwrap_or(e.handle);
+                    let part = Entity { handle: sub_h, common: e.common.clone(), kind: EntityKind::Point(cadcraft_doc::Point { p: Vec3::ZERO, angle: 0.0 }) };
+                    common(w, &part, owner, paper, "AcDbFace");
+                }
                 w.p(10, face.corners[0]);
                 w.p(11, face.corners[1]);
                 w.p(12, face.corners[2]);
@@ -2249,15 +2258,22 @@ fn tags_for(d: &Drawing, version: Version, target: Version) -> Vec<Tag> {
         w.f(50, s.oblique.to_degrees());
         w.i(71, if s.backwards { 2 } else { 0 } | if s.upside_down { 4 } else { 0 });
         w.f(42, 0.2);
-        // The built-in font goes out as `txt`, which every reader has; CADCraft's own name
-        // travels in `CADCRAFT` xdata (`1000 FONT`, name) so the style reopens with it.
-        let file = if s.font == cadcraft_fonts_name() { "txt" } else { s.font.as_str() };
+        // The built-in font goes out as `txt`, which every reader has; the canonical name
+        // ("CADCraft Stroke") travels in `CADCRAFT` xdata (`1000 FONT`, name) so the style
+        // reopens with it. Built-in aliases like "axialCAD Stroke" are normalized to the canonical name.
+        let canon_font = cadcraft_fonts::canonical_font_name(&s.font);
+        let is_builtin = canon_font.eq_ignore_ascii_case(cadcraft_fonts_name());
+        let file = if is_builtin { "txt" } else { s.font.as_str() };
         w.s(3, file);
         w.s(4, &s.big_font);
         if s.annotative {
             annotative_xdata(&mut w);
         }
-        if file != s.font {
+        if is_builtin {
+            w.s(1001, dxf_ext::APP);
+            w.s(1000, "FONT");
+            w.s(1000, dxf_ext::xdata_str(cadcraft_fonts_name()));
+        } else if file != s.font {
             w.s(1001, dxf_ext::APP);
             w.s(1000, "FONT");
             w.s(1000, dxf_ext::xdata_str(&s.font));
@@ -2695,7 +2711,7 @@ fn tags_for(d: &Drawing, version: Version, target: Version) -> Vec<Tag> {
         w.s(330, layout_dict.clone());
         w.s(100, "AcDbPlotSettings");
         w.s(1, "");
-        let device = page.device.trim();
+        let device = cadcraft_doc::canonical_device_name(page.device.trim());
         w.s(2, if device.is_empty() || device.eq_ignore_ascii_case("None") { "none_device" } else { device });
         w.s(4, page.paper.replace(' ', "_"));
         w.s(6, "");

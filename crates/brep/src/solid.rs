@@ -184,8 +184,14 @@ impl BrepSolid {
             return Err(BrepError::InvalidGeometry(format!("extrusion profile self-intersects: {err_msg}")));
         }
 
+        // Ensure base profile winding points along extrusion direction so `tsweep` produces outward normals.
+        let mut ordered_pts = points.to_vec();
+        if unit_normal.dot(direction) < 0.0 {
+            ordered_pts.reverse();
+        }
+
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let vertices: Vec<_> = points.iter().map(|p| builder::vertex(Point3::new(p.x, p.y, p.z))).collect();
+            let vertices: Vec<_> = ordered_pts.iter().map(|p| builder::vertex(Point3::new(p.x, p.y, p.z))).collect();
 
             let mut edges = Vec::with_capacity(vertices.len());
             for i in 0..vertices.len() {
@@ -298,7 +304,10 @@ impl BrepSolid {
 
     /// Compute volume by fine tessellation divergence theorem.
     pub fn volume(&self) -> Result<f64, BrepError> {
-        let mesh = self.triangulate(0.02)?;
+        let mesh = self
+            .triangulate(0.02)
+            .or_else(|_| self.triangulate(0.1))
+            .or_else(|_| self.triangulate(0.25))?;
         Ok(mesh.signed_volume().abs())
     }
 

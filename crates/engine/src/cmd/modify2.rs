@@ -1932,8 +1932,8 @@ fn ellipse_samples(ge: &Ellipse) -> Vec<f64> {
 }
 
 /// Trim objects that modify.rs does not handle itself (ellipses and splines).
-pub(crate) fn trim_other(k: &EntityKind, cut: &[Segment], pick: Vec2) -> Result<Vec<EntityKind>> {
-    let none = || other("Object does not intersect a cutting edge.");
+pub(crate) fn trim_other(k: &EntityKind, cut: &[Segment], pick: Vec2) -> Result<super::modify::TrimPieces> {
+    let none = || super::modify::no_intersection("Object does not intersect a cutting edge.");
     match k {
         EntityKind::Ellipse(e) => {
             let ge = ellipse_of(e);
@@ -1945,14 +1945,17 @@ pub(crate) fn trim_other(k: &EntityKind, cut: &[Segment], pick: Vec2) -> Result<
                 ps.sort_by(f64::total_cmp);
                 ps.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
                 if ps.len() < 2 {
-                    return Err(other("Ellipse must intersect cutting edges at two or more points."));
+                    return Err(super::modify::no_intersection("Ellipse must intersect cutting edges at two or more points."));
                 }
                 let tp = full.param_of(pick);
                 let n = ps.len();
                 for i in 0..n {
                     let (Some(a0), Some(a1)) = (ps.get(i).copied(), ps.get((i + 1) % n).copied()) else { continue };
                     if cadcraft_geom::angle_in_sweep(tp, a0, a1) {
-                        return Ok(vec![ellipse_kind(&Ellipse { start: a1, end: a0, ..ge })]);
+                        return Ok(super::modify::TrimPieces {
+                            kept: vec![ellipse_kind(&Ellipse { start: a1, end: a0, ..ge })],
+                            removed: vec![ellipse_kind(&Ellipse { start: a0, end: a1, ..ge })],
+                        });
                     }
                 }
                 return Err(none());
@@ -1967,14 +1970,19 @@ pub(crate) fn trim_other(k: &EntityKind, cut: &[Segment], pick: Vec2) -> Result<
             if lo == 0.0 && hi == sweep {
                 return Err(none());
             }
-            let mut v = Vec::new();
+            let mut kept = Vec::new();
             if lo > 0.0 {
-                v.push(ellipse_kind(&Ellipse { end: norm_angle(ge.start + lo), ..ge }));
+                kept.push(ellipse_kind(&Ellipse { end: norm_angle(ge.start + lo), ..ge }));
             }
             if hi < sweep {
-                v.push(ellipse_kind(&Ellipse { start: norm_angle(ge.start + hi), ..ge }));
+                kept.push(ellipse_kind(&Ellipse { start: norm_angle(ge.start + hi), ..ge }));
             }
-            Ok(v)
+            let removed = vec![ellipse_kind(&Ellipse {
+                start: norm_angle(ge.start + lo),
+                end: norm_angle(ge.start + hi),
+                ..ge
+            })];
+            Ok(super::modify::TrimPieces { kept, removed })
         }
         EntityKind::Spline(sp) => {
             if !sp.is_valid() {
@@ -1990,25 +1998,27 @@ pub(crate) fn trim_other(k: &EntityKind, cut: &[Segment], pick: Vec2) -> Result<
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             let tp = curves::spline_param_of(sp, pick);
             if sp.closed {
-                return curve_edits::trim_closed_spline(sp, &ts, tp);
+                let kept = curve_edits::trim_closed_spline(sp, &ts, tp)?;
+                return Ok(super::modify::TrimPieces { kept, removed: Vec::new() });
             }
             let lo = ts.iter().copied().filter(|t| *t < tp).fold(lo_d, f64::max);
             let hi = ts.iter().copied().filter(|t| *t > tp).fold(hi_d, f64::min);
             if lo == lo_d && hi == hi_d {
                 return Err(none());
             }
-            let mut v = Vec::new();
+            let mut kept = Vec::new();
             if lo > lo_d
                 && let Some(a) = curves::sub_spline(sp, lo_d, lo)
             {
-                v.push(EntityKind::Spline(a));
+                kept.push(EntityKind::Spline(a));
             }
             if hi < hi_d
                 && let Some(b) = curves::sub_spline(sp, hi, hi_d)
             {
-                v.push(EntityKind::Spline(b));
+                kept.push(EntityKind::Spline(b));
             }
-            Ok(v)
+            let removed = curves::sub_spline(sp, lo, hi).map(|a| vec![EntityKind::Spline(a)]).unwrap_or_default();
+            Ok(super::modify::TrimPieces { kept, removed })
         }
         _ => Err(other("Cannot trim that object.")),
     }

@@ -693,11 +693,10 @@ pub fn ucs_icon(app: &mut CadApp, ui: &mut egui::Ui, canvas: Rect, secondary_cli
     ucs_menu(app, popup);
 }
 
-/// The coordinate-system menu: UCS 3-point, Move Origin, World, Previous, and icon switch.
+/// The coordinate-system menu: direct flat menu of actions without nested submenus.
 fn ucs_menu(app: &mut CadApp, popup: egui::Popup<'_>) {
     let mut hide = false;
     let in_command = app.session.running.is_some();
-    let is_world = app.session.ucs().is_world();
     let can_restore_prev = app.session.state().map_or(false, |st| !st.ucs_history.is_empty());
 
     popup.show(|ui| {
@@ -710,31 +709,236 @@ fn ucs_menu(app: &mut CadApp, popup: egui::Popup<'_>) {
             ui.separator();
         }
 
-        ui.add_enabled_ui(!in_command, |ui| {
-            if ui.button("Definir por 3 puntos...").on_hover_text("Define un nuevo SCP mediante origen, eje X y plano XY.").clicked() {
-                app.start("ucs.3point");
-                ui.close();
-            }
-            if ui.button("Mover origen...").on_hover_text("Traslada el origen del SCP conservando su orientación.").clicked() {
-                app.start("ucs.origin");
-                ui.close();
-            }
-            ui.separator();
-            if ui.radio(is_world, "Mundo (WCS)").on_hover_text("Restaura el Sistema de Coordenadas Universal.").clicked() {
-                let _ = app.run("ucs.world", json!({}));
-                ui.close();
-            }
-            if ui.add_enabled(can_restore_prev, egui::Button::new("Previo")).on_hover_text("Restaura el SCP anterior.").clicked() {
-                let _ = app.run("ucs.previous", json!({}));
-                ui.close();
-            }
-        });
+        egui::ScrollArea::vertical()
+            .max_height(380.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
 
-        ui.separator();
-        if ui.button("Ocultar icono del SCP").clicked() {
-            hide = true;
-            ui.close();
-        }
+                ui.add_enabled_ui(!in_command, |ui| {
+                    // --- DEFINIR ---
+                    ui.label(egui::RichText::new("DEFINIR").strong().small().color(Tokens::get().text_dim));
+                    if ui.button("Mover origen")
+                        .on_hover_text("Traslada solo el origen del SCP conservando su orientación actual.")
+                        .clicked()
+                    {
+                        app.start("ucs.origin");
+                        ui.close();
+                    }
+                    if ui.button("Definir por 2 puntos")
+                        .on_hover_text("Define el SCP mediante origen y dirección positiva de X.")
+                        .clicked()
+                    {
+                        app.start("ucs.2point");
+                        ui.close();
+                    }
+                    if ui.button("Definir por 3 puntos")
+                        .on_hover_text("Define el SCP mediante origen, dirección positiva de X y punto en el semiplano positivo XY.")
+                        .clicked()
+                    {
+                        app.start("ucs.3point");
+                        ui.close();
+                    }
+                    if ui.button("Definir dirección X")
+                        .on_hover_text("Define el vector del eje X (solicita nuevo origen o pulsa Enter para conservar el actual).")
+                        .clicked()
+                    {
+                        app.start("ucs.xaxis");
+                        ui.close();
+                    }
+                    if ui.button("Definir dirección Y")
+                        .on_hover_text("Define el vector del eje Y (solicita nuevo origen o pulsa Enter para conservar el actual).")
+                        .clicked()
+                    {
+                        app.start("ucs.yaxis");
+                        ui.close();
+                    }
+                    if ui.button("Definir dirección Z")
+                        .on_hover_text("Define el vector del eje Z (solicita nuevo origen o pulsa Enter para conservar el actual).")
+                        .clicked()
+                    {
+                        app.start("ucs.zaxis");
+                        ui.close();
+                    }
+
+                    ui.separator();
+
+                    // --- GIRAR ---
+                    ui.label(egui::RichText::new("GIRAR").strong().small().color(Tokens::get().text_dim));
+                    if ui.button("Girar alrededor de X")
+                        .on_hover_text("Gira el SCP alrededor de su eje X local (solicita ángulo o arrastre interactivo).")
+                        .clicked()
+                    {
+                        app.start("ucs.x");
+                        ui.close();
+                    }
+                    if ui.button("Girar alrededor de Y")
+                        .on_hover_text("Gira el SCP alrededor de su eje Y local (solicita ángulo o arrastre interactivo).")
+                        .clicked()
+                    {
+                        app.start("ucs.y");
+                        ui.close();
+                    }
+                    if ui.button("Girar alrededor de Z")
+                        .on_hover_text("Gira el SCP alrededor de su eje Z local (solicita ángulo o arrastre interactivo).")
+                        .clicked()
+                    {
+                        app.start("ucs.z");
+                        ui.close();
+                    }
+
+                    ui.separator();
+
+                    // --- ALINEAR ---
+                    ui.label(egui::RichText::new("ALINEAR").strong().small().color(Tokens::get().text_dim));
+                    if ui.button("Alinear con objeto")
+                        .on_hover_text("Alinea el SCP con una entidad seleccionada (Línea, Círculo, Arco, Cara 3D).")
+                        .clicked()
+                    {
+                        app.start("ucs.object");
+                        ui.close();
+                    }
+                    if ui.button("Alinear con cara")
+                        .on_hover_text("Alinea el SCP con una cara (permite alternar cara, invertir X e invertir Y).")
+                        .clicked()
+                    {
+                        app.start("ucs.face");
+                        ui.close();
+                    }
+                    if ui.button("Definir Z por objeto")
+                        .on_hover_text("Alinea la dirección del eje Z del SCP según la orientación o normal de un objeto seleccionado.")
+                        .clicked()
+                    {
+                        app.start("ucs.zobject");
+                        ui.close();
+                    }
+                    if ui.button("Alinear SCP con vista")
+                        .on_hover_text("Cambia el plano XY del SCP para ajustarlo a la dirección de la vista actual.")
+                        .clicked()
+                    {
+                        let _ = app.run("ucs.view", json!({}));
+                        ui.close();
+                    }
+
+                    ui.separator();
+
+                    // --- REFERENCIAS ---
+                    ui.label(egui::RichText::new("REFERENCIAS").strong().small().color(Tokens::get().text_dim));
+                    if ui.button("Universal")
+                        .on_hover_text("Restaura el Sistema de Coordenadas Universal base (WCS).")
+                        .clicked()
+                    {
+                        let _ = app.run("ucs.world", json!({}));
+                        ui.close();
+                    }
+                    if ui.add_enabled(can_restore_prev, egui::Button::new("Anterior"))
+                        .on_hover_text("Restaura el SCP anterior guardado en el historial (hasta 10 cambios confirmados).")
+                        .clicked()
+                    {
+                        let _ = app.run("ucs.previous", json!({}));
+                        ui.close();
+                    }
+
+                    ui.separator();
+
+                    // --- ORIENTACIONES PREDEFINIDAS ---
+                    ui.label(egui::RichText::new("ORIENTACIONES PREDEFINIDAS (WCS)").strong().small().color(Tokens::get().text_dim));
+                    if ui.button("Superior")
+                        .on_hover_text("Plano XY horizontal estándar mirando hacia abajo (+Z WCS).")
+                        .clicked()
+                    {
+                        let _ = app.run("ucs.preset", json!({ "preset": "top" }));
+                        ui.close();
+                    }
+                    if ui.button("Inferior")
+                        .on_hover_text("Plano XY horizontal estándar mirando hacia arriba (-Z WCS).")
+                        .clicked()
+                    {
+                        let _ = app.run("ucs.preset", json!({ "preset": "bottom" }));
+                        ui.close();
+                    }
+                    if ui.button("Frontal")
+                        .on_hover_text("Plano XZ vertical mirando hacia el frente (-Y WCS).")
+                        .clicked()
+                    {
+                        let _ = app.run("ucs.preset", json!({ "preset": "front" }));
+                        ui.close();
+                    }
+                    if ui.button("Posterior")
+                        .on_hover_text("Plano XZ vertical mirando hacia atrás (+Y WCS).")
+                        .clicked()
+                    {
+                        let _ = app.run("ucs.preset", json!({ "preset": "back" }));
+                        ui.close();
+                    }
+                    if ui.button("Izquierda")
+                        .on_hover_text("Plano YZ vertical mirando desde la izquierda (-X WCS).")
+                        .clicked()
+                    {
+                        let _ = app.run("ucs.preset", json!({ "preset": "left" }));
+                        ui.close();
+                    }
+                    if ui.button("Derecha")
+                        .on_hover_text("Plano YZ vertical mirando desde la derecha (+X WCS).")
+                        .clicked()
+                    {
+                        let _ = app.run("ucs.preset", json!({ "preset": "right" }));
+                        ui.close();
+                    }
+
+                    ui.separator();
+
+                    // --- GESTIÓN SCP ---
+                    ui.label(egui::RichText::new("GESTIÓN SCP").strong().small().color(Tokens::get().text_dim));
+                    if ui.button("Guardar SCP")
+                        .on_hover_text("Guarda el SCP actual con un nombre.")
+                        .clicked()
+                    {
+                        app.start("ucs.save");
+                        ui.close();
+                    }
+                    if ui.button("Restaurar SCP")
+                        .on_hover_text("Restaura un SCP previamente guardado.")
+                        .clicked()
+                    {
+                        app.start("ucs.restore");
+                        ui.close();
+                    }
+                    if ui.button("Renombrar SCP")
+                        .on_hover_text("Cambia el nombre de un SCP guardado.")
+                        .clicked()
+                    {
+                        app.start("ucs.rename");
+                        ui.close();
+                    }
+                    if ui.button("Eliminar SCP")
+                        .on_hover_text("Elimina un SCP guardado.")
+                        .clicked()
+                    {
+                        app.start("ucs.delete");
+                        ui.close();
+                    }
+                    if ui.button("Gestionar/listar SCP")
+                        .on_hover_text("Muestra el listado de todos los SCP guardados en la línea de comandos.")
+                        .clicked()
+                    {
+                        let _ = app.run("ucs.list", json!({}));
+                        ui.close();
+                    }
+                });
+
+                ui.separator();
+                ui.checkbox(
+                    &mut app.session.settings.ucs_follow_view,
+                    "Acompañar vista al definir SCP",
+                ).on_hover_text("Al mover el ratón, orienta continuamente la vista según el SCP candidato antes de hacer clic (desactivado por defecto).");
+
+                ui.separator();
+                if ui.button("Ocultar icono del SCP").clicked() {
+                    hide = true;
+                    ui.close();
+                }
+            });
     });
     if hide {
         let _ = app.run("ui.toggle.ucsicon", json!({"on": false}));
@@ -1164,12 +1368,12 @@ mod tests {
         // Moving outside icon bounds into menu area does NOT close menu
         assert!(menu_shown(&ctx), "Menu remains open while moving cursor inside/towards menu");
 
-        // 4. Click an enabled option (e.g. "Definir por 3 puntos...")
-        let item_click = initial_rect.min + vec2(40.0, 15.0);
+        // 4. Click an enabled option (e.g. "Mover origen")
+        let item_click = initial_rect.min + vec2(40.0, 30.0);
         click(&mut app, &ctx, item_click, egui::PointerButton::Primary);
 
-        // Verify the action executed: "ucs.3point" is running
-        assert!(app.session.running.as_ref().is_some_and(|r| r.id == "ucs.3point"), "Definir por 3 puntos was selected and started command");
+        // Verify the action executed: "ucs.origin" is running
+        assert!(app.session.running.as_ref().is_some_and(|r| r.id == "ucs.origin"), "Mover origen was selected and started command");
         // Verify menu closed after selection
         assert!(!menu_shown(&ctx), "Menu closed after clicking an option");
     }

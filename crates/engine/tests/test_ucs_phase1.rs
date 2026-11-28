@@ -588,3 +588,382 @@ fn test_rectang_interactive_preview_on_oblique_ucs_matches_committed_geometry() 
     }
 }
 
+
+#[test]
+fn test_ucs_2point_and_origin() {
+    let mut s = Session::new();
+
+    // 1. Move origin only (preserves orientation)
+    s.execute("ucs.origin", &json!({
+        "origin": [15.0, 25.0, 35.0]
+    })).unwrap();
+    let u = s.ucs();
+    assert!(u.origin.near(Vec3::new(15.0, 25.0, 35.0), 1e-6));
+    assert!(u.x_axis.near(Vec3::X, 1e-6));
+    assert!(u.y_axis.near(Vec3::Y, 1e-6));
+    assert!(u.z_axis.near(Vec3::Z, 1e-6));
+
+    // 2. Define by 2 points: origin (10, 0, 0) and X point (10, 10, 0)
+    // So X points in +Y direction of WCS
+    s.execute("ucs.2point", &json!({
+        "origin": [10.0, 0.0, 0.0],
+        "x_axis": [10.0, 10.0, 0.0]
+    })).unwrap();
+    let u2 = s.ucs();
+    assert!(u2.origin.near(Vec3::new(10.0, 0.0, 0.0), 1e-6));
+    assert!(u2.x_axis.near(Vec3::Y, 1e-6));
+    // Orthonormal and right-handed
+    assert!((u2.x_axis.dot(u2.y_axis)).abs() < 1e-6);
+    assert!((u2.x_axis.cross(u2.y_axis).dot(u2.z_axis) - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_ucs_individual_axes() {
+    let mut s = Session::new();
+
+    // 1. X axis pointing along (0, 1, 0)
+    s.execute("ucs.xaxis", &json!({
+        "origin": [5.0, 5.0, 5.0],
+        "axis_pt": [5.0, 15.0, 5.0]
+    })).unwrap();
+    let ux = s.ucs();
+    assert!(ux.origin.near(Vec3::new(5.0, 5.0, 5.0), 1e-6));
+    assert!(ux.x_axis.near(Vec3::Y, 1e-6));
+    assert!((ux.x_axis.cross(ux.y_axis).dot(ux.z_axis) - 1.0).abs() < 1e-6);
+
+    // 2. Y axis pointing along (0, 0, 1)
+    s.execute("ucs.yaxis", &json!({
+        "axis_pt": [5.0, 5.0, 15.0]
+    })).unwrap();
+    let uy = s.ucs();
+    assert!(uy.y_axis.near(Vec3::Z, 1e-6));
+    assert!((uy.x_axis.cross(uy.y_axis).dot(uy.z_axis) - 1.0).abs() < 1e-6);
+
+    // 3. Z axis pointing along (1, 0, 0)
+    s.execute("ucs.zaxis", &json!({
+        "axis_pt": [15.0, 5.0, 5.0]
+    })).unwrap();
+    let uz = s.ucs();
+    assert!(uz.z_axis.near(Vec3::X, 1e-6));
+    assert!((uz.x_axis.cross(uz.y_axis).dot(uz.z_axis) - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_ucs_local_rotations_and_signs() {
+    let mut s = Session::new();
+
+    // Rotate around local X by 90 degrees (+90: Y -> Z, Z -> -Y)
+    s.execute("ucs.x", &json!({ "angle": 90.0 })).unwrap();
+    let rx = s.ucs();
+    assert!(rx.x_axis.near(Vec3::X, 1e-6));
+    assert!(rx.y_axis.near(Vec3::Z, 1e-6), "Y becomes Z: {:?}", rx.y_axis);
+    assert!(rx.z_axis.near(-Vec3::Y, 1e-6), "Z becomes -Y: {:?}", rx.z_axis);
+    assert!((rx.x_axis.cross(rx.y_axis).dot(rx.z_axis) - 1.0).abs() < 1e-6);
+
+    // Rotate around local Y by 90 degrees (+90: Z -> X, X -> -Z)
+    s.execute("ucs.world", &json!({})).unwrap();
+    s.execute("ucs.y", &json!({ "angle": 90.0 })).unwrap();
+    let ry = s.ucs();
+    assert!(ry.y_axis.near(Vec3::Y, 1e-6));
+    assert!(ry.z_axis.near(Vec3::X, 1e-6), "Z becomes X: {:?}", ry.z_axis);
+    assert!(ry.x_axis.near(-Vec3::Z, 1e-6), "X becomes -Z: {:?}", ry.x_axis);
+    assert!((ry.x_axis.cross(ry.y_axis).dot(ry.z_axis) - 1.0).abs() < 1e-6);
+
+    // Rotate around local Z by 90 degrees (+90: X -> Y, Y -> -X)
+    s.execute("ucs.world", &json!({})).unwrap();
+    s.execute("ucs.z", &json!({ "angle": 90.0 })).unwrap();
+    let rz = s.ucs();
+    assert!(rz.z_axis.near(Vec3::Z, 1e-6));
+    assert!(rz.x_axis.near(Vec3::Y, 1e-6), "X becomes Y: {:?}", rz.x_axis);
+    assert!(rz.y_axis.near(-Vec3::X, 1e-6), "Y becomes -X: {:?}", rz.y_axis);
+    assert!((rz.x_axis.cross(rz.y_axis).dot(rz.z_axis) - 1.0).abs() < 1e-6);
+
+    // Negative rotation: -90 around Z
+    s.execute("ucs.z", &json!({ "angle": -90.0 })).unwrap();
+    assert!(s.ucs().is_world());
+}
+
+#[test]
+fn test_ucs_presets_wcs() {
+    let mut s = Session::new();
+    // Even if initial UCS is weird:
+    s.execute("ucs.origin", &json!({ "origin": [100.0, 200.0, 300.0] })).unwrap();
+
+    // Presets must be defined strictly relative to WCS:
+    // Front: normal is -Y in WCS, X is +X, Y is +Z
+    s.execute("ucs.preset", &json!({ "name": "front" })).unwrap();
+    let uf = s.ucs();
+    assert!(uf.origin.near(Vec3::ZERO, 1e-6));
+    assert!(uf.x_axis.near(Vec3::X, 1e-6));
+    assert!(uf.y_axis.near(Vec3::Z, 1e-6));
+    assert!(uf.z_axis.near(-Vec3::Y, 1e-6));
+
+    // Top is World
+    s.execute("ucs.preset", &json!({ "name": "top" })).unwrap();
+    assert!(s.ucs().is_world());
+
+    // Right: normal is +X in WCS
+    s.execute("ucs.preset", &json!({ "name": "right" })).unwrap();
+    let ur = s.ucs();
+    assert!(ur.z_axis.near(Vec3::X, 1e-6));
+    assert!((ur.x_axis.cross(ur.y_axis).dot(ur.z_axis) - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn test_ucs_named_management_and_persistence() {
+    let mut s = Session::new();
+
+    // Define an inclined UCS and save it as "INCLINED_1"
+    s.execute("ucs.3point", &json!({
+        "origin": [1.0, 2.0, 3.0],
+        "x_axis": [11.0, 2.0, 3.0],
+        "y_pt": [1.0, 12.0, 13.0]
+    })).unwrap();
+    let orig_ucs = s.ucs();
+
+    s.execute("ucs.save", &json!({ "name": "INCLINED_1" })).unwrap();
+
+    // Verify in list
+    let list_res = s.execute("ucs.list", &json!({})).unwrap();
+    let list = list_res["names"].as_array().unwrap();
+    assert!(list.iter().any(|v| v.as_str() == Some("INCLINED_1")));
+
+    // Return to World
+    s.execute("ucs.world", &json!({})).unwrap();
+    assert!(s.ucs().is_world());
+
+    // Rename
+    s.execute("ucs.rename", &json!({
+        "old_name": "INCLINED_1",
+        "new_name": "MY_NAMED_UCS"
+    })).unwrap();
+
+    // Restore by new name
+    s.execute("ucs.restore", &json!({ "name": "MY_NAMED_UCS" })).unwrap();
+    assert!(s.ucs().origin.near(orig_ucs.origin, 1e-6));
+    assert!(s.ucs().x_axis.near(orig_ucs.x_axis, 1e-6));
+    assert!(s.ucs().z_axis.near(orig_ucs.z_axis, 1e-6));
+
+    // Delete
+    s.execute("ucs.delete", &json!({ "name": "MY_NAMED_UCS" })).unwrap();
+    let list2 = s.execute("ucs.list", &json!({})).unwrap();
+    assert!(!list2["names"].as_array().unwrap().iter().any(|v| v.as_str() == Some("MY_NAMED_UCS")));
+}
+
+#[test]
+fn test_ucs_history_previous_depth_of_10() {
+    let mut s = Session::new();
+    // Create 12 distinct UCS changes
+    for i in 1..=12 {
+        s.execute("ucs.origin", &json!({
+            "origin": [i as f64 * 10.0, 0.0, 0.0]
+        })).unwrap();
+    }
+
+    // Currently at 120, 0, 0
+    assert!(s.ucs().origin.near(Vec3::new(120.0, 0.0, 0.0), 1e-6));
+
+    // Previous steps should be able to step back at least 10 times
+    for step in 1..=10 {
+        let res = s.execute("ucs.previous", &json!({}));
+        assert!(res.is_ok(), "previous step {} must succeed", step);
+        let expected_x = (12 - step) as f64 * 10.0;
+        assert!((s.ucs().origin.x - expected_x).abs() < 1e-6, "step {} expected origin {}", step, expected_x);
+    }
+}
+
+#[test]
+fn test_ucs_degeneration_handling() {
+    let mut s = Session::new();
+    let initial = s.ucs();
+
+    // 1. Coincident points for 2point (zero vector)
+    let res2 = s.execute("ucs.2point", &json!({
+        "origin": [5.0, 5.0, 5.0],
+        "x_pt": [5.0, 5.0, 5.0]
+    }));
+    assert!(res2.is_err(), "zero length x_pt should return error");
+    assert!(s.ucs().origin.near(initial.origin, 1e-6));
+
+    // 2. Collinear points for 3point
+    let res3 = s.execute("ucs.3point", &json!({
+        "origin": [0.0, 0.0, 0.0],
+        "x_axis": [10.0, 0.0, 0.0],
+        "y_pt": [20.0, 0.0, 0.0]
+    }));
+    assert!(res3.is_err(), "collinear y_pt should return error");
+    assert!(s.ucs().origin.near(initial.origin, 1e-6));
+
+    // 3. Degenerate axis vector
+    let res_ax = s.execute("ucs.zaxis", &json!({
+        "origin": [0.0, 0.0, 0.0],
+        "axis_pt": [0.0, 0.0, 0.0]
+    }));
+    assert!(res_ax.is_err(), "zero length zaxis should return error");
+    assert!(s.ucs().origin.near(initial.origin, 1e-6));
+}
+
+#[test]
+fn test_ucs_interactive_preview_camera_and_cancellation() {
+    let mut s = Session::new();
+    let initial_cam = s.camera();
+    let initial_ucs = s.ucs();
+
+    // Start interactive 3point UCS command
+    s.start("ucs.3point").unwrap();
+
+    // Step 1: Input origin (0, 0, 10)
+    s.input(cadcraft_engine::Input::Point(cadcraft_geom::Vec2::new(0.0, 0.0))).unwrap();
+
+    // While picking X axis, get preview with cursor at local (10, 0)
+    let p_ucs = s.preview_ucs();
+    assert!(p_ucs.is_some(), "should have candidate preview UCS");
+
+    // By default, ucs_follow_view is false: camera stays fixed!
+    assert!(s.preview_camera().is_none(), "camera must stay fixed by default during preview");
+
+    // When opt-in ucs_follow_view is enabled:
+    s.settings.ucs_follow_view = true;
+    let p_cam = s.preview_camera();
+    assert!(p_cam.is_some(), "should have candidate preview camera when follow_view enabled");
+
+    // Cancel via Escape
+    s.input(cadcraft_engine::Input::Cancel).unwrap();
+
+    // Active UCS and camera must be restored exactly to initial
+    let u = s.ucs();
+    assert!(u.origin.near(initial_ucs.origin, 1e-6));
+    assert!(u.x_axis.near(initial_ucs.x_axis, 1e-6));
+    assert!(u.y_axis.near(initial_ucs.y_axis, 1e-6));
+    assert!(u.z_axis.near(initial_ucs.z_axis, 1e-6));
+    let c = s.camera();
+    assert!(c.target.near(initial_cam.target, 1e-6));
+    assert!((c.azimuth - initial_cam.azimuth).abs() < 1e-6);
+    assert!((c.elevation - initial_cam.elevation).abs() < 1e-6);
+    assert!((c.height - initial_cam.height).abs() < 1e-6);
+    assert!(s.preview_ucs().is_none());
+    assert!(s.preview_camera().is_none());
+}
+
+#[test]
+fn test_ucs_3point_stage_by_stage_fixed_camera_and_no_scene_rotation() {
+    let mut s = Session::new();
+    let initial_cam = s.camera();
+
+    // Add a 3D line to drawing to prove geometry is NOT transformed
+    s.execute("line", &json!({ "points": [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]] })).unwrap();
+    let doc_before = s.doc().unwrap();
+    let ent_before = doc_before.model.iter().next().unwrap().clone();
+
+    // Start 3-point UCS
+    s.start("ucs.3point").unwrap();
+
+    // STAGE 0: Before first click (picking origin)
+    // Cursor at (5, 5, 5)
+    s.cursor3 = Vec3::new(5.0, 5.0, 5.0);
+    let cand0 = s.preview_ucs().expect("stage 0 candidate ucs");
+    assert!(cand0.origin.near(Vec3::new(5.0, 5.0, 5.0), 1e-6), "candidate origin follows cursor");
+    assert!(s.preview_camera().is_none(), "camera MUST stay fixed, no follow-view by default");
+    assert_eq!(s.camera(), initial_cam, "session camera unchanged");
+
+    // Move cursor to (10, 10, 10)
+    s.cursor3 = Vec3::new(10.0, 10.0, 10.0);
+    let cand0_moved = s.preview_ucs().expect("stage 0 candidate ucs moved");
+    assert!(cand0_moved.origin.near(Vec3::new(10.0, 10.0, 10.0), 1e-6), "candidate origin tracks cursor");
+
+    // First click: Fix origin at (10, 10, 10)
+    s.input(cadcraft_engine::Input::Point3(Vec3::new(10.0, 10.0, 10.0))).unwrap();
+    assert!(s.running.is_some(), "still in ucs.3point");
+
+    // STAGE 1: Picking X-axis
+    // When cursor moves, origin MUST stay fixed at (10, 10, 10)!
+    s.cursor3 = Vec3::new(20.0, 10.0, 10.0);
+    let cand1 = s.preview_ucs().expect("stage 1 candidate ucs");
+    assert!(cand1.origin.near(Vec3::new(10.0, 10.0, 10.0), 1e-6), "origin remains firmly fixed at picked origin");
+    assert!(cand1.x_axis.near(Vec3::new(1.0, 0.0, 0.0), 1e-6), "candidate X axis points to cursor");
+    assert!(s.preview_camera().is_none(), "camera stays completely fixed during X picking");
+    assert_eq!(s.camera(), initial_cam);
+
+    // Move cursor elsewhere in 3D: (10, 20, 10)
+    s.cursor3 = Vec3::new(10.0, 20.0, 10.0);
+    let cand1_rotated = s.preview_ucs().expect("stage 1 rotated candidate ucs");
+    assert!(cand1_rotated.origin.near(Vec3::new(10.0, 10.0, 10.0), 1e-6), "origin stays firmly fixed at (10,10,10)");
+    assert!(cand1_rotated.x_axis.near(Vec3::new(0.0, 1.0, 0.0), 1e-6), "candidate X axis reorients to (0, 1, 0)");
+
+    // Second click: Fix X axis along +Y of world: point (10, 30, 10)
+    s.input(cadcraft_engine::Input::Point3(Vec3::new(10.0, 30.0, 10.0))).unwrap();
+    assert!(s.running.is_some(), "still in ucs.3point");
+
+    // STAGE 2: Picking point on positive Y plane
+    // Cursor at (0, 30, 10) -> defines negative X world as positive Y of UCS
+    s.cursor3 = Vec3::new(0.0, 30.0, 10.0);
+    let cand2 = s.preview_ucs().expect("stage 2 candidate ucs");
+    assert!(cand2.origin.near(Vec3::new(10.0, 10.0, 10.0), 1e-6), "origin stays firmly fixed");
+    assert!(cand2.x_axis.near(Vec3::new(0.0, 1.0, 0.0), 1e-6), "X axis stays firmly fixed");
+    assert!(cand2.y_axis.near(Vec3::new(-1.0, 0.0, 0.0), 1e-6), "Y axis dynamically tracks plane");
+    assert!(s.preview_camera().is_none(), "camera stays completely fixed during Y plane picking");
+
+    // Third click: confirm at (0, 30, 10)
+    s.input(cadcraft_engine::Input::Point3(Vec3::new(0.0, 30.0, 10.0))).unwrap();
+    assert!(s.running.is_none(), "command finished");
+
+    // Confirmed UCS matches EXACTLY what was previewed!
+    let confirmed = s.ucs();
+    assert!(confirmed.origin.near(cand2.origin, 1e-6), "origin matches preview");
+    assert!(confirmed.x_axis.near(cand2.x_axis, 1e-6), "x axis matches preview");
+    assert!(confirmed.y_axis.near(cand2.y_axis, 1e-6), "y axis matches preview");
+    assert!(confirmed.z_axis.near(cand2.z_axis, 1e-6), "z axis matches preview");
+
+    // Camera did not rotate: scene never spun!
+    assert_eq!(s.camera(), initial_cam, "camera remained completely stationary throughout");
+
+    // Entities are completely intact: coordinates NEVER altered!
+    let doc_after = s.doc().unwrap();
+    let ent_after = doc_after.model.iter().next().unwrap().clone();
+    assert_eq!(ent_before, ent_after, "geometry was never touched or transformed");
+}
+
+#[test]
+fn test_ucs_zobject_and_interactive_named_machines() {
+    let mut s = Session::new();
+
+    // 1. Create a 3D circle with normal inclined (e.g. extrusion along (0, 0, 1))
+    s.execute("circle", &json!({ "center": [15.0, 25.0, 0.0], "radius": 5.0 })).unwrap();
+
+    // Test ucs.zobject aligning Z to circle extrusion
+    s.start("ucs.zobject").unwrap();
+    s.input(cadcraft_engine::Input::Point3(Vec3::new(15.0, 25.0, 0.0))).unwrap();
+    assert!(s.running.is_none());
+    assert!(s.ucs().z_axis.near(Vec3::Z, 1e-6));
+
+    // 2. Test interactive ucs.save
+    s.start("ucs.save").unwrap();
+    s.input(cadcraft_engine::Input::Text("MY_CUSTOM_UCS".into())).unwrap();
+    assert!(s.running.is_none());
+    let list = s.named_ucss().unwrap();
+    assert!(list.iter().any(|u| u.name == "MY_CUSTOM_UCS"));
+
+    // 3. Test interactive ucs.rename
+    s.start("ucs.rename").unwrap();
+    s.input(cadcraft_engine::Input::Text("MY_CUSTOM_UCS".into())).unwrap();
+    s.input(cadcraft_engine::Input::Text("RENAMED_UCS".into())).unwrap();
+    assert!(s.running.is_none());
+    let list = s.named_ucss().unwrap();
+    assert!(list.iter().any(|u| u.name == "RENAMED_UCS"));
+    assert!(!list.iter().any(|u| u.name == "MY_CUSTOM_UCS"));
+
+    // 4. Test interactive ucs.restore
+    s.execute("ucs.world", &json!({})).unwrap();
+    assert!(s.ucs().is_world());
+    s.start("ucs.restore").unwrap();
+    s.input(cadcraft_engine::Input::Text("RENAMED_UCS".into())).unwrap();
+    assert!(s.running.is_none());
+    assert_eq!(s.ucs().z_axis, Vec3::Z);
+
+    // 5. Test interactive ucs.delete
+    s.start("ucs.delete").unwrap();
+    s.input(cadcraft_engine::Input::Text("RENAMED_UCS".into())).unwrap();
+    assert!(s.running.is_none());
+    let list = s.named_ucss().unwrap();
+    assert!(list.is_empty());
+}

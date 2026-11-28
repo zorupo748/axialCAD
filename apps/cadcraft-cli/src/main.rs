@@ -56,14 +56,16 @@ fn stdout_failed(e: std::io::Error) {
 }
 
 const USAGE: &str = "usage:
-  cadcraft-cli info FILE.dxf
-  cadcraft-cli convert IN.dxf OUT.(dxf|dwg|svg|png|pdf) [FRAMING]
-  cadcraft-cli run [FILE | --sample | --metric] [--script TEXT] [--script-file F.scr] [--cmd 'id {json}']... [--save OUT.dxf] [--export OUT.(png|svg|pdf)] [FRAMING]
-  cadcraft-cli commands [FILTER]
-  cadcraft-cli mcp [--connect HOST:PORT [--lazy] [--launch]]
-  cadcraft-cli perf [N | FILE]
-  cadcraft-cli sample (bracket|floorplan) OUT.(dxf|dwg|svg|png)
-  cadcraft-cli --version
+  axialcad-cli info FILE.dxf
+  axialcad-cli convert IN.dxf OUT.(dxf|dwg|svg|png|pdf) [FRAMING]
+  axialcad-cli run [FILE | --sample | --metric] [--script TEXT] [--script-file F.scr] [--cmd 'id {json}']... [--save OUT.dxf] [--export OUT.(png|svg|pdf)] [FRAMING]
+  axialcad-cli commands [FILTER]
+  axialcad-cli mcp [--read-only] [--connect HOST:PORT [--lazy] [--launch]]
+  axialcad-cli mcp-gateway [--port PORT] --connect HOST:PORT [--token-env VAR | --token-file PATH]
+  axialcad-cli perf [N | FILE]
+  axialcad-cli sample (bracket|floorplan) OUT.(dxf|dwg|svg|png)
+  axialcad-cli --version
+  legacy alias: cadcraft-cli remains available for compatibility.
 
 image framing (png 2400x1600, svg, pdf; always model space):
   default                  convert: fit the drawing extents.
@@ -486,7 +488,8 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
     if s.docs.is_empty() {
-        s.new_drawing(false);
+        let metric = s.settings.measureinit;
+        s.new_drawing(metric);
     }
     check_framed_output(framing, exp.as_deref())?;
     let before = model_views(&s);
@@ -733,9 +736,10 @@ enum McpTarget {
 
 /// Parses the arguments after `mcp`. `--connect` must be followed by a `HOST:PORT`; a missing,
 /// empty or flag-like value is an error, never a silent fall back to a headless session (#103).
-fn parse_mcp_args(args: &[String]) -> Result<McpTarget, String> {
+/// `--read-only` disables all mutating tools and parameter paths.
+fn parse_mcp_args(args: &[String]) -> Result<(McpTarget, bool), String> {
     let mut addr: Option<String> = None;
-    let (mut lazy, mut launch) = (false, false);
+    let (mut lazy, mut launch, mut read_only) = (false, false, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -752,19 +756,22 @@ fn parse_mcp_args(args: &[String]) -> Result<McpTarget, String> {
             }
             "--lazy" => lazy = true,
             "--launch" => launch = true,
+            "--read-only" | "--readonly" => read_only = true,
             other => return Err(format!("mcp: unknown argument {other}\n{USAGE}")),
         }
     }
-    match addr {
+    let target = match addr {
         // `--launch` connects at the first call too (the app opens then).
-        Some(addr) => Ok(McpTarget::Connect { addr, lazy: lazy || launch, launch }),
-        None if lazy || launch => Err("--lazy and --launch need --connect HOST:PORT".into()),
-        None => Ok(McpTarget::Headless),
-    }
+        Some(addr) => McpTarget::Connect { addr, lazy: lazy || launch, launch },
+        None if lazy || launch => return Err("--lazy and --launch need --connect HOST:PORT".into()),
+        None => McpTarget::Headless,
+    };
+    Ok((target, read_only))
 }
 
 fn mcp(args: &[String]) -> Result<(), String> {
-    let backend: Box<dyn cadcraft_mcp::Backend> = match parse_mcp_args(args)? {
+    let (target, read_only) = parse_mcp_args(args)?;
+    let backend: Box<dyn cadcraft_mcp::Backend> = match target {
         McpTarget::Connect { addr, lazy: true, launch } => Box::new(cadcraft_mcp::Remote::lazy(&addr, launch)),
         McpTarget::Connect { addr, .. } => match cadcraft_mcp::Remote::connect(&addr) {
             Ok(r) => Box::new(r),
@@ -774,7 +781,82 @@ fn mcp(args: &[String]) -> Result<(), String> {
     };
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    cadcraft_mcp::Server::new(backend).serve(stdin.lock(), stdout.lock()).map_err(|e| e.to_string())
+    cadcraft_mcp::Server::new(backend)
+        .read_only(read_only)
+        .serve(stdin.lock(), stdout.lock())
+        .map_err(|e| e.to_string())
+}
+
+fn mcp_gateway(args: &[String]) -> Result<(), String> {
+    let mut port = None;
+    let mut connect = None;
+    let raw_env_token = std::env::var("CADCRAFT_GATEWAY_TOKEN")
+        .or_else(|_| std::env::var("MCP_GATEWAY_TOKEN"))
+        .ok();
+    let mut token = match raw_env_token {
+        Some(raw) => Some(
+            cadcraft_mcp::gateway::validate_token(&raw)
+                .map_err(|e| format!("invalid default token env var: {e}"))?,
+        ),
+        None => None,
+    };
+    let mut allowed_origins = Vec::new();
+
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--port" | "-p" => {
+                let p = it.next().ok_or("--port needs a port number")?;
+                port = Some(p.parse::<u16>().map_err(|e| format!("invalid port `{p}`: {e}"))?);
+            }
+            "--connect" | "-c" => {
+                let c = it.next().ok_or("--connect needs HOST:PORT")?;
+                connect = Some(c.clone());
+            }
+            "--token-env" => {
+                let var_name = it.next().ok_or("--token-env needs an environment variable name")?;
+                let val = std::env::var(var_name).map_err(|e| format!("cannot read token from env var `{var_name}`: {e}"))?;
+                let validated = cadcraft_mcp::gateway::validate_token(&val)
+                    .map_err(|e| format!("invalid token in env var `{var_name}`: {e}"))?;
+                token = Some(validated);
+            }
+            "--token-file" => {
+                let path_str = it.next().ok_or("--token-file needs a file path")?;
+                let validated = cadcraft_mcp::gateway::read_token_file(std::path::Path::new(path_str))
+                    .map_err(|e| format!("invalid token file `{path_str}`: {e}"))?;
+                token = Some(validated);
+            }
+            "--token" | "-t" => {
+                return Err("passing secrets via `--token` in process arguments is forbidden (visible in process list /proc/cmdline). Use `--token-env <VAR>`, `--token-file <PATH>` or CADCRAFT_GATEWAY_TOKEN instead.".into());
+            }
+            "--allowed-origin" => {
+                let o = it.next().ok_or("--allowed-origin needs an origin string")?;
+                allowed_origins.push(o.clone());
+            }
+            other => return Err(format!("unknown option `{other}` for mcp-gateway")),
+        }
+    }
+
+    let gateway_port = port.unwrap_or(0);
+    let target_app_addr = connect.ok_or("mcp-gateway requires --connect HOST:PORT to connect to axialCAD")?;
+    let auth_token = token.ok_or("mcp-gateway requires authentication token: use `--token-env <VAR>`, `--token-file <PATH>`, or set CADCRAFT_GATEWAY_TOKEN")?;
+    let cli_binary_path = std::env::current_exe().map_err(|e| format!("cannot determine current exe path: {e}"))?;
+
+    let config = cadcraft_mcp::gateway::GatewayConfig {
+        gateway_port,
+        target_app_addr,
+        auth_token,
+        cli_binary_path,
+        allowed_origins,
+    };
+
+    let gateway = cadcraft_mcp::gateway::Gateway::start(config)?;
+    let actual_port = gateway.port();
+    eprintln!("cadcraft-cli mcp-gateway: listening on 127.0.0.1:{actual_port}");
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 }
 
 #[cfg(test)]
@@ -845,12 +927,13 @@ fn cli() -> ExitCode {
             outln!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
         }),
         Some("mcp") => mcp(&rest),
+        Some("mcp-gateway") => mcp_gateway(&rest),
         Some("--version" | "-V") => {
             let sha = option_env!("CADCRAFT_BUILD_SHA");
             if let Some(s) = sha {
-                outln!("cadcraft-cli {} ({s})", env!("CARGO_PKG_VERSION"));
+                outln!("axialCAD CLI {} ({s})", env!("CARGO_PKG_VERSION"));
             } else {
-                outln!("cadcraft-cli {}", env!("CARGO_PKG_VERSION"));
+                outln!("axialCAD CLI {}", env!("CARGO_PKG_VERSION"));
             }
             Ok(())
         }

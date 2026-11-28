@@ -1332,3 +1332,41 @@
 	Diagonal 45° - separación 4	Diagonal 45° - separación 4
 	Diagonal 45° Hatch	Sombreado diagonal 45°
 	axialCAD is an independent modified version based on CADCraft, originally developed by the ArtCraft team and contributors. Not affiliated with or endorsed by ArtCraft.	axialCAD es una versión modificada e independiente basada en CADCraft, desarrollado originalmente por el equipo ArtCraft y sus colaboradores. No está afiliada ni respaldada por ArtCraft.
+	Leader Properties	Propiedades de directriz
+	Leader Properties (Arrow Size)	Propiedades de directriz (Tamaño de flecha)
+	Arrow size must be a positive finite number.	El tamaño de flecha debe ser un número finito positivo.
+	Leader Properties: clear selection to adjust new leaders, or select a leader to edit its arrow size.	Propiedades de directriz: deselecciona los objetos para ajustar las directrices nuevas o selecciona una directriz para editar su tamaño de flecha.
+	Arrow size for new leaders (DIRECTRIZZR / MLEADER) in {units}. Existing drawn leaders are not changed.	Tamaño de flecha para directrices nuevas (DIRECTRIZZR / MLEADER) en {units}. Las directrices ya dibujadas no cambian.
+	Arrow size for the selected leader(s) only, in {units}. Does not affect other leaders or the style.	Tamaño de flecha solo para la(s) directriz(ces) seleccionada(s), en {units}. No afecta a otras directrices ni al estilo.
+	New leaders only	Solo directrices nuevas
+	Selected leader only	Solo directriz seleccionada
+	Selected leaders only	Solo directrices seleccionadas
+	Drawing units: {units}	Unidades del dibujo: {units}
+	u	u.
+	units	unidades
+	Unitless	Sin unidades
+	Inches	Pulgadas
+	Feet	Pies
+	Miles	Millas
+	Millimeters	Milímetros
+	Centimeters	Centímetros
+	Meters	Metros
+	Kilometers	Kilómetros
+	Microinches	Micropulgadas
+	Mils	Milésimas de pulgada
+	Yards	Yardas
+	Angstroms	Ángstroms
+	Nanometers	Nanómetros
+	Microns	Micras
+	Decimeters	Decímetros
+	Decameters	Decámetros
+	Hectometers	Hectómetros
+	Gigameters	Gigámetros
+	Astronomical Units	Unidades astronómicas
+	Light Years	Años luz
+	Parsecs	Pársecs
+	US Survey Feet	Pies topográficos de EE. UU.
+	US Survey Inch	Pulgadas topográficas de EE. UU.
+	US Survey Yard	Yardas topográficas de EE. UU.
+	US Survey Mile	Millas topográficas de EE. UU.
+	Unknown	Desconocidas

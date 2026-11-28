@@ -999,3 +999,26 @@ fn wide_polyline_centre_line_is_drawn_on_screen_only() {
         assert_eq!(lines(&see_through), 0, "{lt}: a transparent band gets no hairline");
     }
 }
+
+#[test]
+fn skip_spatial_skips_3d_polyline3d_but_keeps_ground_polyline3d() {
+    let mut d = Drawing::new_imperial();
+    let spatial = cadcraft_doc::Polyline3d {
+        points: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(5.0, 0.0, 10.0), Vec3::new(5.0, 5.0, 4.0)],
+        closed: true,
+    };
+    let flat = cadcraft_doc::Polyline3d {
+        points: vec![Vec3::new(10.0, 0.0, 0.0), Vec3::new(15.0, 0.0, 0.0), Vec3::new(15.0, 5.0, 0.0)],
+        closed: true,
+    };
+    let h_spatial = d.add(&Space::Model, Common::default(), EntityKind::Polyline3d(spatial)).unwrap();
+    let h_flat = d.add(&Space::Model, Common::default(), EntityKind::Polyline3d(flat)).unwrap();
+
+    let with_skip = build(&d, &Space::Model, &Options { skip_spatial: true, ..Options::default() });
+    assert!(!with_skip.prims.iter().any(|p| p.handle == h_spatial), "Spatial Polyline3d must not be flattened into 2D DisplayList");
+    assert!(with_skip.prims.iter().any(|p| p.handle == h_flat), "Z=0 Polyline3d remains in 2D DisplayList");
+
+    let without_skip = build(&d, &Space::Model, &Options { skip_spatial: false, ..Options::default() });
+    assert!(without_skip.prims.iter().any(|p| p.handle == h_spatial));
+    assert!(without_skip.prims.iter().any(|p| p.handle == h_flat));
+}

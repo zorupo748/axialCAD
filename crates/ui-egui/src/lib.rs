@@ -781,7 +781,7 @@ impl CadApp {
     pub fn open_size_error(name: &str, len: u64) -> Option<String> {
         (len > Self::MAX_OPEN_BYTES).then(|| {
             format!(
-                "Open: {name} is {:.1} MB, larger than the {} MB CADCraft opens in the browser",
+                "Open: {name} is {:.1} MB, larger than the {} MB axialCAD opens in the browser",
                 len as f64 / 1048576.0,
                 Self::MAX_OPEN_BYTES >> 20
             )
@@ -904,7 +904,11 @@ impl CadApp {
                     lines_executed += 1;
                     let file_name = self.session.script_runner.as_ref().map(|r| r.name.clone()).unwrap_or_else(|| "<script>".into());
                     match self.session.step_script() {
-                        cadcraft_engine::ScriptStep::Progress { .. } => {}
+                        cadcraft_engine::ScriptStep::Progress { .. } => {
+                            if self.session.lisp_running() {
+                                break;
+                            }
+                        }
                         cadcraft_engine::ScriptStep::Done { total } => {
                             let msg = format!("Script '{file_name}' completed successfully ({total} lines).");
                             self.session.echo(msg.clone());
@@ -987,6 +991,7 @@ impl CadApp {
         self.gpu_fault_tick(ctx);
         managers::plot_window_resume(self, ctx);
         hatchdlg::resume(self);
+        exchange::resume_save_picker(self);
         self.autosave_tick(ctx);
         menus::shortcuts(self, ctx);
         #[cfg(not(target_arch = "wasm32"))]

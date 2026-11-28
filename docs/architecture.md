@@ -1,8 +1,8 @@
-# CADCraft architecture
+# axialCAD architecture
 
 > **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (first committed architecture doc, written from the code on main at bd2412f) · **Target:** Autodesk AutoCAD 2027
 
-How CADCraft is built today. This describes the code on `main`, not plans; plans live in
+How axialCAD is built today. This describes the code on `main`, not plans; plans live in
 [roadmap.md](roadmap.md). Agents: the rules that keep this shape (layering, never-crash,
 everything-is-a-command, clean-room) are in [AGENTS.md](../AGENTS.md).
 

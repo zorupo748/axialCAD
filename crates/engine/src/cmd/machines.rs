@@ -254,7 +254,7 @@ mod tests {
         s.input(Input::Pick(vec![hs[0]])).unwrap();
         s.input(Input::Enter).unwrap();
         assert!(s.running.is_none());
-        assert_eq!(s.clipboard_base, Vec2::new(3.0, 4.0));
+        assert_eq!(s.clipboard_base, cadcraft_geom::Vec3::new(3.0, 4.0, 0.0));
 
         // LAYFRZ picks one object and freezes its layer.
         s.start("layfrz").unwrap();

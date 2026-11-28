@@ -53,6 +53,39 @@ fn no_picker(app: &mut CadApp, name: &str, example: &str) -> Result<Value, Strin
     Err(msg)
 }
 
+/// Open the host save-file dialog when an interactive prompt requests [`Picker::SaveFile`].
+pub(crate) fn resume_save_picker(app: &mut CadApp) {
+    if app.session.in_script || app.ui.dialog.is_some() {
+        return;
+    }
+    let Some(cadcraft_engine::prompt::Picker::SaveFile { default_name, extension }) = app.session.current_prompt().and_then(|p| p.picker) else {
+        return;
+    };
+    let Some(pick) = app.services.pick_save.as_ref() else { return };
+    match pick(&default_name, None) {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                app.session.cancel();
+                return;
+            }
+            let path = if std::path::Path::new(trimmed).extension().is_none() && !extension.is_empty() {
+                format!("{trimmed}.{extension}")
+            } else {
+                trimmed.to_string()
+            };
+            if let Err(e) = app.session.input(cadcraft_engine::Input::Text(path)) {
+                app.session.echo(e.to_string());
+                app.session.cancel();
+            }
+        }
+        None => {
+            app.session.cancel();
+            app.session.echo("Export cancelled.");
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Preview {
     generation: u32,
@@ -206,5 +239,53 @@ mod tests {
 
         let e = app.run("share", json!({})).unwrap_err();
         assert!(e.contains("not available yet"), "{e}");
+    }
+
+    #[test]
+    fn stlout_save_picker_appends_stl_extension_and_cancels_cleanly() {
+        let out_no_ext = std::env::temp_dir().join(format!("cadcraft_stl_picker_test_{}", std::process::id()));
+        let out_with_ext = out_no_ext.with_extension("stl");
+        let _ = std::fs::remove_file(&out_no_ext);
+        let _ = std::fs::remove_file(&out_with_ext);
+
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let asked_c = asked.clone();
+        let ret_path = Rc::new(RefCell::new(Some(out_no_ext.to_string_lossy().to_string())));
+        let ret_c = ret_path.clone();
+        let services = Services {
+            pick_save: Some(Box::new(move |name: &str, _dir| {
+                asked_c.borrow_mut().push(name.to_string());
+                ret_c.borrow().clone()
+            })),
+            ..Services::default()
+        };
+
+        let mut app = CadApp::new(Session::new(), services);
+        app.cmdline("RECTANG 0,0 40,30");
+        app.cmdline("EXTRUDE ALL  5");
+        assert_eq!(app.session.settings.vscurrent, "Conceptual");
+
+        // Cancel in dialog: no file created, command ends cleanly
+        *ret_path.borrow_mut() = None;
+        app.start("stlout");
+        app.cmdline("ALL");
+        app.cmdline("");
+        super::resume_save_picker(&mut app);
+        assert_eq!(*asked.borrow(), ["Drawing1.stl"]);
+        assert!(!app.session.prompting(), "cancelling dialog must finish STLOUT cleanly");
+        assert!(!out_with_ext.exists());
+
+        // Accept path without extension: appends .stl and writes valid binary STL
+        *ret_path.borrow_mut() = Some(out_no_ext.to_string_lossy().to_string());
+        app.start("stlout");
+        app.cmdline("ALL");
+        app.cmdline("");
+        super::resume_save_picker(&mut app);
+        assert!(!app.session.prompting(), "accepting dialog must finish STLOUT");
+        assert!(out_with_ext.exists(), "must append .stl when picker returns name without extension");
+        let bytes = std::fs::read(&out_with_ext).unwrap();
+        assert_eq!(bytes.len(), 684);
+        assert!(bytes[..80].starts_with(b"axialCAD binary STL"));
+        let _ = std::fs::remove_file(&out_with_ext);
     }
 }

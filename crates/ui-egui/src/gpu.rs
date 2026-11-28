@@ -26,6 +26,61 @@ use egui_wgpu::wgpu::util::DeviceExt;
 /// Line/triangle vertex: position (2 × f32, relative to the origin) + sRGB colour (4 × u8,
 /// premultiplied by its alpha: transparent objects blend with what is under them).
 const VERTEX_SIZE: usize = 12;
+/// 3D vertex: position (3 × f32, relative to the origin) + sRGB colour (4 × u8, premultiplied).
+pub const VERTEX3D_SIZE: usize = 16;
+
+const ATTRS_3D: [wgpu::VertexAttribute; 2] = [
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Unorm8x4, offset: 12, shader_location: 1 },
+];
+
+pub fn vertex3d_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: VERTEX3D_SIZE as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &ATTRS_3D,
+    }
+}
+
+pub fn push_vertex3d(out: &mut Vec<u8>, p: [f32; 3], c: [u8; 4]) {
+    out.extend_from_slice(&p[0].to_le_bytes());
+    out.extend_from_slice(&p[1].to_le_bytes());
+    out.extend_from_slice(&p[2].to_le_bytes());
+    out.extend_from_slice(&c);
+}
+
+pub fn premultiplied_u8(c: [u8; 3], a: u8) -> [u8; 4] {
+    let k = |v: u8| u8::try_from((u32::from(v) * u32::from(a) + 127) / 255).unwrap_or(v);
+    [k(c[0]), k(c[1]), k(c[2]), a]
+}
+
+pub type Mesh3dSlot = Arc<Mutex<Option<Mesh3dData>>>;
+
+/// CPU-side vertex data for 3D faces and lines, waiting to be uploaded.
+#[derive(Default)]
+pub struct Mesh3dData {
+    pub tris: Vec<u8>,
+    pub lines: Vec<u8>,
+    uploaded: Option<Uploaded3d>,
+}
+
+struct Uploaded3d {
+    tris: Vec<Batch>,
+    lines: Vec<Batch>,
+}
+
+impl Mesh3dData {
+    pub fn upload_now(&mut self, device: &wgpu::Device) {
+        let usage = wgpu::BufferUsages::VERTEX;
+        self.uploaded = Some(Uploaded3d {
+            tris: upload(device, "cad_3d_tris", &self.tris, VERTEX3D_SIZE, usage),
+            lines: upload(device, "cad_3d_lines", &self.lines, VERTEX3D_SIZE, usage),
+        });
+        self.tris = Vec::new();
+        self.lines = Vec::new();
+    }
+}
+
 /// Wide-line / point instance: a, b (2 × f32 each) + colour (4 × u8) + width in points (f32) +
 /// length along its polyline before `a`, in world units (f32; dashing).
 const INSTANCE_SIZE: usize = 28;
@@ -389,6 +444,13 @@ struct Resources {
     clipped: Option<ClipPipelines>,
     linear_out: bool,
     layers: Vec<Layer>,
+    tri3d_pipeline: Option<wgpu::RenderPipeline>,
+    line3d_pipeline: Option<wgpu::RenderPipeline>,
+    uniform3d: Option<wgpu::Buffer>,
+    bind_group3d: Option<wgpu::BindGroup>,
+    mesh3d_key: Option<u64>,
+    mesh3d_tris: Vec<Batch>,
+    mesh3d_lines: Vec<Batch>,
 }
 
 struct ClipPipelines {
@@ -400,6 +462,67 @@ struct ClipPipelines {
 }
 
 const UNIFORM_SIZE: u64 = 80;
+
+const SHADER_3D: &str = r#"
+struct View3D {
+    cam_target: vec4<f32>,     // target.x, target.y, target.z, depth_range
+    right: vec4<f32>,      // right.x, right.y, right.z, scale
+    up: vec4<f32>,         // up.x, up.y, up.z, 0.0
+    view_dir: vec4<f32>,   // view_dir.x, view_dir.y, view_dir.z, 0.0
+    screen: vec4<f32>,     // center.x, center.y, width, height
+    origin: vec4<f32>,     // origin.x, origin.y, origin.z, linear_out (1 or 0)
+};
+@group(0) @binding(0) var<uniform> view3d: View3D;
+
+struct V3DOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+fn out_color_3d(c: vec4<f32>, linear: bool) -> vec4<f32> {
+    if (linear) {
+        let s = c.rgb / max(c.a, 0.0001);
+        let lo = s / 12.92;
+        let hi = pow((s + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+        return vec4<f32>(select(hi, lo, s <= vec3<f32>(0.04045)) * c.a, c.a);
+    }
+    return c;
+}
+
+@vertex
+fn vs_3d(@location(0) pos: vec3<f32>, @location(1) color: vec4<f32>) -> V3DOut {
+    var o: V3DOut;
+    let p_world = pos + view3d.origin.xyz;
+    let d = p_world - view3d.cam_target.xyz;
+
+    let u = dot(d, view3d.right.xyz);
+    let v = dot(d, view3d.up.xyz);
+    let w = dot(d, view3d.view_dir.xyz);
+
+    let scale = view3d.right.w;
+    let center = view3d.screen.xy;
+    let sw = view3d.screen.z;
+    let sh = view3d.screen.w;
+
+    let px_x = center.x + u * scale;
+    let px_y = center.y - v * scale;
+
+    let clip_x = (px_x / sw) * 2.0 - 1.0;
+    let clip_y = 1.0 - (px_y / sh) * 2.0;
+
+    let depth_range = max(view3d.cam_target.w, 1.0);
+    let clip_z = clamp(0.5 - (w / (2.0 * depth_range)), 0.0001, 0.9999);
+
+    o.pos = vec4<f32>(clip_x, clip_y, clip_z, 1.0);
+    o.color = out_color_3d(color, view3d.origin.w > 0.5);
+    return o;
+}
+
+@fragment
+fn fs_3d(in: V3DOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"#;
 
 const SHADER: &str = r#"
 struct View {
@@ -551,7 +674,13 @@ impl Resources {
                         wgpu::StencilState { front: f, back: f, read_mask: 1, write_mask: 0 }
                     }
                 };
-                wgpu::DepthStencilState { format, depth_write_enabled: None, depth_compare: None, stencil, bias: wgpu::DepthBiasState::default() }
+                wgpu::DepthStencilState {
+                    format,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil,
+                    bias: wgpu::DepthBiasState::default(),
+                }
             })
         };
         let pipeline = |label: &str, vs: &str, topology: wgpu::PrimitiveTopology, buffer: wgpu::VertexBufferLayout<'static>, s: Stencil| {
@@ -582,6 +711,110 @@ impl Resources {
             })
         };
         use wgpu::PrimitiveTopology::{LineList, TriangleList};
+
+        let module_3d = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cad_canvas_3d"),
+            source: wgpu::ShaderSource::Wgsl(SHADER_3D.into()),
+        });
+        let bgl_3d = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cad_canvas_3d"),
+            entries: &[entry(0)],
+        });
+        let layout_3d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cad_canvas_3d"),
+            bind_group_layouts: &[Some(&bgl_3d)],
+            immediate_size: 0,
+        });
+        let uniform3d = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cad_canvas_view3d"),
+            size: 96,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group3d = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cad_canvas_3d"),
+            layout: &bgl_3d,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform3d.as_entire_binding() }],
+        });
+
+        let tri3d_pipeline = target.stencil.filter(|f| f.has_depth_aspect()).map(|format| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("cad_3d_tris"),
+                layout: Some(&layout_3d),
+                vertex: wgpu::VertexState {
+                    module: &module_3d,
+                    entry_point: Some("vs_3d"),
+                    buffers: &[Some(vertex3d_layout())],
+                    compilation_options: Default::default(),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 2,
+                        slope_scale: 1.5,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module_3d,
+                    entry_point: Some("fs_3d"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target.format,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        });
+
+        let line3d_pipeline = target.stencil.filter(|f| f.has_depth_aspect()).map(|format| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("cad_3d_lines"),
+                layout: Some(&layout_3d),
+                vertex: wgpu::VertexState {
+                    module: &module_3d,
+                    entry_point: Some("vs_3d"),
+                    buffers: &[Some(vertex3d_layout())],
+                    compilation_options: Default::default(),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module_3d,
+                    entry_point: Some("fs_3d"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target.format,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        });
+
         Resources {
             line_pipeline: pipeline("cad_lines", "vs_line", LineList, vertex_layout(), Stencil::Off),
             tri_pipeline: pipeline("cad_fills", "vs_line", TriangleList, vertex_layout(), Stencil::Off),
@@ -594,6 +827,13 @@ impl Resources {
             }),
             linear_out: target.format.is_srgb(),
             layers: (0..=LAYER_MASK).map(|_| layer()).collect(),
+            tri3d_pipeline,
+            line3d_pipeline,
+            uniform3d: Some(uniform3d),
+            bind_group3d: Some(bind_group3d),
+            mesh3d_key: None,
+            mesh3d_tris: Vec::new(),
+            mesh3d_lines: Vec::new(),
         }
     }
 }
@@ -772,6 +1012,107 @@ impl egui_wgpu::CallbackTrait for CanvasCallback {
                 }
             }
             from = to;
+        }
+    }
+}
+
+pub struct Spatial3dCallback {
+    pub key: u64,
+    pub slot: Mesh3dSlot,
+    pub target: [f32; 3],
+    pub right: [f32; 3],
+    pub up: [f32; 3],
+    pub view_dir: [f32; 3],
+    pub scale: f32,
+    pub center: [f32; 2],
+    pub origin: [f32; 3],
+    pub depth_range: f32,
+}
+
+impl egui_wgpu::CallbackTrait for Spatial3dCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let Some(res) = resources.get_mut::<Resources>() else { return Vec::new() };
+        if res.mesh3d_key != Some(self.key) {
+            let pending = self.slot.lock().ok().and_then(|mut s| s.take());
+            if let Some(mut m) = pending {
+                if m.uploaded.is_none() {
+                    m.upload_now(device);
+                }
+                if let Some(u) = m.uploaded {
+                    res.mesh3d_tris = u.tris;
+                    res.mesh3d_lines = u.lines;
+                }
+                res.mesh3d_key = Some(self.key);
+            }
+        }
+        if let Some(uniform) = &res.uniform3d {
+            let ppp = screen.pixels_per_point;
+            let [sw, sh] = screen.size_in_pixels;
+            let linear_out = if res.linear_out { 1.0f32 } else { 0.0f32 };
+            let v_target = [self.target[0], self.target[1], self.target[2], self.depth_range];
+            let v_right = [self.right[0], self.right[1], self.right[2], self.scale * ppp];
+            let v_up = [self.up[0], self.up[1], self.up[2], 0.0];
+            let v_view = [self.view_dir[0], self.view_dir[1], self.view_dir[2], 0.0];
+            let v_screen = [self.center[0] * ppp, self.center[1] * ppp, sw.max(1) as f32, sh.max(1) as f32];
+            let v_origin = [self.origin[0], self.origin[1], self.origin[2], linear_out];
+
+            let bytes: Vec<u8> = v_target.iter()
+                .chain(&v_right)
+                .chain(&v_up)
+                .chain(&v_view)
+                .chain(&v_screen)
+                .chain(&v_origin)
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            queue.write_buffer(uniform, 0, &bytes);
+        }
+        Vec::new()
+    }
+
+    fn paint(&self, info: egui::PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, resources: &egui_wgpu::CallbackResources) {
+        let Some(shared) = resources.get::<Resources>() else { return };
+        if shared.mesh3d_key != Some(self.key) {
+            return;
+        }
+        let [sw, sh] = info.screen_size_px;
+        if sw == 0 || sh == 0 {
+            return;
+        }
+        let Some(bg3d) = &shared.bind_group3d else { return };
+        pass.set_viewport(0.0, 0.0, sw as f32, sh as f32, 0.0, 1.0);
+        pass.set_bind_group(0, bg3d, &[]);
+
+        // 1. Draw 3D filled faces with depth bias and depth write
+        if let Some(tri_pipe) = &shared.tri3d_pipeline {
+            if !shared.mesh3d_tris.is_empty() {
+                pass.set_pipeline(tri_pipe);
+                for b in &shared.mesh3d_tris {
+                    if b.count > 0 {
+                        pass.set_vertex_buffer(0, b.buffer.slice(..));
+                        pass.draw(0..b.count, 0..1);
+                    }
+                }
+            }
+        }
+
+        // 2. Draw 3D edges with depth write and test LessEqual
+        if let Some(line_pipe) = &shared.line3d_pipeline {
+            if !shared.mesh3d_lines.is_empty() {
+                pass.set_pipeline(line_pipe);
+                for b in &shared.mesh3d_lines {
+                    if b.count > 0 {
+                        pass.set_vertex_buffer(0, b.buffer.slice(..));
+                        pass.draw(0..b.count, 0..1);
+                    }
+                }
+            }
         }
     }
 }

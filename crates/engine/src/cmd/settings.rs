@@ -25,6 +25,120 @@ fn run_grid(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({ "on": on, "message": format!("<Grid {}>", if on { "on" } else { "off" }) }))
 }
 
+fn run_dynmode(s: &mut Session, p: &Value) -> Result<Value> {
+    // Explicit toggle with empty arguments, used by F12 shortcut and UI status-bar toggle:
+    if p.is_null() || (p.is_object() && p.as_object().map_or(false, |m| m.is_empty())) {
+        s.settings.dynmode = !s.settings.dynmode;
+        s.touch();
+        let on = s.settings.dynmode;
+        return Ok(json!({ "on": on, "message": format!("<Dynamic Input {}>", if on { "on" } else { "off" }) }));
+    }
+
+    if let Some(on) = p.get("on").and_then(Value::as_bool) {
+        s.settings.dynmode = on;
+        s.touch();
+        return Ok(json!({ "on": on, "message": format!("<Dynamic Input {}>", if on { "on" } else { "off" }) }));
+    }
+
+    let val = if let Some(n) = p.get("value").and_then(Value::as_i64).or_else(|| p.as_i64()) {
+        Some(n)
+    } else if let Some(t) = p.as_str().or_else(|| p.get("mode").and_then(Value::as_str)) {
+        let s_trim = t.trim();
+        if s_trim.eq_ignore_ascii_case("on") {
+            s.settings.dynmode = true;
+            s.touch();
+            return Ok(json!({ "on": true, "message": "<Dynamic Input on>" }));
+        } else if s_trim.eq_ignore_ascii_case("off") {
+            s.settings.dynmode = false;
+            s.touch();
+            return Ok(json!({ "on": false, "message": "<Dynamic Input off>" }));
+        } else if let Ok(n) = s_trim.parse::<i64>() {
+            Some(n)
+        } else {
+            return Err(crate::EngineError::BadParams {
+                cmd: "dynmode".into(),
+                msg: "Requires an integer between -3 and 3, or ON/OFF.".into(),
+            });
+        }
+    } else {
+        return Err(crate::EngineError::BadParams {
+            cmd: "dynmode".into(),
+            msg: "Requires an integer between -3 and 3, or ON/OFF.".into(),
+        });
+    };
+
+    if let Some(n) = val {
+        if !(-3..=3).contains(&n) {
+            return Err(crate::EngineError::BadParams {
+                cmd: "dynmode".into(),
+                msg: "Requires an integer between -3 and 3, or ON/OFF.".into(),
+            });
+        }
+        s.settings.dynmode = n > 0;
+        s.touch();
+        let on = s.settings.dynmode;
+        return Ok(json!({ "on": on, "message": format!("<Dynamic Input {}>", if on { "on" } else { "off" }) }));
+    }
+
+    Err(crate::EngineError::BadParams {
+        cmd: "dynmode".into(),
+        msg: "Requires an integer between -3 and 3, or ON/OFF.".into(),
+    })
+}
+
+#[derive(Default)]
+struct DynmodeM;
+
+impl Interactive for DynmodeM {
+    fn name(&self) -> &'static str {
+        "DYNMODE"
+    }
+
+    fn prompt(&self, s: &Session) -> Prompt {
+        let default_val = if s.settings.dynmode { "3" } else { "0" };
+        let accept = Accept { number: true, ..Accept::TEXT };
+        Prompt::new("Enter new value for DYNMODE", accept)
+            .default(default_val)
+            .kw(&["ON", "OFF"])
+    }
+
+    fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
+        match i {
+            Input::Enter => Ok(Step::Done),
+            Input::Cancel => Ok(Step::Done),
+            Input::Text(t) | Input::Keyword(t) => {
+                let s_trim = t.trim();
+                if s_trim.is_empty() {
+                    return Ok(Step::Done);
+                }
+                if s_trim.eq_ignore_ascii_case("on") {
+                    s.settings.dynmode = true;
+                } else if s_trim.eq_ignore_ascii_case("off") {
+                    s.settings.dynmode = false;
+                } else if let Ok(val) = s_trim.parse::<i64>() {
+                    if !(-3..=3).contains(&val) {
+                        return Err(crate::EngineError::BadParams {
+                            cmd: "dynmode".into(),
+                            msg: "Requires an integer between -3 and 3, or ON/OFF.".into(),
+                        });
+                    }
+                    s.settings.dynmode = val > 0;
+                } else {
+                    return Err(crate::EngineError::BadParams {
+                        cmd: "dynmode".into(),
+                        msg: "Requires an integer between -3 and 3, or ON/OFF.".into(),
+                    });
+                }
+                s.touch();
+                let msg = format!("<Dynamic Input {}>", if s.settings.dynmode { "on" } else { "off" });
+                s.echo(msg);
+                Ok(Step::Done)
+            }
+            _ => Ok(Step::Done),
+        }
+    }
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("ortho", "Ortho Mode", |s, p| toggle(s, p, |st| &mut st.orthomode, "Ortho"))
@@ -68,12 +182,13 @@ pub fn specs() -> Vec<CommandSpec> {
             .enabled(always)
             .noundo()
             .transparent(),
-        CommandSpec::new("dynmode", "Dynamic Input", |s, p| toggle(s, p, |st| &mut st.dynmode, "Dynamic Input"))
+        CommandSpec::new("dynmode", "Dynamic Input", run_dynmode)
             .key("F12")
-            .params("{on?: bool}")
+            .params("{on?: bool, value?: i64}")
             .enabled(always)
             .noundo()
-            .transparent(),
+            .transparent()
+            .interactive(|_| Ok(Box::new(DynmodeM))),
         CommandSpec::new("lwdisplay", "Show/Hide Lineweight", |s, p| toggle(s, p, |st| &mut st.lwdisplay, "Lineweight"))
             .params("{on?: bool}")
             .enabled(always)

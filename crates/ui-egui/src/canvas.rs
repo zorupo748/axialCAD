@@ -122,8 +122,10 @@ pub struct VirtualNavState {
 /// pointer pinned inside the canvas without suppressing `XI_RawMotion` deltas or button release.
 pub fn uses_x11_backend() -> bool {
     cfg!(all(unix, not(target_os = "macos"), not(target_arch = "wasm32")))
-        && std::env::var_os("DISPLAY").is_some()
-        && std::env::var_os("CADCRAFT_WAYLAND").is_none()
+        && (std::env::var_os("CADCRAFT_X11").is_some()
+            || (std::env::var_os("DISPLAY").is_some()
+                && std::env::var_os("WAYLAND_DISPLAY").is_none()
+                && std::env::var_os("CADCRAFT_WAYLAND").is_none()))
 }
 
 pub fn release_virtual_nav(ctx: &egui::Context, canvas: &mut CanvasState) {
@@ -153,6 +155,22 @@ pub fn wrap_virtual_cursor_pos(pos: Pos2, rect: Rect) -> Pos2 {
     Pos2::new(x, y)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TrackpadNavMode {
+    #[default]
+    Pan,
+    Orbit,
+}
+
+impl TrackpadNavMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            TrackpadNavMode::Pan => TrackpadNavMode::Orbit,
+            TrackpadNavMode::Orbit => TrackpadNavMode::Pan,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CanvasState {
     pub list: Option<DisplayList>,
@@ -174,6 +192,10 @@ pub struct CanvasState {
     mesh_key: Option<u64>,
     mesh_slot: crate::gpu::MeshSlot,
     mesh_origin: Vec2,
+    /// 3D spatial mesh on the GPU with hardware depth testing (see [`draw_spatial_gpu`]).
+    spatial3d_key: Option<u64>,
+    spatial3d_slot: crate::gpu::Mesh3dSlot,
+    spatial3d_origin: Vec3,
     /// The dragged objects of a MOVE/COPY/ROTATE/SCALE preview, uploaded once per drag (see
     /// [`draw_drag_gpu`]).
     drag_key: Option<u64>,
@@ -217,9 +239,27 @@ pub struct CanvasState {
     pub parallel_plane_warning: bool,
     pan_last: Option<Pos2>,
     pub virtual_nav: Option<VirtualNavState>,
+    /// Preferred trackpad navigation mode: Pan (default) or Orbit.
+    pub trackpad_mode: TrackpadNavMode,
+    /// Whether an orbit gesture is currently active (to avoid calling begin_orbit repeatedly).
+    orbit_gesture_active: bool,
+    /// True while kinetic scroll inertia from a pan gesture is decaying after fingers lifted.
+    pan_inertia: bool,
     /// True when the latest scroll came from a trackpad (or other precise-scrolling device):
     /// scrolling then pans and pinch zooms. A notched mouse wheel clears it so the wheel zooms.
     scroll_pans: bool,
+    /// Navigation diagnostic logger throttle time.
+    last_diag_time: Option<std::time::Instant>,
+    /// Navigation diagnostic logger last recorded action.
+    last_diag_action: Option<&'static str>,
+    /// Diagnostics: timestamp of latest pointer movement.
+    last_pointer_move_time: Option<std::time::Instant>,
+    /// Diagnostics: number of pointer motion events received since last gesture.
+    pointer_motion_count_before_gesture: usize,
+    /// Diagnostics: whether a pinch gesture has already logged its start.
+    pinch_diag_active: bool,
+    /// Diagnostics: timestamp when pinch gesture started.
+    pinch_diag_start: Option<std::time::Instant>,
     /// Hot grips (object, grip index): the ones Shift+clicked while idle, then the ones the
     /// running GRIP edit works on (the engine's grip modes take them from there).
     pub hot_grips: Vec<(Handle, usize)>,
@@ -939,6 +979,12 @@ fn spatial_line_pick_at(app: &CadApp, xf: &Xf, at: Pos2) -> Option<Handle> {
     spatial_line_at_screen(&st.doc, &st.edit_space(), xf, at, (app.session.settings.pickbox.max(1.0) * 1.5) as f32)
 }
 
+fn spatial_lwpolyline_path(pl: &cadcraft_doc::LwPolyline, extrusion: Vec3, pixel_size: f64) -> Vec<Vec3> {
+    let polyline = cadcraft_geom::Polyline { vertices: pl.vertices.clone(), closed: pl.closed };
+    let ocs = cadcraft_geom::Mat4::ocs(extrusion);
+    polyline.tessellate((0.5 * pixel_size).max(1e-9)).into_iter().map(|p| ocs.apply(p.to3(pl.elevation))).collect()
+}
+
 fn screen_entity_polylines(doc: &cadcraft_doc::Drawing, entity: &cadcraft_doc::Entity, xf: &Xf) -> Vec<Vec<Pos2>> {
     let paths = match &entity.kind {
         cadcraft_doc::EntityKind::Line(line) if line.a.z != 0.0 || line.b.z != 0.0 => {
@@ -948,12 +994,20 @@ fn screen_entity_polylines(doc: &cadcraft_doc::Drawing, entity: &cadcraft_doc::E
             let pts = c.sample_points_3d(entity.common.extrusion, 64);
             vec![pts.into_iter().map(|p| xf.to_screen3(p)).collect()]
         }
+        cadcraft_doc::EntityKind::Arc(arc) if arc.center.z != 0.0 || !entity.common.extrusion.near(Vec3::Z, 1e-6) => {
+            let points = arc.sample_points_3d(entity.common.extrusion, 64);
+            vec![points.into_iter().map(|p| xf.to_screen3(p)).collect()]
+        }
         cadcraft_doc::EntityKind::LwPolyline(pl) if !entity.common.extrusion.near(Vec3::Z, 1e-6) || pl.elevation.abs() > 1e-6 => {
-            let mut pts = pl.vertices_3d(entity.common.extrusion);
-            if pl.closed && !pts.is_empty() {
-                pts.push(pts[0]);
-            }
-            vec![pts.into_iter().map(|p| xf.to_screen3(p)).collect()]
+            let path = spatial_lwpolyline_path(pl, entity.common.extrusion, 1.0 / xf.scale.max(1e-12));
+            vec![path.into_iter().map(|p| xf.to_screen3(p)).collect()]
+        }
+        cadcraft_doc::EntityKind::Polyline3d(pl) if pl.is_spatial() => {
+            vec![pl.path_3d().into_iter().map(|p| xf.to_screen3(p)).collect()]
+        }
+        cadcraft_doc::EntityKind::Text(text) if !entity.common.extrusion.near(Vec3::Z, 1e-6) || text.insert.z.abs() > 1e-6 => {
+            let strokes = cadcraft_render::text_strokes_3d(doc, text, entity.common.extrusion);
+            strokes.into_iter().map(|s| s.into_iter().map(|p| xf.to_screen3(p)).collect()).collect()
         }
         _ => cadcraft_engine::select::hit_polylines(doc, entity, (0.5 / xf.scale.max(1e-12)).max(1e-9))
             .into_iter()
@@ -1051,6 +1105,47 @@ fn screen_projected_pick_at(app: &CadApp, xf: &Xf, at: Pos2) -> Option<Handle> {
     best.map(|(_, handle)| handle)
 }
 
+/// Resolve TRIM's hover and click against the same visible geometry.
+fn screen_entity_point(app: &CadApp, xf: &Xf, at: Pos2) -> cadcraft_engine::Result<Input> {
+    let handle = screen_projected_pick_at(app, xf, at);
+    let projection = |a: Vec3, b: Vec3| {
+        let start = xf.to_screen3(a);
+        let delta = xf.to_screen3(b) - start;
+        let length_sq = delta.length_sq();
+        if !length_sq.is_finite() || length_sq <= 1e-8 {
+            return None;
+        }
+        let t = ((at - start).dot(delta) / length_sq).clamp(0.0, 1.0);
+        Some((at.distance(start + delta * t), a + (b - a) * f64::from(t)))
+    };
+    let nearest = |points: &[Vec3]| {
+        points.windows(2).filter_map(|pair| {
+            let [a, b] = pair else { return None };
+            projection(*a, *b)
+        }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, p)| p)
+    };
+    let point3 = if let Some(e) = handle.and_then(|h| app.session.doc().ok()?.entity(h)) {
+        match &e.kind {
+            cadcraft_doc::EntityKind::Line(line) => Some(projection(line.a, line.b).ok_or_else(|| {
+                cadcraft_engine::EngineError::Other("Degenerate projection: the line projects to a point in this view.".into())
+            })?.1),
+            cadcraft_doc::EntityKind::Circle(circle) => {
+                let mut points = circle.sample_points_3d(e.common.extrusion, 64);
+                if let Some(first) = points.first().copied() {
+                    points.push(first);
+                }
+                nearest(&points)
+            }
+            cadcraft_doc::EntityKind::Arc(arc) => nearest(&arc.sample_points_3d(e.common.extrusion, 64)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let point = point3.map_or_else(|| xf.to_world(at), Vec3::xy);
+    Ok(Input::EntityPoint { handle, point, point3 })
+}
+
 fn screen_window_selection(app: &CadApp, xf: &Xf, start: Pos2, end: Pos2) -> Vec<Handle> {
     let Some(st) = app.session.state().ok() else { return Vec::new() };
     let Some(store) = st.doc.space(&st.edit_space()) else { return Vec::new() };
@@ -1073,6 +1168,26 @@ fn screen_window_selection(app: &CadApp, xf: &Xf, start: Pos2, end: Pos2) -> Vec
             (if crossing { crosses } else { complete }).then_some(entity.handle)
         })
         .collect()
+}
+
+fn draw_spatial_polyline(painter: &egui::Painter, xf: &Xf, pts3: &[Vec3], stroke: Stroke, dashed: bool) {
+    let screen_pts: Vec<Pos2> = pts3.iter().map(|p| xf.to_screen3(*p)).collect();
+    if screen_pts.len() >= 2 {
+        if dashed {
+            painter.extend(Shape::dashed_line(&screen_pts, stroke, 6.0, 4.0));
+        } else {
+            painter.add(Shape::line(screen_pts, stroke));
+        }
+    }
+}
+
+fn push_3d_polyline(lines: &mut Vec<u8>, origin: Vec3, pts3: &[Vec3], color: [u8; 4]) {
+    for seg in pts3.windows(2) {
+        let rel1 = [(seg[0].x - origin.x) as f32, (seg[0].y - origin.y) as f32, (seg[0].z - origin.z) as f32];
+        let rel2 = [(seg[1].x - origin.x) as f32, (seg[1].y - origin.y) as f32, (seg[1].z - origin.z) as f32];
+        crate::gpu::push_vertex3d(lines, rel1, color);
+        crate::gpu::push_vertex3d(lines, rel2, color);
+    }
 }
 
 fn draw_spatial_lines(app: &CadApp, painter: &egui::Painter, xf: &Xf) {
@@ -1117,6 +1232,10 @@ fn draw_spatial_lines(app: &CadApp, painter: &egui::Painter, xf: &Xf) {
                     painter.line_segment([p1, p2], stroke);
                 }
             }
+            cadcraft_doc::EntityKind::Arc(arc) if arc.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) => {
+                let points = arc.sample_points_3d(e.common.extrusion, 64);
+                draw_spatial_polyline(painter, xf, &points, stroke, look.is_some_and(|look| look.dashed));
+            }
             cadcraft_doc::EntityKind::Circle(c)
                 if c.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
             {
@@ -1133,22 +1252,572 @@ fn draw_spatial_lines(app: &CadApp, painter: &egui::Painter, xf: &Xf) {
             cadcraft_doc::EntityKind::LwPolyline(pl)
                 if pl.elevation.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
             {
-                let mut pts3 = pl.vertices_3d(e.common.extrusion);
-                if pl.closed && !pts3.is_empty() {
-                    pts3.push(pts3[0]);
-                }
-                let screen_pts: Vec<Pos2> = pts3.into_iter().map(|p| xf.to_screen3(p)).collect();
-                if screen_pts.len() >= 2 {
-                    if look.is_some_and(|l| l.dashed) {
-                        painter.extend(Shape::dashed_line(&screen_pts, stroke, 6.0, 4.0));
-                    } else {
+                let pts3 = spatial_lwpolyline_path(pl, e.common.extrusion, 1.0 / xf.scale.max(1e-12));
+                draw_spatial_polyline(painter, xf, &pts3, stroke, look.is_some_and(|l| l.dashed));
+            }
+            cadcraft_doc::EntityKind::Polyline3d(pl) if pl.is_spatial() => {
+                draw_spatial_polyline(painter, xf, &pl.path_3d(), stroke, look.is_some_and(|l| l.dashed));
+            }
+            cadcraft_doc::EntityKind::Text(text)
+                if text.insert.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
+            {
+                let strokes = cadcraft_render::text_strokes_3d(&st.doc, text, e.common.extrusion);
+                for s in strokes {
+                    let screen_pts: Vec<Pos2> = s.into_iter().map(|p| xf.to_screen3(p)).collect();
+                    if screen_pts.len() >= 2 {
                         painter.add(Shape::line(screen_pts, stroke));
+                    }
+                }
+            }
+            cadcraft_doc::EntityKind::Face3d(f) => {
+                let is_conceptual = app.session.settings.vscurrent.eq_ignore_ascii_case("conceptual");
+                let transparency = if app.session.settings.transparency_display {
+                    match e.common.transparency {
+                        cadcraft_doc::Transparency::Percent(p) => p.min(90),
+                        cadcraft_doc::Transparency::ByLayer => {
+                            st.doc.layer(&e.common.layer).map_or(0, |l| l.transparency.min(90))
+                        }
+                        cadcraft_doc::Transparency::ByBlock => 0,
+                    }
+                } else {
+                    0
+                };
+                let alpha = (((100 - transparency as u32) * 255) / 100) as u8;
+                draw_face3d(painter, xf, f, stroke, is_conceptual, color, alpha);
+            }
+            cadcraft_doc::EntityKind::Solid3d(s) => {
+                let is_conceptual = app.session.settings.vscurrent.eq_ignore_ascii_case("conceptual");
+                let transparency = if app.session.settings.transparency_display {
+                    match e.common.transparency {
+                        cadcraft_doc::Transparency::Percent(p) => p.min(90),
+                        cadcraft_doc::Transparency::ByLayer => {
+                            st.doc.layer(&e.common.layer).map_or(0, |l| l.transparency.min(90))
+                        }
+                        cadcraft_doc::Transparency::ByBlock => 0,
+                    }
+                } else {
+                    0
+                };
+                let alpha = (((100 - transparency as u32) * 255) / 100) as u8;
+                let view_dir = app.session.camera().view_dir();
+                draw_solid3d(painter, xf, s, stroke, is_conceptual, color, alpha, view_dir);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn draw_face3d(
+    painter: &egui::Painter,
+    xf: &Xf,
+    f: &cadcraft_doc::Face3d,
+    stroke: Stroke,
+    is_conceptual: bool,
+    color: Color32,
+    alpha: u8,
+) {
+    let c = &f.corners;
+    let is_triangle = c[2] == c[3];
+    if is_conceptual {
+        let v1 = c[1] - c[0];
+        let v2 = c[2] - c[0];
+        let n = v1.cross(v2);
+        let normal = if n.len() > 1e-9 { n.normalized() } else { Vec3::Z };
+        let light = Vec3::new(0.5, 0.5, 0.707).normalized();
+        let diff = normal.dot(light).abs() as f32;
+        let factor = 0.4 + 0.6 * diff;
+        let r = ((f32::from(color.r()) * factor).clamp(0.0, 255.0)) as u8;
+        let g = ((f32::from(color.g()) * factor).clamp(0.0, 255.0)) as u8;
+        let b = ((f32::from(color.b()) * factor).clamp(0.0, 255.0)) as u8;
+        let fill_color = Color32::from_rgba_unmultiplied(r, g, b, alpha);
+
+        let pts: Vec<Pos2> = if is_triangle {
+            vec![xf.to_screen3(c[0]), xf.to_screen3(c[1]), xf.to_screen3(c[2])]
+        } else {
+            vec![xf.to_screen3(c[0]), xf.to_screen3(c[1]), xf.to_screen3(c[2]), xf.to_screen3(c[3])]
+        };
+        if pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()) && pts.len() >= 3 {
+            painter.add(Shape::convex_polygon(pts, fill_color, Stroke::NONE));
+        }
+    }
+
+    let edge_count = if is_triangle { 3 } else { 4 };
+    for i in 0..edge_count {
+        if f.hidden_edges & (1 << i) == 0 {
+            let next = if is_triangle && i == 2 { 0 } else { (i + 1) % 4 };
+            let p1 = c[i];
+            let p2 = c[next];
+            if p1 != p2 {
+                let s1 = xf.to_screen3(p1);
+                let s2 = xf.to_screen3(p2);
+                if s1.x.is_finite() && s1.y.is_finite() && s2.x.is_finite() && s2.y.is_finite() {
+                    painter.line_segment([s1, s2], stroke);
+                }
+            }
+        }
+    }
+}
+
+/// Heurística angular provisional para mallas cerradas sin procedencia topológica:
+/// Si dos caras contiguas tienen un ángulo diedro mayor a 30° (dot < cos(30°) ≈ 0.866),
+/// se tratan provisionalmente como arista viva (crease). Si el diedro es menor o igual a 30°,
+/// solo se dibujan cuando forman silueta con la cámara.
+/// NOTA: Esto es una heurística geométrica provisional, no un estándar industrial ni una
+/// garantía formal de discretización. Cuando existe procedencia topológica (e.g. extrusiones
+/// poligonales), las aristas topológicas reales se conservan sin importar su ángulo diedro.
+const CREASE_ANGLE_DOT_HEURISTIC: f64 = 0.866_025_403_784_438_6;
+
+fn classify_solid_edges(s: &cadcraft_doc::Solid3d, view_dir: Vec3) -> Vec<(Vec3, Vec3)> {
+    let quantize = |v: Vec3| -> (i64, i64, i64) {
+        ((v.x * 10000.0).round() as i64, (v.y * 10000.0).round() as i64, (v.z * 10000.0).round() as i64)
+    };
+
+    let is_smooth_curved = s.recipe.features.iter().any(|f| matches!(f.op, cadcraft_doc::FeatureOp::Cylinder { .. } | cadcraft_doc::FeatureOp::Sphere { .. }));
+
+    struct EdgeRecord {
+        p1: Vec3,
+        p2: Vec3,
+        normals: Vec<Vec3>,
+    }
+
+    let mut edges: std::collections::HashMap<((i64, i64, i64), (i64, i64, i64)), EdgeRecord> =
+        std::collections::HashMap::new();
+
+    for f in &s.faces {
+        let c = &f.corners;
+        let is_triangle = c[2] == c[3];
+        let edge_count = if is_triangle { 3 } else { 4 };
+        let v1 = c[1] - c[0];
+        let v2 = c[2] - c[0];
+        let n = v1.cross(v2);
+        if n.len() <= 1e-9 {
+            continue;
+        }
+        let normal = n.normalized();
+
+        for i in 0..edge_count {
+            let next = if is_triangle && i == 2 { 0 } else { (i + 1) % 4 };
+            let p1 = c[i];
+            let p2 = c[next];
+            if p1 == p2 {
+                continue;
+            }
+            let q1 = quantize(p1);
+            let q2 = quantize(p2);
+            if q1 == q2 {
+                continue;
+            }
+            let key = if q1 < q2 { (q1, q2) } else { (q2, q1) };
+            let rec = edges.entry(key).or_insert_with(|| EdgeRecord {
+                p1,
+                p2,
+                normals: Vec::with_capacity(2),
+            });
+            if rec.normals.len() < 8 {
+                rec.normals.push(normal);
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+
+    for rec in edges.values() {
+        let draw_this_edge = match rec.normals.len() {
+            0 => false,
+            1 => {
+                // Open boundary edge: edge belongs to only 1 face (open sheet / unclosed mesh). Always draw.
+                true
+            }
+            _ => {
+                if !is_smooth_curved {
+                    // Sólido facetado (e.g. extrusión de polígono, prisma o caja):
+                    // Todas las aristas topológicas reales se conservan, incluso si el ángulo diedro es <= 30°.
+                    // Solo se descartan diagonales coplanares idénticas (diedro 0°, n1 . n2 > 0.9999) fruto de triangulación plana.
+                    let coplanar = rec.normals.windows(2).all(|w| w[0].dot(w[1]) > 0.9999);
+                    !coplanar
+                } else {
+                    // Superficie analítica curva discretizada (cilindro / esfera):
+                    // Evaluar si es arista viva (diedro > 30° como heurística provisional) o silueta respecto a la cámara.
+                    let mut is_crease = false;
+                    let mut has_front = false;
+                    let mut has_back = false;
+
+                    // Robusto para 2 o más normales (incidencias no manifold)
+                    for i in 0..rec.normals.len() {
+                        let ni = rec.normals[i];
+                        let dot_cam = ni.dot(view_dir);
+                        // Tolerancia de 1e-5 para estados casi tangentes de cámara (grazing angles)
+                        if dot_cam > 1e-5 {
+                            has_front = true;
+                        } else if dot_cam < -1e-5 {
+                            has_back = true;
+                        }
+
+                        for j in (i + 1)..rec.normals.len() {
+                            let nj = rec.normals[j];
+                            if ni.dot(nj) < CREASE_ANGLE_DOT_HEURISTIC {
+                                is_crease = true;
+                                break;
+                            }
+                        }
+                        if is_crease {
+                            break;
+                        }
+                    }
+
+                    if is_crease {
+                        true
+                    } else if view_dir.len() > 1e-6 && has_front && has_back {
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        };
+
+        if draw_this_edge {
+            result.push((rec.p1, rec.p2));
+        }
+    }
+
+    result
+}
+
+fn draw_solid3d(
+    painter: &egui::Painter,
+    xf: &Xf,
+    s: &cadcraft_doc::Solid3d,
+    stroke: Stroke,
+    is_conceptual: bool,
+    color: Color32,
+    alpha: u8,
+    view_dir: Vec3,
+) {
+    if s.faces.is_empty() {
+        return;
+    }
+
+    // Step 1: Render filled faces when in Conceptual mode (separated from edge lines)
+    if is_conceptual {
+        let light = Vec3::new(0.5, 0.5, 0.707).normalized();
+        for f in &s.faces {
+            let c = &f.corners;
+            let is_triangle = c[2] == c[3];
+            let v1 = c[1] - c[0];
+            let v2 = c[2] - c[0];
+            let n = v1.cross(v2);
+            if n.len() <= 1e-9 {
+                continue;
+            }
+            let normal = n.normalized();
+            let diff = normal.dot(light).abs() as f32;
+            let factor = 0.4 + 0.6 * diff;
+            let r = ((f32::from(color.r()) * factor).clamp(0.0, 255.0)) as u8;
+            let g = ((f32::from(color.g()) * factor).clamp(0.0, 255.0)) as u8;
+            let b = ((f32::from(color.b()) * factor).clamp(0.0, 255.0)) as u8;
+            let fill_color = Color32::from_rgba_unmultiplied(r, g, b, alpha);
+
+            let pts: Vec<Pos2> = if is_triangle {
+                vec![xf.to_screen3(c[0]), xf.to_screen3(c[1]), xf.to_screen3(c[2])]
+            } else {
+                vec![xf.to_screen3(c[0]), xf.to_screen3(c[1]), xf.to_screen3(c[2]), xf.to_screen3(c[3])]
+            };
+            if pts.iter().all(|p| p.x.is_finite() && p.y.is_finite()) && pts.len() >= 3 {
+                let area2 = (pts[1].x - pts[0].x) * (pts[2].y - pts[0].y) - (pts[1].y - pts[0].y) * (pts[2].x - pts[0].x);
+                if area2.abs() >= 1e-2 {
+                    painter.add(Shape::convex_polygon(pts, fill_color, Stroke::NONE));
+                }
+            }
+        }
+    }
+
+    // Step 2: Render classified edges
+    let edges = classify_solid_edges(s, view_dir);
+    for (p1, p2) in edges {
+        let s1 = xf.to_screen3(p1);
+        let s2 = xf.to_screen3(p2);
+        if s1.x.is_finite() && s1.y.is_finite() && s2.x.is_finite() && s2.y.is_finite() && s1.distance(s2) >= 0.5 {
+            painter.line_segment([s1, s2], stroke);
+        }
+    }
+}
+
+pub(crate) fn build_3d_mesh(
+    session: &cadcraft_engine::Session,
+    origin: Vec3,
+    view_dir: Vec3,
+    is_conceptual: bool,
+    hover_handle: Option<cadcraft_doc::Handle>,
+) -> crate::gpu::Mesh3dData {
+    let mut m = crate::gpu::Mesh3dData::default();
+    let Ok(st) = session.state() else { return m };
+    let space = session.space();
+    let Some(store) = st.doc.space(&space) else { return m };
+    let sel = session.selection();
+    let t = Tokens::get();
+    let selection_look = Look::selection(&session.settings);
+    let preview_look = Look::preview(&session.settings);
+
+    let light = Vec3::new(0.5, 0.5, 0.707).normalized();
+
+    for e in store.iter() {
+        if !st.doc.is_visible(e) {
+            continue;
+        }
+        let is_sel = sel.contains(&e.handle);
+        let look = if is_sel {
+            selection_look
+        } else if hover_handle == Some(e.handle) {
+            Some(preview_look)
+        } else {
+            None
+        };
+        let (color_r, color_g, color_b) = if is_sel && look.is_some() {
+            (t.selection.r(), t.selection.g(), t.selection.b())
+        } else if !is_sel && look.is_some() {
+            (t.hover.r(), t.hover.g(), t.hover.b())
+        } else {
+            let layer_color = st.doc.layer(&e.common.layer).map_or(cadcraft_color::Color::WHITE, |layer| layer.color);
+            let rgb = e.common.color.resolve(layer_color, cadcraft_color::Color::WHITE);
+            (rgb.0, rgb.1, rgb.2)
+        };
+        let transparency = if session.settings.transparency_display {
+            match e.common.transparency {
+                cadcraft_doc::Transparency::Percent(p) => p.min(90),
+                cadcraft_doc::Transparency::ByLayer => {
+                    st.doc.layer(&e.common.layer).map_or(0, |l| l.transparency.min(90))
+                }
+                cadcraft_doc::Transparency::ByBlock => 0,
+            }
+        } else {
+            0
+        };
+        let alpha = (((100 - transparency as u32) * 255) / 100) as u8;
+        let edge_col = crate::gpu::premultiplied_u8([color_r, color_g, color_b], alpha);
+
+        match &e.kind {
+            cadcraft_doc::EntityKind::Face3d(f) => {
+                let c = &f.corners;
+                let is_triangle = c[2] == c[3];
+                // 1. Filled faces in Conceptual mode
+                if is_conceptual {
+                    let v1 = c[1] - c[0];
+                    let v2 = c[2] - c[0];
+                    let n = v1.cross(v2);
+                    if n.len() > 1e-9 {
+                        let normal = n.normalized();
+                        let diff = normal.dot(light).abs() as f32;
+                        let factor = 0.4 + 0.6 * diff;
+                        let r = ((f32::from(color_r) * factor).clamp(0.0, 255.0)) as u8;
+                        let g = ((f32::from(color_g) * factor).clamp(0.0, 255.0)) as u8;
+                        let b = ((f32::from(color_b) * factor).clamp(0.0, 255.0)) as u8;
+                        let fill_col = crate::gpu::premultiplied_u8([r, g, b], alpha);
+
+                        let p0 = [ (c[0].x - origin.x) as f32, (c[0].y - origin.y) as f32, (c[0].z - origin.z) as f32 ];
+                        let p1 = [ (c[1].x - origin.x) as f32, (c[1].y - origin.y) as f32, (c[1].z - origin.z) as f32 ];
+                        let p2 = [ (c[2].x - origin.x) as f32, (c[2].y - origin.y) as f32, (c[2].z - origin.z) as f32 ];
+
+                        crate::gpu::push_vertex3d(&mut m.tris, p0, fill_col);
+                        crate::gpu::push_vertex3d(&mut m.tris, p1, fill_col);
+                        crate::gpu::push_vertex3d(&mut m.tris, p2, fill_col);
+
+                        if !is_triangle {
+                            let p3 = [ (c[3].x - origin.x) as f32, (c[3].y - origin.y) as f32, (c[3].z - origin.z) as f32 ];
+                            crate::gpu::push_vertex3d(&mut m.tris, p0, fill_col);
+                            crate::gpu::push_vertex3d(&mut m.tris, p2, fill_col);
+                            crate::gpu::push_vertex3d(&mut m.tris, p3, fill_col);
+                        }
+                    }
+                }
+                // 2. Edges according to hidden_edges
+                let edge_count = if is_triangle { 3 } else { 4 };
+                for i in 0..edge_count {
+                    if f.hidden_edges & (1 << i) == 0 {
+                        let next = if is_triangle && i == 2 { 0 } else { (i + 1) % 4 };
+                        let p1 = c[i];
+                        let p2 = c[next];
+                        if p1 != p2 {
+                            let rel1 = [ (p1.x - origin.x) as f32, (p1.y - origin.y) as f32, (p1.z - origin.z) as f32 ];
+                            let rel2 = [ (p2.x - origin.x) as f32, (p2.y - origin.y) as f32, (p2.z - origin.z) as f32 ];
+                            crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                            crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
+                        }
+                    }
+                }
+            }
+            cadcraft_doc::EntityKind::Solid3d(s) => {
+                if s.faces.is_empty() {
+                    continue;
+                }
+                // 1. Filled faces in Conceptual mode
+                if is_conceptual {
+                    for f in &s.faces {
+                        let c = &f.corners;
+                        let is_triangle = c[2] == c[3];
+                        let v1 = c[1] - c[0];
+                        let v2 = c[2] - c[0];
+                        let n = v1.cross(v2);
+                        if n.len() <= 1e-9 {
+                            continue;
+                        }
+                        let normal = n.normalized();
+                        let diff = normal.dot(light).abs() as f32;
+                        let factor = 0.4 + 0.6 * diff;
+                        let r = ((f32::from(color_r) * factor).clamp(0.0, 255.0)) as u8;
+                        let g = ((f32::from(color_g) * factor).clamp(0.0, 255.0)) as u8;
+                        let b = ((f32::from(color_b) * factor).clamp(0.0, 255.0)) as u8;
+                        let fill_col = crate::gpu::premultiplied_u8([r, g, b], alpha);
+
+                        let p0 = [ (c[0].x - origin.x) as f32, (c[0].y - origin.y) as f32, (c[0].z - origin.z) as f32 ];
+                        let p1 = [ (c[1].x - origin.x) as f32, (c[1].y - origin.y) as f32, (c[1].z - origin.z) as f32 ];
+                        let p2 = [ (c[2].x - origin.x) as f32, (c[2].y - origin.y) as f32, (c[2].z - origin.z) as f32 ];
+
+                        crate::gpu::push_vertex3d(&mut m.tris, p0, fill_col);
+                        crate::gpu::push_vertex3d(&mut m.tris, p1, fill_col);
+                        crate::gpu::push_vertex3d(&mut m.tris, p2, fill_col);
+
+                        if !is_triangle {
+                            let p3 = [ (c[3].x - origin.x) as f32, (c[3].y - origin.y) as f32, (c[3].z - origin.z) as f32 ];
+                            crate::gpu::push_vertex3d(&mut m.tris, p0, fill_col);
+                            crate::gpu::push_vertex3d(&mut m.tris, p2, fill_col);
+                            crate::gpu::push_vertex3d(&mut m.tris, p3, fill_col);
+                        }
+                    }
+                }
+                // 2. Classified edges
+                let edges = classify_solid_edges(s, view_dir);
+                for (p1, p2) in edges {
+                    let rel1 = [ (p1.x - origin.x) as f32, (p1.y - origin.y) as f32, (p1.z - origin.z) as f32 ];
+                    let rel2 = [ (p2.x - origin.x) as f32, (p2.y - origin.y) as f32, (p2.z - origin.z) as f32 ];
+                    crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                    crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
+                }
+            }
+            cadcraft_doc::EntityKind::Line(l) if l.a.z != 0.0 || l.b.z != 0.0 => {
+                let rel1 = [ (l.a.x - origin.x) as f32, (l.a.y - origin.y) as f32, (l.a.z - origin.z) as f32 ];
+                let rel2 = [ (l.b.x - origin.x) as f32, (l.b.y - origin.y) as f32, (l.b.z - origin.z) as f32 ];
+                crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
+            }
+            cadcraft_doc::EntityKind::Circle(c)
+                if c.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
+            {
+                let pts3 = c.sample_points_3d(e.common.extrusion, 64);
+                for seg in pts3.windows(2) {
+                    let rel1 = [ (seg[0].x - origin.x) as f32, (seg[0].y - origin.y) as f32, (seg[0].z - origin.z) as f32 ];
+                    let rel2 = [ (seg[1].x - origin.x) as f32, (seg[1].y - origin.y) as f32, (seg[1].z - origin.z) as f32 ];
+                    crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                    crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
+                }
+                if let (Some(first), Some(last)) = (pts3.first(), pts3.last()) {
+                    let rel1 = [ (last.x - origin.x) as f32, (last.y - origin.y) as f32, (last.z - origin.z) as f32 ];
+                    let rel2 = [ (first.x - origin.x) as f32, (first.y - origin.y) as f32, (first.z - origin.z) as f32 ];
+                    crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                    crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
+                }
+            }
+            cadcraft_doc::EntityKind::Arc(arc) if arc.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) => {
+                let points = arc.sample_points_3d(e.common.extrusion, 64);
+                push_3d_polyline(&mut m.lines, origin, &points, edge_col);
+            }
+            cadcraft_doc::EntityKind::LwPolyline(pl)
+                if pl.elevation.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
+            {
+                let pts3 = spatial_lwpolyline_path(pl, e.common.extrusion, session.pixel_size());
+                push_3d_polyline(&mut m.lines, origin, &pts3, edge_col);
+            }
+            cadcraft_doc::EntityKind::Polyline3d(pl) if pl.is_spatial() => {
+                push_3d_polyline(&mut m.lines, origin, &pl.path_3d(), edge_col);
+            }
+            cadcraft_doc::EntityKind::Text(text)
+                if text.insert.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6) =>
+            {
+                let strokes = cadcraft_render::text_strokes_3d(&st.doc, text, e.common.extrusion);
+                for s in strokes {
+                    for seg in s.windows(2) {
+                        let rel1 = [ (seg[0].x - origin.x) as f32, (seg[0].y - origin.y) as f32, (seg[0].z - origin.z) as f32 ];
+                        let rel2 = [ (seg[1].x - origin.x) as f32, (seg[1].y - origin.y) as f32, (seg[1].z - origin.z) as f32 ];
+                        crate::gpu::push_vertex3d(&mut m.lines, rel1, edge_col);
+                        crate::gpu::push_vertex3d(&mut m.lines, rel2, edge_col);
                     }
                 }
             }
             _ => {}
         }
     }
+
+    m
+}
+
+pub(crate) fn draw_spatial_gpu(
+    c: &mut CanvasState,
+    session: &cadcraft_engine::Session,
+    painter: &egui::Painter,
+    xf: &Xf,
+) {
+    let cam = session.camera();
+    let is_conceptual = session.settings.vscurrent.eq_ignore_ascii_case("conceptual");
+    let target = cam.target;
+    let right = cam.right_dir();
+    let up = cam.up_dir();
+    let view_dir = cam.view_dir();
+    let center = xf.rect.center();
+
+    let space = session.space();
+    let view_key = (
+        cam.azimuth.to_bits(),
+        cam.elevation.to_bits(),
+        target.x.to_bits(),
+        target.y.to_bits(),
+        target.z.to_bits(),
+        xf.scale.to_bits(),
+        is_conceptual,
+        session.settings.transparency_display,
+    );
+
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (c.list_gen, view_key, c.hover).hash(&mut h);
+        h.finish()
+    };
+
+    let origin = target;
+
+    if c.spatial3d_key != Some(key) {
+        let mesh = build_3d_mesh(session, origin, view_dir, is_conceptual, c.hover);
+        if let Ok(mut slot) = c.spatial3d_slot.lock() {
+            *slot = Some(mesh);
+        }
+        c.spatial3d_key = Some(key);
+        c.spatial3d_origin = origin;
+    }
+
+    let depth_range = {
+        let extents_span = session.state().map(|st| {
+            let bb = st.doc.extents(&space);
+            (bb.max - bb.min).len()
+        }).unwrap_or(1000.0);
+        let view_span = (xf.rect.width().max(xf.rect.height()) as f64 / xf.scale.max(1e-6)) * 4.0;
+        extents_span.max(view_span).max(2000.0) as f32
+    };
+
+    painter.add(egui_wgpu::Callback::new_paint_callback(
+        xf.rect,
+        crate::gpu::Spatial3dCallback {
+            key,
+            slot: c.spatial3d_slot.clone(),
+            target: [target.x as f32, target.y as f32, target.z as f32],
+            right: [right.x as f32, right.y as f32, right.z as f32],
+            up: [up.x as f32, up.y as f32, up.z as f32],
+            view_dir: [view_dir.x as f32, view_dir.y as f32, view_dir.z as f32],
+            scale: xf.scale as f32,
+            center: [center.x, center.y],
+            origin: [origin.x as f32, origin.y as f32, origin.z as f32],
+            depth_range,
+        },
+    ));
 }
 
 fn clip_infinite(xf: &Xf, base: Vec2, dir: Vec2, ray: bool) -> Option<[Pos2; 2]> {
@@ -1994,14 +2663,39 @@ fn effective_point(app: &mut CadApp, raw: Vec2, xf: &Xf, ctx: &egui::Context) ->
     let (now, shift) = ctx.input(|i| (i.time, i.modifiers.shift));
     let q =
         snap::tracking::CursorQuery { base, deferred, corner, aperture: app.session.settings.aperture / xf.scale, tol: 6.0 / xf.scale, now, shift };
-    let non_xy_line = app.session.running.as_ref().is_some_and(|r| r.id == "line") && app.session.drawing_plane() != cadcraft_geom::DrawingPlane::XY;
-    let r = if non_xy_line { app.session.snap_cursor_without_object_snaps(raw, &q) } else { app.session.snap_cursor(raw, &q) };
+    let line = app.session.running.as_ref().is_some_and(|r| r.id == "line");
+    let r = if line && app.session.drawing_plane() != cadcraft_geom::DrawingPlane::XY {
+        app.session.snap_cursor_without_object_snaps(raw, &q)
+    } else if line && prompt.is_some_and(|p| p.base3.is_some()) {
+        app.session.snap_cursor_without_apparent_intersection(raw, &q)
+    } else {
+        app.session.snap_cursor(raw, &q)
+    };
     if r.wait {
         ctx.request_repaint_after(std::time::Duration::from_secs_f64(snap::tracking::DWELL / 4.0));
     }
     app.canvas.snap = r.snap;
     app.canvas.track = r.track;
     r.point
+}
+
+fn submit_canvas_point(app: &mut CadApp, point: Vec3) -> cadcraft_engine::Result<()> {
+    if let Some(hit) = app.canvas.snap {
+        return app.session.input_snapped(hit);
+    }
+    if app.session.snap_override() == Some(snap::mode::APP)
+        && app.session.running.as_ref().is_some_and(|r| r.id == "line")
+        && app.session.current_prompt().is_some_and(|p| p.base3.is_some() && !p.global_xy_zero)
+    {
+        app.session.echo("No Apparent Intersection found for specified point.");
+        return Ok(());
+    }
+    if point.is_finite() {
+        app.session.input(Input::Point3(point))
+    } else {
+        app.session.echo("Point coordinates must be finite.");
+        Ok(())
+    }
 }
 
 fn store_cursor_resolution(app: &mut CadApp, point: Option<(Vec2, Vec3)>) {
@@ -2013,6 +2707,7 @@ fn store_cursor_resolution(app: &mut CadApp, point: Option<(Vec2, Vec3)>) {
         app.session.cursor3 = cursor3;
         app.session.cursor3_valid = true;
         app.session.cursor3_base = app.session.current_prompt().and_then(|p| p.base3);
+        app.session.cursor3_snapped = app.canvas.snap.is_some_and(|hit| hit.point3.is_some());
         app.session.cursor_deferred = app.canvas.snap.and_then(|hit| hit.deferred);
         app.canvas.parallel_plane_warning = false;
     } else {
@@ -2179,8 +2874,8 @@ fn soft_axis_track(
 ///    continuation height of previous vertex for subsequent points).
 ///
 /// A parallel free-plane ray has no point: it clears the cursor and cannot confirm a click.
-/// Explicit 3D endpoint snaps remain WCS points; ordinary 2D snap coordinates are embedded in
-/// the active plane by LINE's `Input::Point` contract.
+/// At a LINE continuation APP tests the resulting drafting ray after existing object snaps.
+/// Spatial snaps remain WCS points. LINE embeds ordinary 2D snaps in the active plane.
 fn resolve_effective_point(
     app: &mut CadApp,
     hp: Pos2,
@@ -2189,18 +2884,76 @@ fn resolve_effective_point(
     prompt_base: Option<Vec2>,
     dyn_frame: Option<crate::dyninput::Frame>,
 ) -> Option<(Vec2, Vec3)> {
-    let raw_world = xf.to_world(hp);
+    let result = resolve_point_before_apparent_snap(app, hp, xf, ctx, prompt_base, dyn_frame)?;
+    if let Some(plane) = app.session.current_prompt().and_then(|prompt| prompt.point_plane) {
+        let point = plane.to_world2(plane.to_local(result.1).xy());
+        return point.is_finite().then_some((result.0, point));
+    }
+    let over = app.session.snap_override();
+    let osmode = over.unwrap_or(app.session.settings.osmode);
+    if osmode & snap::mode::APP == 0
+        || osmode & snap::mode::OFF != 0
+        || app.canvas.snap.is_some()
+        || app.session.pending_window.is_some()
+        || !app.session.running.as_ref().is_some_and(|r| r.id == "line")
+        || (!app.session.point_mods.is_empty() && over != Some(snap::mode::APP))
+        || dyn_frame.and_then(|f| crate::dyninput::parse(&app.cmd.buffer, &f)).is_some_and(|e| e.first_locked().is_some())
+    {
+        return Some(result);
+    }
+    let Some(base) = app.session.current_prompt().filter(|p| !p.global_xy_zero).and_then(|p| p.base3) else { return Some(result) };
+    let Some(camera) = xf.camera.as_ref() else { return Some(result) };
+    let delta = hp - xf.rect.center();
+    let cursor = Vec2::new(f64::from(delta.x) / xf.scale, -f64::from(delta.y) / xf.scale);
+    let Ok(st) = app.session.state() else { return Some(result) };
+    let Some(hit) = snap::projected_apparent_line_intersection(
+        &st.doc,
+        &st.edit_space(),
+        camera,
+        cursor,
+        app.session.settings.aperture / xf.scale,
+        base,
+        result.1,
+    ) else {
+        return Some(result);
+    };
+    let Some(point) = hit.point3 else { return Some(result) };
+    let ucs = app.session.ucs();
+    let point2 = if ucs.is_world() { app.session.drawing_plane().coordinates(point) } else { ucs.to_local(point).xy() };
+    app.canvas.snap = Some(hit);
+    app.canvas.track = None;
+    Some((point2, point))
+}
+
+fn resolve_point_before_apparent_snap(
+    app: &mut CadApp,
+    hp: Pos2,
+    xf: &Xf,
+    ctx: &egui::Context,
+    prompt_base: Option<Vec2>,
+    dyn_frame: Option<crate::dyninput::Frame>,
+) -> Option<(Vec2, Vec3)> {
+    let is_ucs_cmd = app.session.running.as_ref().is_some_and(|r| r.id.starts_with("ucs"));
+    let cam = app.session.camera();
+    let raw_world = if is_ucs_cmd {
+        let c = xf.rect.center();
+        let q = Vec2::new(f64::from(hp.x - c.x) / xf.scale, -f64::from(hp.y - c.y) / xf.scale);
+        cam.unproject_to_plane(q)
+    } else {
+        xf.to_world(hp)
+    };
     let c = xf.rect.center();
     let q = Vec2::new(f64::from(hp.x - c.x) / xf.scale, -f64::from(hp.y - c.y) / xf.scale);
-    let cam = app.session.camera();
     let aperture = app.session.settings.aperture;
     let base_osmode = app.session.settings.osmode;
     let zlock = app.session.settings.zlock;
     let orthomode = app.session.settings.orthomode;
-    let prompt_base3 = app.session.current_prompt().as_ref().and_then(|p| p.base3);
+    let prompt = app.session.current_prompt();
+    let spatial = prompt.as_ref().is_some_and(|p| p.spatial_point);
+    let prompt_base3 = prompt.as_ref().and_then(|p| p.base3);
     let base3 = prompt_base3.unwrap_or(app.session.last_point3);
     let was_z_zero = app.canvas.axis_track_z_zero;
-    let line_prompt = app.session.running.as_ref().is_some_and(|r| matches!(r.id.as_str(), "line" | "ucs" | "ucs.3point"));
+    let line_prompt = is_ucs_cmd || app.session.running.as_ref().is_some_and(|r| r.id == "line");
     let z0_mode = app.session.current_prompt().is_some_and(|p| p.global_xy_zero);
     if line_prompt && z0_mode {
         return resolve_global_z0_point(app, hp, xf, dyn_frame);
@@ -2215,17 +2968,48 @@ fn resolve_effective_point(
         && is_near_plan_or_oblique;
     let plane = if is_auto_oblique_line { cadcraft_geom::DrawingPlane::XY } else { app.session.drawing_plane() };
     let continuation_offset = if is_auto_oblique_line { 0.0 } else { app.session.drawing_plane_offset_for(prompt_base3) };
-    let (plane_point, raw2) = if !is_world_ucs {
-        let ucs_pt3 = cam.unproject_to_ucs(q, &ucs);
-        let r2 = ucs_pt3.map_or(raw_world, |p| ucs.to_local(p).xy());
+    let fixed_plane = prompt.and_then(|prompt| prompt.point_plane);
+    let shifted_ucs = if spatial && !is_world_ucs && !app.session.drawing_plane_offset_is_manual() {
+        prompt_base3.map(|base| cadcraft_geom::UcsFrame {
+            origin: ucs.origin + ucs.z_axis * ucs.to_local(base).z,
+            ..ucs
+        })
+    } else {
+        None
+    };
+    let (plane_point, raw2) = if let Some(fixed) = fixed_plane {
+        let point = cam.unproject_to_ucs(q, &fixed);
+        (point, point.map_or(raw_world, |point| ucs.to_local(point).xy()))
+    } else if !is_world_ucs {
+        let ucs_pt3 = cam.unproject_to_ucs(q, &shifted_ucs.unwrap_or(ucs));
+        let r2 = ucs_pt3.map_or(raw_world, |p| if spatial { p.xy() } else { ucs.to_local(p).xy() });
         (ucs_pt3, r2)
     } else {
-        let pp = xf.to_world3_with_offset(hp, plane, continuation_offset);
-        let r2 = if line_prompt { pp.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
+        let pp = if is_ucs_cmd {
+            cam.unproject_to_plane_with_offset(q, plane, continuation_offset)
+        } else {
+            xf.to_world3_with_offset(hp, plane, continuation_offset)
+        };
+        let r2 = if spatial { pp.map_or(raw_world, Vec3::xy) }
+            else if line_prompt { pp.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
         (pp, r2)
     };
     let prompt_point = |p: Vec2| {
-        if !is_world_ucs {
+        if spatial && let Some(origin) = plane_point {
+            let normal = if is_world_ucs {
+                match plane {
+                    cadcraft_geom::DrawingPlane::XY => Vec3::Z,
+                    cadcraft_geom::DrawingPlane::XZ => Vec3::Y,
+                    cadcraft_geom::DrawingPlane::YZ => Vec3::X,
+                }
+            } else { ucs.z_axis };
+            let flat = p.to3(origin.z);
+            if normal.z.abs() > 1e-9 {
+                flat - Vec3::Z * ((flat - origin).dot(normal) / normal.z)
+            } else {
+                flat - normal * (flat - origin).dot(normal)
+            }
+        } else if !is_world_ucs {
             ucs.to_world2(p)
         } else if prompt_base.is_some() && !line_prompt {
             Vec3::new(p.x, p.y, base3.z)
@@ -2240,12 +3024,12 @@ fn resolve_effective_point(
         && e.first_locked().is_some()
     {
         let dyn_continuation_offset = app.session.drawing_plane_offset_for(prompt_base3);
-        let dyn_plane_point = xf.to_world3_with_offset(hp, plane, dyn_continuation_offset);
-        if line_prompt && dyn_plane_point.is_none() && !(app.cmd.second_locked() && e.second_value().is_some()) {
+        let dyn_plane_point = if spatial || fixed_plane.is_some() { plane_point } else { xf.to_world3_with_offset(hp, plane, dyn_continuation_offset) };
+        if (spatial || line_prompt) && dyn_plane_point.is_none() && !(app.cmd.second_locked() && e.second_value().is_some()) {
             app.canvas.parallel_plane_warning = true;
             return None;
         }
-        let dyn_raw2 = if line_prompt { dyn_plane_point.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
+        let dyn_raw2 = if spatial || fixed_plane.is_some() { raw2 } else if line_prompt { dyn_plane_point.map_or(raw_world, |p| plane.coordinates(p)) } else { raw_world };
         let eff = crate::dyninput::constrain(&e, &f, dyn_raw2, app.cmd.second_locked());
         app.canvas.snap = None;
         app.canvas.track = None;
@@ -2257,10 +3041,14 @@ fn resolve_effective_point(
             let base = if e.prefix == "@" || f.relative() { prompt_base3.unwrap_or(Vec3::ZERO) } else { Vec3::ZERO };
             let p_unrel = Vec3::new(eff.x, eff.y, z);
             base + p_unrel
+        } else if spatial {
+            prompt_point(eff)
+        } else if fixed_plane.is_some() {
+            ucs.to_world2(eff)
         } else {
             plane.embed(eff, dyn_continuation_offset)
         };
-        return Some((eff, dyn_p3));
+        return Some((if spatial { dyn_p3.xy() } else { eff }, dyn_p3));
     }
     let grip_held = crate::grip_dyn::constrain(app, raw2);
     if let Some(q_grip) = grip_held {
@@ -2268,7 +3056,8 @@ fn resolve_effective_point(
         app.canvas.track = None;
         app.canvas.active_axis_3d = None;
         app.canvas.axis_track_z_zero = false;
-        return Some((q_grip, prompt_point(q_grip)));
+        let p = prompt_point(q_grip);
+        return Some((if spatial { p.xy() } else { q_grip }, p));
     }
 
     // Priority 2: 3D Object Snap (when in 3D camera view)
@@ -2288,7 +3077,7 @@ fn resolve_effective_point(
             && let Some(hit3d) = snap::snap_3d_endpoints(&st.doc, &st.edit_space(), &cam, q, ap_cam, osmode & snap_modes_3d, cycle_idx)
         {
             let p3 = hit3d.point3.unwrap_or_else(|| Vec3::new(hit3d.point.x, hit3d.point.y, 0.0));
-            let at2 = if !is_world_ucs {
+            let at2 = if spatial { p3.xy() } else if !is_world_ucs {
                 ucs.to_local(p3).xy()
             } else if line_prompt {
                 plane.coordinates(p3)
@@ -2330,13 +3119,13 @@ fn resolve_effective_point(
         app.canvas.parallel_plane_warning = false;
         let eff3 = if let Some(hit) = app.canvas.snap
             && let Some(p3) = hit.point3
-            && line_prompt
+            && (spatial || line_prompt || fixed_plane.is_some())
         {
-            return Some((plane.coordinates(p3), p3));
+            return Some((if spatial { p3.xy() } else if line_prompt { plane.coordinates(p3) } else { ucs.to_local(p3).xy() }, p3));
         } else {
             prompt_point(eff)
         };
-        return Some((eff, eff3));
+        return Some((if spatial { eff3.xy() } else { eff }, eff3));
     }
 
     // Priority 3: 3D Axis Snapping (ORTHO 3D) or legacy Z-LOCK
@@ -2417,7 +3206,7 @@ fn resolve_effective_point(
     match plane_point {
         Some(p3) => {
             app.canvas.parallel_plane_warning = false;
-            let pt2 = if !is_world_ucs {
+            let pt2 = if spatial { p3.xy() } else if !is_world_ucs {
                 ucs.to_local(p3).xy()
             } else if line_prompt {
                 plane.coordinates(p3)
@@ -2512,12 +3301,13 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // counts the canvas. Over those the OS cursor stays visible and the crosshair stays put, as
     // over the menu bar (#1701).
     let any_popup_open = egui::Popup::is_any_open(ui.ctx());
+    let popup_blocked = any_popup_open || app.canvas.popup_open;
     app.canvas.popup_open = any_popup_open;
     let contains = hover_pos.is_some_and(|p| rect.contains(p));
     let layer_ok = hover_pos.is_some_and(|p| ui.ctx().layer_id_at(p) == Some(ui.layer_id()));
     let hovered = resp.hovered();
     let viewcube_blocked = hover_pos.is_some_and(|p| crate::viewcube::Layout::blocks_canvas_pointer(rect, p));
-    let inside = !any_popup_open && contains && layer_ok && hovered && !viewcube_blocked;
+    let inside = !popup_blocked && contains && layer_ok && hovered && !viewcube_blocked;
     crate::debug_cursor::trace_inside(ui.ctx(), inside, hover_pos, rect, any_popup_open, contains, layer_ok, hovered, viewcube_blocked);
     if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         crate::debug_cursor::trace_escape(ui.ctx(), "canvas::selection_window", "Escape clears selection/drag window");
@@ -2563,48 +3353,265 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             }
         }
     }
-    // Whether Ctrl is held right now. Written every frame (not just while a command prompts), so
-    // previews that read `Session::ctrl_down` always see the current state. The engine
+    // Whether Ctrl/Shift is held right now. Written every frame (not just while a command prompts), so
+    // previews that read `Session::ctrl_down` / `Session::shift_down` always see the current state. The engine
     // deliberately does not carry modifiers through `Input`, which is UI-agnostic (see PR
     // #407's Limits note: modifiers used to be dropped on the floor at this point).
-    app.session.ctrl_down = mods.ctrl;
-    // Which device is scrolling? On macOS, trackpads (and Magic Mouse) report precise point
-    // deltas; notched mouse wheels report lines. The answer is sticky because egui spreads a wheel
-    // notch over several frames. Elsewhere (browsers, Wayland smooth-scroll mice) ordinary wheels
-    // also report points, so the wheel keeps zooming there.
-    ui.input(|i| {
+    let has_focus = ui.ctx().input(|i| i.focused);
+    app.session.ctrl_down = has_focus && mods.ctrl;
+    app.session.shift_down = has_focus && mods.shift;
+    // Which device is scrolling? Under Auto, precise point deltas (trackpad on Wayland/macOS/Windows)
+    // pan and pinch zooms; line deltas (mouse wheels) zoom. Under explicit Trackpad/Mouse profiles,
+    // the user's preference decides unconditionally.
+    match app.options.nav_device {
+        crate::options::NavDevice::Trackpad => app.canvas.scroll_pans = true,
+        crate::options::NavDevice::Mouse => app.canvas.scroll_pans = false,
+        crate::options::NavDevice::Auto => {}
+    }
+    let (touch_started, touch_ended, wheel_shift, wheel_ctrl, raw_scroll, scroll_unit_opt, had_wheel, pointer_motion_count) = ui.input(|i| {
+        let (mut started, mut ended, mut w_shift, mut w_ctrl) = (false, false, false, false);
+        let mut raw_sc = egui::Vec2::ZERO;
+        let mut last_unit = None;
+        let mut had_w = false;
+        let mut ptr_moves = 0;
         for e in &i.raw.events {
-            if let egui::Event::MouseWheel { unit, .. } = e {
-                app.canvas.scroll_pans = cfg!(target_os = "macos") && *unit == egui::MouseWheelUnit::Point;
+            match e {
+                egui::Event::PointerMoved(_) => ptr_moves += 1,
+                egui::Event::MouseWheel { unit, delta, phase, modifiers } => {
+                    had_w = true;
+                    last_unit = Some(*unit);
+                    if modifiers.shift {
+                        w_shift = true;
+                    }
+                    if modifiers.ctrl || modifiers.command {
+                        w_ctrl = true;
+                    }
+                    raw_sc += *delta;
+                    match phase {
+                        egui::TouchPhase::Start => started = true,
+                        egui::TouchPhase::End | egui::TouchPhase::Cancel => ended = true,
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         }
+        (started, ended, w_shift, w_ctrl, raw_sc, last_unit, had_w, ptr_moves)
     });
-    if inside && app.canvas.scroll_pans && scroll != egui::Vec2::ZERO {
-        // Two-finger swipe pans: the drawing follows the fingers, like a middle-drag.
-        // Pinch (and Cmd+scroll) still zoom via `zoom_delta` below.
-        let _ = app.session.pan_step(f64::from(scroll.x), f64::from(scroll.y), scale);
+    let has_raw_wheel = raw_scroll != egui::Vec2::ZERO;
+    let trackpad_delta = if has_raw_wheel { raw_scroll } else { scroll };
+    let is_shift = mods.shift || wheel_shift;
+    let is_ctrl = mods.ctrl || mods.command || wheel_ctrl;
+
+    // Pointer diagnostics before gesture starts
+    if pointer_motion_count > 0 {
+        app.canvas.pointer_motion_count_before_gesture += pointer_motion_count;
+        app.canvas.last_pointer_move_time = Some(std::time::Instant::now());
     }
+
+    if app.options.nav_device == crate::options::NavDevice::Auto && had_wheel {
+        // Under Auto:
+        // 1) Point deltas (Wayland/macOS/Windows trackpad) pan/orbit.
+        // 2) Any touch lifecycle phase (Start/End/Cancel) identifies a touch surface.
+        // 3) Simultaneous 2-axis deltas identify a 2D trackpad swipe.
+        // 4) When Shift is held, notched mouse wheels don't zoom in CAD anyway;
+        //    treating Shift+scroll as orbit ensures 3D orbit works seamlessly across all backends.
+        // 5) When Ctrl is held on trackpad, it triggers trackpad zoom.
+        app.canvas.scroll_pans = scroll_unit_opt == Some(egui::MouseWheelUnit::Point)
+            || touch_started
+            || touch_ended
+            || (raw_scroll.x.abs() > 0.01 && raw_scroll.y.abs() > 0.01)
+            || is_shift
+            || (is_ctrl && (touch_started || touch_ended || scroll_unit_opt == Some(egui::MouseWheelUnit::Point)));
+    }
+
+    if touch_ended {
+        // If fingers lifted while panning (not orbiting), mark trailing inertia as pan
+        app.canvas.pan_inertia = !app.canvas.orbit_gesture_active;
+        app.canvas.orbit_gesture_active = false;
+    } else if touch_started || !has_raw_wheel {
+        app.canvas.pan_inertia = false;
+    }
+    if trackpad_delta == egui::Vec2::ZERO {
+        app.canvas.orbit_gesture_active = false;
+    }
+
     let opts = ui.ctx().options(|o| o.input_options);
+    // Native pinch detection: strictly real pinch (Touch/Zoom events), not egui's Ctrl+wheel synthesis
+    let zoom_pinch = ui.input(|i| {
+        if let Some(touch) = i.multi_touch() {
+            return touch.zoom_delta;
+        }
+        let pinch: f32 = i
+            .raw
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::Zoom(factor) => Some(*factor),
+                _ => None,
+            })
+            .product();
+        if pinch.is_finite() && pinch > 0.0 { pinch } else { 1.0 }
+    });
+    let is_pinching = (zoom_pinch - 1.0).abs() > 1e-4;
+
+    let mut chosen_action = "none";
+    let mut action_reason = "idle";
+
+    // Diagnostic logging for Pinch start / progress / end
+    if is_pinching {
+        if !app.canvas.pinch_diag_active {
+            app.canvas.pinch_diag_active = true;
+            let now = std::time::Instant::now();
+            app.canvas.pinch_diag_start = Some(now);
+            let time_since_pointer_ms = app.canvas.last_pointer_move_time
+                .map(|t| now.duration_since(t).as_millis())
+                .unwrap_or(0);
+            let msg = format!(
+                "[PINCH_DIAG] START | dt_since_last_ptr_move={}ms ptr_events_before={} inside={} on_menu={}",
+                time_since_pointer_ms,
+                app.canvas.pointer_motion_count_before_gesture,
+                inside,
+                on_menu
+            );
+            log::info!(target: "cadcraft_ui_egui::pinch", "{msg}");
+            if std::env::var_os("CADCRAFT_NAV_DEBUG").is_some() || std::env::var_os("CADCRAFT_DEBUG").is_some() {
+                eprintln!("{msg}");
+            }
+            app.canvas.pointer_motion_count_before_gesture = 0;
+        }
+    } else if app.canvas.pinch_diag_active {
+        app.canvas.pinch_diag_active = false;
+        let duration_ms = app.canvas.pinch_diag_start
+            .map(|t| std::time::Instant::now().duration_since(t).as_millis())
+            .unwrap_or(0);
+        let msg = format!("[PINCH_DIAG] END | duration={}ms", duration_ms);
+        log::info!(target: "cadcraft_ui_egui::pinch", "{msg}");
+        if std::env::var_os("CADCRAFT_NAV_DEBUG").is_some() || std::env::var_os("CADCRAFT_DEBUG").is_some() {
+            eprintln!("{msg}");
+        }
+    }
+
+    if is_pinching {
+        if inside && !on_menu {
+            if let Some(hp) = hover_pos {
+                let c = rect.center();
+                let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
+                let _ = app.session.zoom_about_camera(f64::from(zoom_pinch), q);
+                chosen_action = "zoom";
+                action_reason = "pinch_gesture";
+            }
+        } else {
+            chosen_action = "ignored";
+            action_reason = if !inside { "pinch_outside_canvas" } else { "pinch_blocked_on_menu" };
+        }
+    } else if app.canvas.scroll_pans && trackpad_delta != egui::Vec2::ZERO {
+        if inside && !on_menu {
+            // Priority arbitration when both Ctrl and Shift are held:
+            // Shift takes precedence for 3D Orbit so an accidental Ctrl doesn't block orbit.
+            // When Ctrl alone is held (without Shift): reliable trackpad 2-finger zoom anchored at cursor.
+            if is_shift {
+                let can_orbit = !app.canvas.pan_inertia;
+                let is_orbit = app.canvas.orbit_gesture_active || can_orbit;
+                if is_orbit {
+                    if !app.canvas.orbit_gesture_active {
+                        app.session.begin_orbit();
+                        app.canvas.orbit_gesture_active = true;
+                    }
+                    let _ = app.session.orbit_step(f64::from(trackpad_delta.x), f64::from(trackpad_delta.y));
+                    chosen_action = "orbit";
+                    action_reason = if mods.shift { "shift_key_orbit" } else { "wheel_shift_orbit" };
+                }
+            } else if is_ctrl {
+                // Ctrl + 2-finger scroll = continuous smooth zoom anchored at cursor.
+                // Releasing Ctrl mid-gesture seamlessly drops back to panning without jumps.
+                app.canvas.orbit_gesture_active = false;
+                if let Some(hp) = hover_pos {
+                    let factor = (-f64::from(trackpad_delta.y) * 0.005).exp();
+                    let c = rect.center();
+                    let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
+                    let _ = app.session.zoom_about_camera(factor, q);
+                    chosen_action = "zoom";
+                    action_reason = "ctrl_trackpad_scroll_zoom";
+                }
+            } else {
+                if app.canvas.orbit_gesture_active {
+                    // If user releases Shift mid-gesture, smoothly switch back to pan without residual orbit
+                    app.canvas.orbit_gesture_active = false;
+                }
+                let _ = app.session.pan_step(f64::from(trackpad_delta.x), f64::from(trackpad_delta.y), scale);
+                chosen_action = "pan";
+                action_reason = match app.options.nav_device {
+                    crate::options::NavDevice::Trackpad => "nav_device_trackpad_pan",
+                    crate::options::NavDevice::Auto if scroll_unit_opt == Some(egui::MouseWheelUnit::Point) => "auto_point_unit_pan",
+                    crate::options::NavDevice::Auto if touch_started || touch_ended => "auto_touch_phase_pan",
+                    crate::options::NavDevice::Auto if raw_scroll.x.abs() > 0.01 && raw_scroll.y.abs() > 0.01 => "auto_2axis_delta_pan",
+                    _ => "scroll_pans_fallback",
+                };
+            }
+        } else {
+            chosen_action = "ignored";
+            action_reason = if !inside { "scroll_outside_canvas" } else { "scroll_blocked_on_menu" };
+        }
+    } else if trackpad_delta == egui::Vec2::ZERO || is_pinching {
+        app.canvas.orbit_gesture_active = false;
+    }
+
     let wheel = ui.input(|i| wheel_zoom_points(&i.raw.events, &opts, rect.height()));
-    if inside
+    if chosen_action == "none"
         && !app.canvas.scroll_pans
         && wheel != 0.0
-        && let Some(hp) = hover_pos
     {
-        // Zoom with the mouse wheel about the cursor, each notch at once.
-        let f = app.session.wheel_zoom_factor(f64::from(wheel));
-        let c = rect.center();
-        let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
-        let _ = app.session.zoom_about_camera(f, q);
+        if inside && !on_menu {
+            if let Some(hp) = hover_pos {
+                // Zoom with the mouse wheel about the cursor, each notch at once.
+                let f = app.session.wheel_zoom_factor(f64::from(wheel));
+                let c = rect.center();
+                let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
+                let _ = app.session.zoom_about_camera(f, q);
+                chosen_action = "zoom";
+                action_reason = "mouse_wheel_notch";
+            }
+        } else {
+            chosen_action = "ignored";
+            action_reason = if !inside { "wheel_outside_canvas" } else { "wheel_blocked_on_menu" };
+        }
     }
-    let zoom_pinch = ui.input(|i| crate::animation::zoom_delta(i, &opts, app.shows_animations()));
-    if inside
-        && (zoom_pinch - 1.0).abs() > 1e-4
-        && let Some(hp) = hover_pos
-    {
-        let c = rect.center();
-        let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
-        let _ = app.session.zoom_about_camera(f64::from(zoom_pinch), q);
+
+    // Concise per-gesture diagnostic logging (actionable, deduplicated, throttle-capped)
+    if had_wheel || is_pinching {
+        let backend = if uses_x11_backend() { "x11" } else { "wayland" };
+        let dev_str = app.options.nav_device.as_str();
+        let ev_str = if is_pinching { "Pinch" } else { "MouseWheel" };
+        let unit_str = match scroll_unit_opt {
+            Some(egui::MouseWheelUnit::Point) => "Point",
+            Some(egui::MouseWheelUnit::Line) => "Line",
+            Some(egui::MouseWheelUnit::Page) => "Page",
+            None => "None",
+        };
+        let delta = if is_pinching { egui::vec2(zoom_pinch, 0.0) } else { trackpad_delta };
+        let cam = app.session.camera();
+
+        let now = std::time::Instant::now();
+        let should_log = touch_started
+            || touch_ended
+            || app.canvas.last_diag_action != Some(chosen_action)
+            || app.canvas.last_diag_time.map_or(true, |t| now.duration_since(t).as_millis() >= 250);
+
+        if should_log {
+            app.canvas.last_diag_time = Some(now);
+            app.canvas.last_diag_action = Some(chosen_action);
+            let msg = format!(
+                "[NAV_DIAG] backend={backend} dev={dev_str} ev={ev_str} unit={unit_str} delta=({:.1},{:.1}) shift={is_shift} ctrl={is_ctrl} inside={inside} on_menu={on_menu} action={chosen_action} reason=\"{action_reason}\" target=[{:.2},{:.2},{:.2}] az={:.1}° el={:.1}° h={:.1}",
+                delta.x, delta.y,
+                cam.target.x, cam.target.y, cam.target.z,
+                cam.azimuth.to_degrees(), cam.elevation.to_degrees(), cam.height
+            );
+            log::info!(target: "cadcraft_ui_egui::nav", "{msg}");
+            if std::env::var_os("CADCRAFT_NAV_DEBUG").is_some() || std::env::var_os("CADCRAFT_DEBUG").is_some() {
+                eprintln!("{msg}");
+            }
+        }
     }
     let escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
     if escape_pressed {
@@ -2736,7 +3743,10 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     let (view, camera) = app
         .session
         .state()
-        .map(|s| (s.view(), if matches!(s.space, cadcraft_doc::Space::Paper(_)) && s.mspace.is_none() { None } else { Some(app.session.camera()) }))
+        .map(|s| {
+            let cam = app.session.preview_camera().unwrap_or_else(|| app.session.camera());
+            (s.view(), if matches!(s.space, cadcraft_doc::Space::Paper(_)) && s.mspace.is_none() { None } else { Some(cam) })
+        })
         .unwrap_or((view, camera));
     let scale = f64::from(rect.height()) / view.height.max(1e-12);
     let xf = Xf { rect, center: view.center, scale, camera };
@@ -2829,19 +3839,18 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 if !loop_prompt.as_ref().is_some_and(cadcraft_engine::pointmod::accepts) {
                     break;
                 }
+                if loop_prompt.as_ref().is_some_and(|p| p.picks_entity_point) {
+                    if let Err(error) = screen_entity_point(app, &xf, *pos).and_then(|input| app.session.input(input)) {
+                        app.session.echo(error.to_string());
+                    }
+                    continue;
+                }
                 let loop_base = loop_prompt.as_ref().and_then(|p| p.base);
                 let loop_dyn_frame = crate::cmdline::dyn_frame(app);
                 let Some((_, pt3)) = resolve_effective_point(app, *pos, &xf, ui.ctx(), loop_base, loop_dyn_frame) else {
                     continue;
                 };
-                if !pt3.is_finite() {
-                    app.session.echo("Point coordinates must be finite.");
-                    continue;
-                }
-                let result = match app.canvas.snap {
-                    Some(hit) => app.session.input_snapped(hit),
-                    None => app.session.input(Input::Point3(pt3)),
-                };
+                let result = submit_canvas_point(app, pt3);
                 match result {
                     Ok(_) => {
                         app.canvas.active_axis_3d = None;
@@ -2913,11 +3922,32 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         app.canvas.selection_window = None;
         app.canvas.drag_window = false;
     }
+    let picks_entity_point = app.session.current_prompt().is_some_and(|p| p.picks_entity_point);
     let cycled = pressed_primary
+        && !picks_entity_point
         && !middle_down
         && app.canvas.selection_window.is_none()
         && cycle_click(app, &xf, hover_pos, raw_world.filter(|_| inside), mods.shift);
     let mut screen_selection_handled = false;
+    if pressed_primary && !middle_down && picks_entity_point {
+        // A later pointer move in the frame updates hover independently of this click.
+        let release = ui.input(|i| {
+            i.events.iter().rev().find_map(|event| match event {
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, .. } => Some(*pos),
+                _ => None,
+            })
+        });
+        if let Some(at) = release.filter(|&at| {
+            !popup_blocked
+                && rect.contains(at)
+                && ui.ctx().layer_id_at(at) == Some(ui.layer_id())
+                && !crate::viewcube::Layout::blocks_canvas_pointer(rect, at)
+        }) && let Err(error) = screen_entity_point(app, &xf, at).and_then(|input| app.session.input(input))
+        {
+            app.session.echo(error.to_string());
+        }
+        screen_selection_handled = true;
+    }
     if inside && pressed_primary && !middle_down && !cycled && app.session.click_picks() && app.session.pending_window.is_none() {
         if let Some(window) = app.canvas.selection_window.take() {
             if let Some(end) = hover_pos {
@@ -2970,18 +4000,8 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             let result = if let Some(handle) = spatial_pick {
                 app.session.pick_cycled(handle, false)
             } else {
-                match app.canvas.snap {
-                    Some(hit) => app.session.input_snapped(hit),
-                    None => {
-                        let pt3 = app.canvas.cursor3.unwrap_or_else(|| point_on_plane(p, plane, plane_offset));
-                        if pt3.is_finite() {
-                            app.session.input(Input::Point3(pt3))
-                        } else {
-                            app.session.echo("Point coordinates must be finite.");
-                            Ok(())
-                        }
-                    }
-                }
+                let pt3 = app.canvas.cursor3.unwrap_or_else(|| point_on_plane(p, plane, plane_offset));
+                submit_canvas_point(app, pt3)
             };
 
             match result {
@@ -3066,6 +4086,14 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     // Hover highlight (throttled to cursor movement).
     // The cursor picks objects (pick box, rollover highlight): "Select objects" and single-object
     // prompts, or no command with PICKFIRST on; SELECTIONPREVIEW says in which of those it shows.
+    app.session.cursor_entity_point = if inside && app.session.current_prompt().is_some_and(|p| p.picks_entity_point) {
+        hover_pos.and_then(|at| match screen_entity_point(app, &xf, at).ok()? {
+            Input::EntityPoint { handle: Some(handle), point, point3 } => Some((handle, point, point3)),
+            _ => None,
+        })
+    } else {
+        None
+    };
     let selecting = app.session.previews_selection();
     if inside && selecting && app.session.pending_window.is_none() {
         if hover_pos != app.canvas.hover_at
@@ -3151,10 +4179,13 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     }
     if app.canvas.gpu.is_some() {
         draw_list_gpu(&mut app.canvas, &painter, &xf_paper, bg, app.session.settings.lwdisplay);
-    } else if let Some(list) = &app.canvas.list {
-        draw_list(&painter, &xf_paper, list, bg, app.session.settings.lwdisplay);
+        draw_spatial_gpu(&mut app.canvas, &app.session, &painter, &xf);
+    } else {
+        if let Some(list) = &app.canvas.list {
+            draw_list(&painter, &xf_paper, list, bg, app.session.settings.lwdisplay);
+        }
+        draw_spatial_lines(app, &painter, &xf);
     }
-    draw_spatial_lines(app, &painter, &xf);
     if let Some(vp) = &active_vp {
         // The active viewport: a heavy border, highlights in model units clipped to it.
         let r = Rect::from_two_pos(
@@ -3302,18 +4333,79 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             let serial = app.session.clipboard_source.as_ref().map_or(0, |c| c.serial);
             let transparency = app.session.settings.transparency_display;
             draw_drag_gpu(&mut app.canvas, &painter, &xf, &st.doc, &drag, (&app.session.clipboard, serial), bg, transparency);
-            let list = rebuilt_preview(&st.doc, extra.iter(), scale);
+            let planar = extra.iter().filter(|e| {
+                if let cadcraft_doc::EntityKind::Line(l) = &e.kind
+                    && (l.a.z != 0.0 || l.b.z != 0.0)
+                {
+                    painter.line_segment([xf.to_screen3(l.a), xf.to_screen3(l.b)], Stroke::new(1.0, t.canvas_ink));
+                    false
+                } else {
+                    true
+                }
+            });
+            let list = rebuilt_preview(&st.doc, planar, scale);
             draw_list(&painter, &xf, &list, bg, false);
         }
-    } else if let (Some(c), true) = (app.canvas.cursor, app.session.prompting()) {
+    } else if let (Some(c), true) = (
+        app.canvas.cursor.or_else(|| {
+            app.session
+                .running
+                .as_ref()
+                .is_some_and(|r| matches!(r.id.as_str(), "hatch" | "hatch.user" | "hatch.diag45" | "gradient" | "hatchpick"))
+                .then_some(app.session.cursor)
+        }),
+        app.session.prompting(),
+    ) {
         let ents = app.session.preview(c);
         if !ents.is_empty()
             && let Ok(st) = app.session.state()
         {
-            let list = rebuilt_preview(&st.doc, ents.iter(), scale);
-            draw_list(&painter, &xf, &list, bg, false);
+            let is_trim_pick = app.session.current_prompt().is_some_and(|p| p.suppress_hover);
+            let (mut dashed, normal): (Vec<_>, Vec<_>) =
+                ents.iter().cloned().partition(|e| is_trim_pick && e.common.linetype.eq_ignore_ascii_case("DASHED"));
+            if !normal.is_empty() {
+                let list = rebuilt_preview(&st.doc, normal.iter(), scale);
+                draw_list(&painter, &xf, &list, bg, false);
+            }
+            if !dashed.is_empty() {
+                let bg_col = color32(bg);
+                let fg_col = crate::theme::crosshair_color(bg_col);
+                dashed.retain(|e| {
+                    let ext = e.common.extrusion;
+                    let points = match &e.kind {
+                        cadcraft_doc::EntityKind::Line(line) if line.a.z != 0.0 || line.b.z != 0.0 => vec![line.a, line.b],
+                        cadcraft_doc::EntityKind::Arc(arc) if arc.center.z != 0.0 || !ext.near(Vec3::Z, 1e-6) => arc.sample_points_3d(ext, 64),
+                        cadcraft_doc::EntityKind::Circle(circle) if circle.center.z != 0.0 || !ext.near(Vec3::Z, 1e-6) => {
+                            let mut points = circle.sample_points_3d(ext, 64);
+                            if let Some(first) = points.first().copied() {
+                                points.push(first);
+                            }
+                            points
+                        }
+                        _ => return true,
+                    };
+                    draw_spatial_polyline(&painter, &xf, &points, Stroke::new(4.5, bg_col), false);
+                    draw_spatial_polyline(&painter, &xf, &points, Stroke::new(2.0, fg_col), true);
+                    false
+                });
+                for e in &mut dashed {
+                    e.common.linetype = "Continuous".into();
+                }
+                let list = rebuilt_preview(&st.doc, dashed.iter(), scale);
+                for prim in &list.prims {
+                    let pts = list.points(prim);
+                    let screen_pts: Vec<Pos2> = pts.iter().map(|q| xf.to_screen(*q)).collect();
+                    if screen_pts.len() >= 2 {
+                        painter.add(Shape::line(screen_pts.clone(), Stroke::new(4.5, bg_col)));
+                        painter.extend(Shape::dashed_line(&screen_pts, Stroke::new(2.0, fg_col), 6.0, 4.0));
+                    }
+                }
+            }
             let ucs = app.session.ucs();
             for k in &ents {
+                if is_trim_pick && k.common.linetype.eq_ignore_ascii_case("DASHED") {
+                    continue;
+                }
                 match &k.kind {
                     cadcraft_doc::EntityKind::Line(l) if l.a.z != 0.0 || l.b.z != 0.0 => {
                         let p1 = xf.to_screen3(l.a);
@@ -3334,10 +4426,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                         if pl.elevation.abs() > 1e-6 || !k.common.extrusion.near(Vec3::Z, 1e-6) || !ucs.z_axis.near(Vec3::Z, 1e-6) =>
                     {
                         let ext = if !k.common.extrusion.near(Vec3::Z, 1e-6) { k.common.extrusion } else { ucs.z_axis };
-                        let mut pts3 = pl.vertices_3d(ext);
-                        if pl.closed && !pts3.is_empty() {
-                            pts3.push(pts3[0]);
-                        }
+                        let pts3 = spatial_lwpolyline_path(pl, ext, 1.0 / xf.scale.max(1e-12));
                         let screen_pts: Vec<Pos2> = pts3.into_iter().map(|p| xf.to_screen3(p)).collect();
                         if screen_pts.len() >= 2 {
                             painter.add(Shape::line(screen_pts, Stroke::new(1.0, t.canvas_ink)));
@@ -3347,8 +4436,9 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 }
             }
         }
-    } else if app.ui.dialog.as_deref() == Some("hatch")
-        && let Some(hd) = &app.hatch_dlg
+    }
+    if let Some(hd) = &app.hatch_dlg
+        && (app.ui.dialog.as_deref() == Some("hatch") || hd.picking.is_some())
         && (!hd.points.is_empty() || !hd.handles.is_empty())
     {
         let p = crate::hatchdlg::preview_params(&hd.fill);
@@ -3356,11 +4446,18 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         if !kinds.is_empty()
             && let Ok(st) = app.session.state()
         {
-            let common = app.session.current_common();
-            let ents: Vec<cadcraft_doc::Entity> =
-                kinds.into_iter().map(|k| cadcraft_doc::Entity { handle: cadcraft_doc::Handle(0), common: common.clone(), kind: k }).collect();
-            let list = rebuilt_preview(&st.doc, ents.iter(), scale);
-            draw_list(&painter, &xf, &list, bg, false);
+            let common = if let Some(edit_common) = hd.edit.first().and_then(|h| st.doc.entity(*h)).map(|e| e.common.clone()) {
+                Some(edit_common)
+            } else {
+                let layer = st.doc.header.str("HATCHCLAYER", "01 Rayados 0.18");
+                app.session.annotation_preview_common(&layer, cadcraft_color::Color::Index(8)).ok()
+            };
+            if let Some(common) = common {
+                let ents: Vec<cadcraft_doc::Entity> =
+                    kinds.into_iter().map(|k| cadcraft_doc::Entity { handle: cadcraft_doc::Handle(0), common: common.clone(), kind: k }).collect();
+                let list = rebuilt_preview(&st.doc, ents.iter(), scale);
+                draw_list(&painter, &xf, &list, bg, false);
+            }
         }
     }
     // Viewport-space selection windows stay aligned with the visible rectangle in every camera.
@@ -3378,12 +4475,12 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             painter.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Middle);
         }
     }
-    // Legacy engine selection windows used by typed point-collection modes.
-    if let (Some(pw), Some(c)) = (app.session.pending_window, raw_world) {
+    // Legacy engine selection windows used by typed point-collection modes and TRIM/EXTEND.
+    if let (Some(pw), Some(c)) = (app.session.pending_window, raw_world.or(app.canvas.cursor)) {
         let a = xf.to_screen(pw.corner);
         let b = xf.to_screen(c);
         let r = Rect::from_two_pos(a, b);
-        let crossing = c.x < pw.corner.x;
+        let crossing = pw.force_crossing || c.x < pw.corner.x;
         if let Some(fill) = selection_area_fill(&app.session.settings, crossing) {
             painter.rect_filled(r, 0.0, fill);
         }
@@ -3476,6 +4573,8 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         tooltip(&painter, warn_pos, warning);
     }
     draw_tiles(app, ui, &tiles);
+    // Candidate UCS triad preview (drawn directly in 3D drawing canvas at candidate origin)
+    draw_candidate_ucs_triad(app, &painter, &xf, rect);
     // UCS icon, ViewCube and viewport label.
     if app.ui.show_ucs_icon {
         let ucs_pos = crate::viewcube::ucs_icon_pos(app, rect);
@@ -3511,7 +4610,12 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             // Use the painted sheet even in MSPACE, where the editing transform follows a
             // model viewport. The whole cursor takes one colour from its centre.
             let ink = paper_rect.map_or(t.crosshair, |paper| crate::theme::crosshair_color(if paper.contains(hp) { t.paper } else { surround }));
-            draw_crosshair(app, &painter, rect, hp, selecting, ink);
+            let show_pickbox = app.session.picking_objects();
+            let show_crosshair = match app.session.current_prompt() {
+                Some(p) => !p.picks_objects(),
+                None => true,
+            };
+            draw_crosshair(app, &painter, rect, hp, show_crosshair, show_pickbox, ink);
             if app.canvas.cycle_badge && app.canvas.cycle.is_none() {
                 cycle_badge(&painter, hp);
             }
@@ -3790,7 +4894,10 @@ fn override_cursor(app: &mut CadApp, raw: Vec2, xf: &Xf) {
     let base = prompt.as_ref().and_then(|p| p.base);
     let deferred = prompt.as_ref().is_some_and(|p| p.deferred);
     let s = &app.session.settings;
-    let osmode = over.unwrap_or(s.osmode) | if s.osnaphatch { snap::mode::HATCH } else { 0 };
+    let mut osmode = over.unwrap_or(s.osmode) | if s.osnaphatch { snap::mode::HATCH } else { 0 };
+    if app.session.running.as_ref().is_some_and(|r| r.id == "line") && prompt.as_ref().is_some_and(|p| p.base3.is_some()) {
+        osmode &= !snap::mode::APP;
+    }
     let Ok(st) = app.session.state() else { return };
     let hit = match cycle {
         Some(i) => {
@@ -3850,23 +4957,25 @@ fn draw_virtual_nav_cursor(painter: &egui::Painter, p: Pos2, is_orbit: bool) {
     }
 }
 
-fn draw_crosshair(app: &CadApp, p: &egui::Painter, rect: Rect, at: Pos2, pickbox: bool, ink: Color32) {
+fn draw_crosshair(app: &CadApp, p: &egui::Painter, rect: Rect, at: Pos2, show_crosshair: bool, show_pickbox: bool, ink: Color32) {
     let st = Stroke::new(1.0, ink);
-    let len = (rect.height() * app.session.settings.cursorsize as f32 / 100.0).max(12.0);
-    let pb = if pickbox { pickbox_half(app.session.settings.pickbox) } else { None };
-    let gap = pb.unwrap_or(0.0);
-    // Along the isometric plane's axes in isometric drafting.
-    if app.session.settings.isodraft {
-        for a in cadcraft_engine::snap::iso::cursor_axes(&app.session.settings) {
-            let dir = vec2(a.cos() as f32, -(a.sin() as f32));
-            p.line_segment([at - dir * len, at - dir * gap], st);
-            p.line_segment([at + dir * gap, at + dir * len], st);
+    let pb = if show_pickbox { pickbox_half(app.session.settings.pickbox) } else { None };
+    if show_crosshair {
+        let len = (rect.height() * app.session.settings.cursorsize as f32 / 100.0).max(12.0);
+        let gap = pb.unwrap_or(0.0);
+        // Along the isometric plane's axes in isometric drafting.
+        if app.session.settings.isodraft {
+            for a in cadcraft_engine::snap::iso::cursor_axes(&app.session.settings) {
+                let dir = vec2(a.cos() as f32, -(a.sin() as f32));
+                p.line_segment([at - dir * len, at - dir * gap], st);
+                p.line_segment([at + dir * gap, at + dir * len], st);
+            }
+        } else {
+            p.line_segment([pos2(at.x - len, at.y), pos2(at.x - gap, at.y)], st);
+            p.line_segment([pos2(at.x + gap, at.y), pos2(at.x + len, at.y)], st);
+            p.line_segment([pos2(at.x, at.y - len), pos2(at.x, at.y - gap)], st);
+            p.line_segment([pos2(at.x, at.y + gap), pos2(at.x, at.y + len)], st);
         }
-    } else {
-        p.line_segment([pos2(at.x - len, at.y), pos2(at.x - gap, at.y)], st);
-        p.line_segment([pos2(at.x + gap, at.y), pos2(at.x + len, at.y)], st);
-        p.line_segment([pos2(at.x, at.y - len), pos2(at.x, at.y - gap)], st);
-        p.line_segment([pos2(at.x, at.y + gap), pos2(at.x, at.y + len)], st);
     }
     if let Some(pb) = pb {
         p.rect_stroke(Rect::from_center_size(at, vec2(pb * 2.0, pb * 2.0)), 0.0, st, egui::StrokeKind::Middle);
@@ -4249,10 +5358,106 @@ fn draw_ucs_icon(app: &CadApp, p: &egui::Painter, rect: Rect, hovered: bool) {
     }
 }
 
+/// Renders the candidate UCS triad directly in the 3D drawing canvas at the candidate origin.
+fn draw_candidate_ucs_triad(app: &CadApp, p: &egui::Painter, xf: &Xf, _rect: Rect) {
+    let Some(cand) = app.session.preview_ucs() else {
+        return;
+    };
+    let origin_screen = xf.to_screen3(cand.origin);
+    if !origin_screen.x.is_finite() || !origin_screen.y.is_finite() {
+        return;
+    }
+
+    let arm_screen_len = 60.0f32;
+    let f_bold = egui::FontId::proportional(13.0);
+
+    // If candidate origin is distinct from current cursor (e.g. during axis or plane picking),
+    // draw rubber-band guide line from candidate origin to cursor.
+    let cursor3 = app.session.cursor3;
+    if cand.origin.dist(cursor3) > 1e-4 {
+        let cursor_screen = xf.to_screen3(cursor3);
+        if cursor_screen.x.is_finite() && cursor_screen.y.is_finite() {
+            let guide_col = Color32::from_rgb(0xff, 0xd7, 0x00); // Gold
+            p.extend(egui::Shape::dashed_line(
+                &[origin_screen, cursor_screen],
+                Stroke::new(1.8, guide_col),
+                6.0,
+                4.0,
+            ));
+            p.circle_filled(cursor_screen, 3.5, guide_col);
+            p.circle_stroke(cursor_screen, 4.5, Stroke::new(1.0, Color32::BLACK));
+        }
+    }
+
+    // Origin marker (distinct gold diamond with dark border)
+    let marker_col = Color32::from_rgb(0xff, 0xd7, 0x00);
+    let marker_sz = 6.0f32;
+    let diamond = vec![
+        origin_screen + vec2(0.0, -marker_sz),
+        origin_screen + vec2(marker_sz, 0.0),
+        origin_screen + vec2(0.0, marker_sz),
+        origin_screen + vec2(-marker_sz, 0.0),
+    ];
+    p.add(egui::Shape::convex_polygon(diamond, marker_col, Stroke::new(1.2, Color32::BLACK)));
+
+    // Badge label "SCP candidato"
+    let badge_pos = origin_screen + vec2(10.0, 12.0);
+    p.text(
+        badge_pos,
+        egui::Align2::LEFT_TOP,
+        crate::tl!("SCP candidato"),
+        egui::FontId::proportional(10.5),
+        Color32::from_rgb(0xff, 0xd7, 0x00),
+    );
+
+    // Project each axis arm (X = Red, Y = Green, Z = Blue)
+    let axes = [
+        (cand.x_axis, "X", Color32::from_rgb(0xf4, 0x43, 0x36)),
+        (cand.y_axis, "Y", Color32::from_rgb(0x4c, 0xaf, 0x50)),
+        (cand.z_axis, "Z", Color32::from_rgb(0x21, 0x96, 0xf3)),
+    ];
+
+    for (axis_vec, label, color) in axes {
+        let pt_screen = xf.to_screen3(cand.origin + axis_vec);
+        let screen_delta = pt_screen - origin_screen;
+        let len = screen_delta.length();
+        if len > 1e-4 {
+            let dir = screen_delta / len;
+            let tip = origin_screen + dir * arm_screen_len;
+            p.line_segment([origin_screen, tip], Stroke::new(2.5, color));
+
+            // Arrow head lines
+            let perp = vec2(-dir.y, dir.x);
+            let arrow_base = tip - dir * 8.0;
+            let a1 = arrow_base + perp * 4.0;
+            let a2 = arrow_base - perp * 4.0;
+            p.line_segment([tip, a1], Stroke::new(2.0, color));
+            p.line_segment([tip, a2], Stroke::new(2.0, color));
+
+            let label_pos = tip + dir * 12.0;
+            p.text(label_pos, egui::Align2::CENTER_CENTER, label, f_bold.clone(), color);
+        }
+    }
+}
+
 fn viewport_label(p: &egui::Painter, rect: Rect) {
     let t = Tokens::get();
     let at = pos2(rect.left() + 10.0, rect.top() + 8.0);
     p.text(at, egui::Align2::LEFT_TOP, crate::tl!("+  |  Top  |  2D Wireframe"), crate::theme::small(), t.canvas_ink);
+
+    let help_at = pos2(rect.left() + 10.0, rect.top() + 26.0);
+    p.text(
+        help_at,
+        egui::Align2::LEFT_TOP,
+        crate::tl!("Dos dedos: desplazar · Shift + dos dedos: orbitar · Ctrl + dos dedos o pinza: zoom"),
+        crate::theme::small(),
+        t.text_dim,
+    );
+}
+
+pub fn trackpad_toggle_rect(rect: Rect) -> Rect {
+    let min = pos2(rect.left() + 10.0, rect.top() + 26.0);
+    Rect::from_min_size(min, vec2(174.0, 22.0))
 }
 
 fn draw_viewcube(app: &mut CadApp, ui: &mut egui::Ui, rect: Rect) {
@@ -4614,7 +5819,7 @@ pub(crate) mod tests {
         assert!(arch(c.len()) != arch(c.x) && arch(c.len()) != arch(c.y), "{c:?}");
         assert!(text.contains(&arch(c.len())), "no {} in:\n{text}", arch(c.len()));
         // Without the value boxes (a window corner pending) the tooltip shows the distance too.
-        app.session.pending_window = Some(cadcraft_engine::PendingWindow { corner: Vec2::ZERO, during_command: true });
+        app.session.pending_window = Some(cadcraft_engine::PendingWindow { corner: Vec2::ZERO, during_command: true, force_crossing: false });
         let text = painted_text(&mut app, &ctx, at);
         assert!(text.contains(&format!("   {}  <", arch(c.len()))), "no {} in:\n{text}", arch(c.len()));
     }
@@ -4713,6 +5918,23 @@ pub(crate) mod tests {
             assert!(((a_old_y - b.y) - 33.33333).abs() < 0.1, "Old uncorrected formula moved only 33.33 px");
         }
     }
+
+    #[test]
+    fn crosshair_modes_selection_vs_point_input() {
+        let app = CadApp::new(cadcraft_engine::Session::default(), crate::Services::default());
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
+        let painter = egui::Painter::new(ctx, egui::LayerId::background(), rect);
+
+        // Selection mode: show_crosshair = false, show_pickbox = true
+        draw_crosshair(&app, &painter, rect, pos2(400.0, 300.0), false, true, Color32::WHITE);
+
+        // Point input mode: show_crosshair = true, show_pickbox = false
+        draw_crosshair(&app, &painter, rect, pos2(400.0, 300.0), true, false, Color32::WHITE);
+
+        // Idle mode with pickfirst: show_crosshair = true, show_pickbox = true
+        draw_crosshair(&app, &painter, rect, pos2(400.0, 300.0), true, true, Color32::WHITE);
+    }
 }
 
 /// The Block Editor's tint, base point and bar.
@@ -4729,7 +5951,7 @@ mod hatch_pick_tests {
     use cadcraft_geom::{Vec2, Vec3};
     use serde_json::json;
 
-    use super::point_on_plane;
+    use super::{Handle, OrbitCamera, Pos2, Rect, Xf, point_on_plane, screen_entity_point, vec2};
     use crate::{CadApp, Services};
 
     #[test]
@@ -4784,6 +6006,161 @@ mod hatch_pick_tests {
             resolve_at_screen(app, test_xf(app).to_screen3(point))
         }
 
+        #[test]
+        fn base3_grip_stretch_follows_the_pointer_and_respects_spatial_snaps() {
+            use cadcraft_doc::{EntityKind, Line};
+
+            for (manual, snapped) in [(false, false), (false, true), (true, false), (true, true)] {
+                let mut app = app_on_plane(DrawingPlane::XY, if manual { 10.0 } else { 0.0 });
+                if !manual {
+                    app.session.set_drawing_plane_offset_automatic();
+                }
+                let a = Vec3::new(-4.0, 1.0, 30.0);
+                let b = Vec3::new(4.0, 1.0, 30.0);
+                let target = app.session.add_entity(EntityKind::Line(Line { a, b })).unwrap();
+                let point = Vec3::new(-2.0, 5.0, if snapped { 20.0 } else if manual { 10.0 } else { 30.0 });
+                if snapped {
+                    app.session.settings.osmode = cadcraft_engine::snap::mode::END;
+                    app.session.add_entity(EntityKind::Line(Line { a: point, b: point + Vec3::Y * 3.0 })).unwrap();
+                }
+                app.session.set_selection(vec![target]);
+                let mut camera = app.session.camera();
+                camera.target = point;
+                app.session.set_camera(camera);
+                let xf = test_xf(&app);
+                let grip = super::super::grip_at(&app, &xf, Some(xf.to_screen3(a))).expect("visible endpoint grip");
+                assert_eq!(grip, (target, 0));
+                super::super::click_grip(&mut app, grip, false);
+                let prompt = app.session.current_prompt().unwrap();
+                assert!(prompt.spatial_point);
+                assert_eq!(prompt.base3, Some(a));
+
+                let screen = xf.to_screen3(point);
+                let resolved = resolve_at_screen(&mut app, screen).expect("cursor resolves");
+                assert!(resolved.1.near(point, 1e-5), "{manual} {snapped}: {:?}", resolved.1);
+                if snapped {
+                    assert_eq!(app.canvas.snap.and_then(|hit| hit.point3), Some(point));
+                }
+                super::super::store_cursor_resolution(&mut app, Some(resolved));
+                let preview = app.session.preview(resolved.0);
+                let EntityKind::Line(preview_line) = &preview.first().expect("moved line preview").kind else { panic!("expected line") };
+                let expected = if manual && !snapped { point.xy().to3(a.z) } else { point };
+                assert!(preview_line.a.near(expected, 1e-5));
+                assert_eq!(preview_line.b, b);
+                if !manual || snapped {
+                    assert!(xf.to_screen3(preview_line.a).distance(screen) < 1.0);
+                }
+                super::super::submit_canvas_point(&mut app, resolved.1).unwrap();
+                let EntityKind::Line(stored) = &app.session.doc().unwrap().entity(target).unwrap().kind else { panic!("expected line") };
+                assert_eq!(stored, preview_line);
+            }
+        }
+
+        #[test]
+        fn one_shot_end_retains_the_other_elevation_for_stretch_and_move() {
+            use cadcraft_doc::{EntityKind, Line};
+            use super::super::{store_cursor_resolution, submit_canvas_point};
+
+            for (mode, point) in [
+                ("grip stretch", Vec3::new(-2.0, 5.0, 20.0)),
+                ("grip move", Vec3::new(-4.0, 1.0, 20.0)),
+                ("move", Vec3::new(-2.0, 5.0, 20.0)),
+            ] {
+                let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+                app.session.set_drawing_plane_offset_automatic();
+                let a = Vec3::new(-4.0, 1.0, 30.0);
+                let b = Vec3::new(4.0, 1.0, 30.0);
+                let target = app.session.add_entity(EntityKind::Line(Line { a, b })).unwrap();
+                app.session.add_entity(EntityKind::Line(Line { a: point, b: point + Vec3::Y * 3.0 })).unwrap();
+                let mut camera = app.session.camera();
+                camera.target = point;
+                app.session.set_camera(camera);
+                if mode == "move" {
+                    app.session.start("move").unwrap();
+                    app.session.input(Input::Pick(vec![target])).unwrap();
+                    app.session.input(Input::Enter).unwrap();
+                    app.session.input(Input::Point3(a)).unwrap();
+                } else {
+                    app.session.start_grip_edit(&[(target, 0)]).unwrap();
+                    if mode == "grip move" {
+                        app.session.input(Input::Enter).unwrap();
+                    }
+                }
+
+                app.session.cmdline("_END").unwrap();
+                assert_eq!(app.session.snap_override(), Some(cadcraft_engine::snap::mode::END));
+                let resolved = resolve_at(&mut app, point).expect("END point");
+                assert_eq!(resolved.1, point);
+                assert_eq!(app.canvas.snap.and_then(|hit| hit.point3), Some(point));
+                store_cursor_resolution(&mut app, Some(resolved));
+                let preview = app.session.preview(resolved.0);
+                let EntityKind::Line(preview_line) = &preview[0].kind else { panic!("expected line") };
+                let other = if mode == "grip stretch" { b } else { b + point - a };
+                assert_eq!((preview_line.a, preview_line.b), (point, other), "{mode}");
+
+                submit_canvas_point(&mut app, resolved.1).unwrap();
+                assert_eq!(app.session.snap_override(), None);
+                let stored = app.session.doc().unwrap().entity(target).unwrap();
+                assert_eq!(stored.kind, preview[0].kind, "{mode}");
+            }
+        }
+
+        #[test]
+        fn base3_grip_transform_modes_use_the_same_cursor_for_preview_and_apply() {
+            use cadcraft_doc::{EntityKind, Line};
+            use cadcraft_geom::Mat3;
+
+            for (steps, matrix) in [
+                (1, Mat3::translate(Vec2::new(0.0, 3.0))),
+                (2, Mat3::rotate_about(Vec2::ZERO, std::f64::consts::FRAC_PI_2)),
+                (3, Mat3::scale_about(Vec2::ZERO, 3.0)),
+                (4, Mat3::mirror(Vec2::ZERO, Vec2::new(0.0, 3.0))),
+            ] {
+                let base = Vec3::new(0.0, 0.0, 30.0);
+                let b = Vec3::new(4.0, 1.0, 30.0);
+                let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+                app.session.set_drawing_plane_offset_automatic();
+                let mut camera = app.session.camera();
+                camera.target = base;
+                app.session.set_camera(camera);
+                let target = app.session.add_entity(EntityKind::Line(Line { a: base, b })).unwrap();
+                app.session.start_grip_edit(&[(target, 0)]).unwrap();
+                for _ in 0..steps {
+                    app.session.input(Input::Enter).unwrap();
+                }
+                let resolved = resolve_at(&mut app, base + Vec3::Y * 3.0).unwrap();
+                super::super::store_cursor_resolution(&mut app, Some(resolved));
+                let preview = app.session.preview(resolved.0);
+                let EntityKind::Line(line) = &preview[0].kind else { panic!("expected line") };
+                assert!(line.b.near(matrix.apply(b.xy()).to3(30.0), 1e-5), "mode {steps}");
+                super::super::submit_canvas_point(&mut app, resolved.1).unwrap();
+                assert_eq!(app.session.doc().unwrap().entity(target).unwrap().kind, preview[0].kind);
+            }
+        }
+
+        #[test]
+        fn base3_grip_reference_and_redefined_base_keep_wcs() {
+            use cadcraft_doc::{EntityKind, Line};
+
+            let base = Vec3::new(0.0, 0.0, 30.0);
+            let mut s = Session::new();
+            let target = s.add_entity(EntityKind::Line(Line { a: base, b: base + Vec3::X })).unwrap();
+            s.start_grip_edit(&[(target, 0)]).unwrap();
+            for _ in 0..2 {
+                s.input(Input::Enter).unwrap();
+            }
+            s.input(Input::Keyword("Base point".into())).unwrap();
+            let new_base = Vec3::new(3.0, 1.0, 40.0);
+            s.input(Input::Point3(new_base)).unwrap();
+            assert_eq!(s.current_prompt().unwrap().base3, Some(new_base));
+            s.input(Input::Keyword("Reference".into())).unwrap();
+            let first = Vec3::new(1.0, 2.0, 20.0);
+            s.input(Input::Point3(first)).unwrap();
+            assert_eq!(s.current_prompt().unwrap().base3, Some(first));
+            s.input(Input::Point3(first + Vec3::X)).unwrap();
+            assert_eq!(s.current_prompt().unwrap().base3, Some(new_base));
+        }
+
         fn oblique_line_from(base: Vec3) -> CadApp {
             let mut app = CadApp::new(Session::new(), Services::default());
             app.session.execute("view.swiso", &json!({})).unwrap();
@@ -4793,6 +6170,241 @@ mod hatch_pick_tests {
             app.session.cmdline("line").unwrap();
             app.session.input(Input::Point3(base)).unwrap();
             app
+        }
+
+        #[test]
+        fn base3_modify_commands_share_the_resolved_destination_with_the_preview() {
+            use cadcraft_doc::{EntityKind, Line};
+            use cadcraft_geom::Mat3;
+
+            let to = Vec2::new(0.0, 3.0);
+            for (command, transform) in [
+                ("move", Mat3::translate(to)),
+                ("copy", Mat3::translate(to)),
+                ("stretch", Mat3::translate(to)),
+                ("rotate", Mat3::rotate_about(Vec2::ZERO, std::f64::consts::FRAC_PI_2)),
+                ("scale", Mat3::scale_about(Vec2::ZERO, 3.0)),
+                ("mirror", Mat3::mirror(Vec2::ZERO, to)),
+            ] {
+                let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+                app.session.set_drawing_plane_offset_automatic();
+                let base = Vec3::new(0.0, 0.0, 30.0);
+                let end = Vec3::new(3.0, 2.0, 30.0);
+                let mut camera = app.session.camera();
+                camera.target = base;
+                app.session.set_camera(camera);
+                let target = app.session.add_entity(EntityKind::Line(Line { a: base, b: end })).unwrap();
+                app.session.start(command).unwrap();
+                app.session.input(Input::Pick(vec![target])).unwrap();
+                app.session.input(Input::Enter).unwrap();
+                app.session.input(Input::Point3(base)).unwrap();
+                assert_eq!(app.session.current_prompt().unwrap().base3, Some(base), "{command}");
+
+                let resolved = resolve_at(&mut app, to.to3(30.0)).unwrap();
+                super::super::store_cursor_resolution(&mut app, Some(resolved));
+                let preview = app.session.preview(resolved.0);
+                let EntityKind::Line(line) = &preview[0].kind else { panic!("expected line for {command}") };
+                assert!(line.a.near(transform.apply(base.xy()).to3(30.0), 1e-5), "{command}: {line:?}");
+                assert!(line.b.near(transform.apply(end.xy()).to3(30.0), 1e-5), "{command}: {line:?}");
+                let EntityKind::Line(guide) = &preview.last().unwrap().kind else { panic!("expected guide") };
+                assert_eq!((guide.a, guide.b), (base, resolved.1));
+                assert!(app.session.drag(resolved.0).is_none(), "elevated lines use the WCS preview");
+
+                super::super::submit_canvas_point(&mut app, resolved.1).unwrap();
+                if command == "mirror" {
+                    app.session.input(Input::Keyword("Yes".into())).unwrap();
+                }
+                let found = app.session.doc().unwrap().model.iter().any(|e| e.kind == preview[0].kind);
+                assert!(found, "{command}: click must commit the preview");
+            }
+        }
+
+        #[test]
+        fn base3_modify_typed_absolute_and_relative_coordinates_keep_planar_semantics() {
+            use cadcraft_doc::{EntityKind, Line};
+
+            for (base, to) in [("0,0,30", "2,4,0"), ("0,0,30", "@2,4,9"), ("0,0", "@2,4")] {
+                let mut s = Session::new();
+                let a = Vec3::new(0.0, 0.0, 30.0);
+                let b = Vec3::new(4.0, 2.0, 30.0);
+                let target = s.add_entity(EntityKind::Line(Line { a, b })).unwrap();
+                s.start("move").unwrap();
+                s.input(Input::Pick(vec![target])).unwrap();
+                s.input(Input::Enter).unwrap();
+                s.cmdline(base).unwrap();
+                s.cmdline(to).unwrap();
+                let EntityKind::Line(stored) = &s.doc().unwrap().entity(target).unwrap().kind else { panic!("expected line") };
+                let delta = Vec3::new(2.0, 4.0, 0.0);
+                assert_eq!((stored.a, stored.b), (a + delta, b + delta));
+            }
+        }
+
+        #[test]
+        fn circle_radius_preview_and_click_use_the_elevated_center_plane_in_auto() {
+            let mut app = CadApp::new(Session::new(), Services::default());
+            app.session.execute("view.swiso", &json!({})).unwrap();
+            app.session.set_drawing_plane_offset_automatic();
+            app.session.settings.osmode = 0;
+            app.session.settings.orthomode = false;
+            app.session.settings.polarmode = false;
+            app.session.start("circle").unwrap();
+            let center = Vec3::new(2.0, 3.0, 30.0);
+            app.session.input(Input::Point3(center)).unwrap();
+            assert_eq!(app.session.current_prompt().unwrap().base3, Some(center));
+            let at = test_xf(&app).to_screen3(center + Vec3::X * 2.0);
+            let cursor = resolve_at_screen(&mut app, at).unwrap();
+            assert!(cursor.1.near(center + Vec3::X * 2.0, 1e-5));
+            super::super::store_cursor_resolution(&mut app, Some(cursor));
+            let preview = app.session.preview(cursor.0);
+            let circle = preview.iter().find_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Circle(c) => Some(c.clone()),
+                _ => None,
+            }).unwrap();
+            assert!((circle.radius - 2.0).abs() < 1e-5);
+            super::super::submit_canvas_point(&mut app, cursor.1).unwrap();
+            assert!(app.session.doc().unwrap().model.iter().any(|e| {
+                matches!(&e.kind, cadcraft_doc::EntityKind::Circle(c) if *c == circle)
+            }));
+        }
+
+        #[test]
+        fn apparent_snap_follows_the_45_degree_polar_ray_at_a_different_height() {
+            use cadcraft_engine::snap::mode;
+
+            let mut app = CadApp::new(Session::new(), Services::default());
+            app.session.settings.osmode = mode::APP;
+            app.session.settings.aperture = 10.0;
+            app.session.settings.orthomode = false;
+            app.session.execute("polar", &json!({ "on": true })).unwrap();
+            app.session.execute("setvar", &json!({ "name": "POLARANG", "value": 45 })).unwrap();
+            app.session.execute("line", &json!({ "points": [[5.0, 3.0, 20.0], [5.0, 7.0, 20.0]] })).unwrap();
+            app.session.start("line").unwrap();
+            app.session.input(Input::Point3(Vec3::new(0.0, 0.0, 10.0))).unwrap();
+
+            let target = Vec3::new(5.0, 5.0, 20.0);
+            let xf = test_xf(&app);
+            let pointer = xf.to_screen3(target) + vec2(0.0, 4.0);
+            let (_, endpoint) = resolve_at_screen(&mut app, pointer).unwrap();
+            assert_eq!(app.canvas.snap.map(|hit| hit.mode), Some(mode::APP));
+            assert!(endpoint.near(target, 1e-6), "APP follows the polar guide: {endpoint:?}");
+        }
+
+        #[test]
+        fn apparent_snap_uses_the_current_horizontal_ortho_direction() {
+            use cadcraft_engine::snap::mode;
+            use cadcraft_geom::OrbitCamera;
+
+            for (elevation, y, z) in [(std::f64::consts::FRAC_PI_4, 2.0, 8.0), (std::f64::consts::FRAC_PI_2, 0.0, 10.0)] {
+                let mut app = CadApp::new(Session::new(), Services::default());
+                app.session.set_camera(OrbitCamera { elevation, height: 30.0, ..OrbitCamera::default() });
+                app.session.settings.osmode = mode::APP;
+                app.session.settings.orthomode = true;
+                app.session.settings.axistrack = false;
+                app.session.settings.zlock = false;
+                app.session.execute("line", &json!({ "points": [[0.0, y - 5.0, z], [0.0, y + 5.0, z]] })).unwrap();
+                app.session.start("line").unwrap();
+                app.session.input(Input::Point3(Vec3::new(-5.0, 0.0, 10.0))).unwrap();
+                let target = Vec3::new(0.0, y, z);
+                // Approach across the horizontal guide to distinguish the ortho ray from a free ray.
+                let xf = test_xf(&app);
+                let pointer = xf.to_screen3(target) + vec2(0.0, 2.0);
+                let (_, endpoint) = resolve_at_screen(&mut app, pointer).unwrap();
+                assert_eq!(app.canvas.snap.map(|hit| hit.mode), Some(mode::APP));
+                assert!(endpoint.near(target, 1e-6));
+            }
+        }
+
+        #[test]
+        fn apparent_snap_marker_preview_and_click_share_the_target_depth() {
+            let start = Vec3::new(0.0, 0.0, 30.0);
+            let target = Vec3::new(0.0, 4.0, 8.0);
+            let camera = super::super::OrbitCamera { target, elevation: std::f64::consts::FRAC_PI_4, height: 50.0, ..Default::default() };
+            for (near, parallel, endpoint) in [(true, false, false), (false, false, false), (true, true, false), (true, false, true)] {
+                let mut app = CadApp::new(Session::new(), Services::default());
+                app.session.set_camera(camera);
+                app.session.settings.osmode = cadcraft_engine::snap::mode::APP;
+                app.session.settings.aperture = 10.0;
+                app.session.settings.orthomode = false;
+                app.session.settings.polarmode = false;
+                app.session.settings.otrack = false;
+                app.session.settings.dynmode = false;
+                if endpoint {
+                    app.session.settings.osmode |= cadcraft_engine::snap::mode::END;
+                }
+                let points = if parallel {
+                    json!([[0.0, 4.0, 3.0], [0.0, 4.0, 13.0]])
+                } else if endpoint {
+                    json!([[0.0, 4.0, 8.0], [5.0, 4.0, 8.0]])
+                } else {
+                    json!([[-5.0, 4.0, 8.0], [5.0, 4.0, 8.0]])
+                };
+                app.session.execute("line", &json!({ "points": points })).unwrap();
+                app.session.start("line").unwrap();
+                app.session.input(Input::Point3(start)).unwrap();
+                app.session.settings.zlock = true;
+                let ctx = Context::default();
+                let frame = |app: &mut CadApp, events, time| {
+                    app.logic(&ctx);
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))),
+                            events,
+                            time: Some(time),
+                            ..Default::default()
+                        },
+                        |ui| app.ui(ui),
+                    );
+                    output.textures_delta.clear();
+                    output
+                };
+                frame(&mut app, Vec::new(), 0.0);
+                let center = app.canvas.xf.unwrap().to_screen3(target);
+                let pointer = center + vec2(if near { 6.0 } else { 14.0 }, 0.0);
+                let output = frame(&mut app, vec![egui::Event::PointerMoved(pointer)], 0.1);
+                let expected_mode = if endpoint {
+                    Some(cadcraft_engine::snap::mode::END)
+                } else if near && !parallel {
+                    Some(cadcraft_engine::snap::mode::APP)
+                } else {
+                    None
+                };
+                assert_eq!(app.canvas.snap.map(|h| h.mode), expected_mode);
+                let painted_marker = output.shapes.iter().any(|clipped| {
+                    matches!(&clipped.shape, egui::Shape::Rect(rect)
+                        if rect.stroke.color == crate::theme::Tokens::get().snap && rect.rect.center().distance(center) < 0.1)
+                });
+                assert_eq!(painted_marker, expected_mode.is_some());
+                let preview = app.session.preview(app.canvas.cursor.unwrap());
+                let cadcraft_doc::EntityKind::Line(preview) = &preview[0].kind else { panic!("expected a LINE preview") };
+                let end = preview.b;
+                if expected_mode.is_some() {
+                    assert!(end.near(target, 1e-6));
+                    assert_eq!(end, app.canvas.snap.unwrap().point3.unwrap());
+                } else {
+                    let xf = app.canvas.xf.unwrap();
+                    let free = xf.to_screen3(end);
+                    assert_eq!(end.xy(), start.xy(), "the unsnapped point stays on the WCS vertical: {end:?}");
+                    assert!((free.y - pointer.y).abs() < 0.1, "the unsnapped preview follows the pointer: {free:?} vs {pointer:?}");
+                    assert!((end.z - target.z).abs() > 1.0, "without APP the target depth is ignored: {end:?}");
+                }
+                let click = |pressed| egui::Event::PointerButton {
+                    pos: pointer,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                };
+                frame(&mut app, vec![click(true), click(false)], 0.2);
+                let doc = app.session.doc().unwrap();
+                let segment = doc
+                    .model
+                    .iter()
+                    .find_map(|entity| match &entity.kind {
+                        cadcraft_doc::EntityKind::Line(line) if line.a == start => Some(line),
+                        _ => None,
+                    })
+                    .expect("click creates a segment");
+                assert!(segment.b.near(end, 1e-6));
+            }
         }
 
         #[test]
@@ -5050,7 +6662,9 @@ mod hatch_pick_tests {
 
         #[test]
         fn oblique_mouse_tracking_resolves_the_real_z_axis() {
-            let mut app = CadApp::new(Session::new(), Services::default());
+            let mut sess = Session::new();
+            let _ = sess.new_drawing(false);
+            let mut app = CadApp::new(sess, Services::default());
             app.session.execute("view.swiso", &json!({})).unwrap();
             app.session.settings.osmode = 0;
             app.session.settings.orthomode = false;
@@ -5300,6 +6914,131 @@ mod hatch_pick_tests {
                 let next = plane.embed(Vec2::new(9.0, 11.0), plane.normal_offset(first));
                 let resolved_next = resolve_at(&mut app, next).expect("continuation resolves in a principal view");
                 assert!(resolved_next.1.dist(next) < 1e-5, "{preset}: {:?}", resolved_next.1);
+            }
+        }
+
+        struct SpatialProbe(cadcraft_engine::Prompt);
+
+        impl cadcraft_engine::Interactive for SpatialProbe {
+            fn name(&self) -> &'static str { "SPATIALPROBE" }
+            fn prompt(&self, _: &Session) -> cadcraft_engine::Prompt { self.0.clone() }
+            fn input(&mut self, _: &mut Session, _: Input) -> cadcraft_engine::Result<cadcraft_engine::Step> {
+                Ok(cadcraft_engine::Step::Continue)
+            }
+        }
+
+        fn start_probe(app: &mut CadApp, prompt: cadcraft_engine::Prompt) {
+            let before = app.session.state().unwrap().doc.clone();
+            app.session.running = Some(cadcraft_engine::Running {
+                id: "spatial-probe".into(),
+                machine: Box::new(SpatialProbe(prompt)),
+                before,
+                selection_before: Vec::new(),
+            });
+        }
+
+        #[test]
+        fn base3_resolver_shifts_an_inclined_ucs_and_rejects_an_edge_on_plane() {
+            use cadcraft_engine::{Accept, Prompt};
+            use cadcraft_geom::UcsFrame;
+
+            let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+            app.session.set_drawing_plane_offset_automatic();
+            let y = Vec3::new(0.0, 1.0, 1.0).normalized();
+            let normal = Vec3::X.cross(y);
+            let ucs = UcsFrame::new(Vec3::new(2.0, 3.0, 4.0), Vec3::X, y, normal);
+            app.session.set_ucs(ucs).unwrap();
+            let base = ucs.origin + normal * 30.0;
+            let expected = base + Vec3::X * 2.0 + y;
+            let mut camera = app.session.camera();
+            camera.target = expected;
+            app.session.set_camera(camera);
+            start_probe(&mut app, Prompt::new("Point", Accept::POINT).base3(base).spatial_point());
+            assert!(resolve_at(&mut app, expected).unwrap().1.near(expected, 1e-5));
+
+            app.session.set_drawing_plane_offset(10.0);
+            let legacy_manual = ucs.origin + Vec3::X * 2.0 + y;
+            assert!(resolve_at(&mut app, legacy_manual).unwrap().1.near(legacy_manual, 1e-5));
+            app.session.set_drawing_plane_offset_automatic();
+            app.session.set_ucs(UcsFrame::WORLD).unwrap();
+            app.session.execute("view.front", &json!({})).unwrap();
+            assert!(resolve_at_screen(&mut app, Pos2::new(500.0, 400.0)).is_none());
+        }
+
+        #[test]
+        fn base3_resolver_preserves_legacy_line_and_pline_auto_points() {
+            for command in ["line", "pline"] {
+                let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+                app.session.set_drawing_plane_automatic();
+                app.session.set_drawing_plane_offset_automatic();
+                app.session.settings.axistrack = false;
+                app.session.start(command).unwrap();
+                let first = Vec3::new(3.0, 4.0, 30.0);
+                app.session.input(Input::Point3(first)).unwrap();
+                let prompt = app.session.current_prompt().unwrap();
+                assert!(!prompt.spatial_point);
+                assert_eq!(prompt.base3, (command == "line").then_some(first));
+                let expected = Vec3::new(2.0, -1.0, 0.0);
+                let resolved = resolve_at(&mut app, expected).expect("legacy point");
+                assert!(resolved.1.near(expected, 1e-5), "{command}: {resolved:?}");
+                assert!(resolved.0.near(expected.xy(), 1e-5));
+            }
+        }
+
+        #[test]
+        fn trim_none_oblique_auto_cuts_pointer_drawn_lines_and_circles_on_xy() {
+            use cadcraft_doc::EntityKind;
+            use super::super::{screen_entity_point, store_cursor_resolution, submit_canvas_point};
+
+            for (circle, noise) in [(false, 0.0), (true, 0.0), (false, 1e-6), (true, 1e-6)] {
+                let mut app = app_on_plane(DrawingPlane::XY, 0.0);
+                app.session.set_drawing_plane_automatic();
+                app.session.set_drawing_plane_offset_automatic();
+                app.session.settings.axistrack = false;
+                let draw = |app: &mut CadApp, command, a, b| {
+                    app.session.start(command).unwrap();
+                    for p in [a, b] {
+                        let resolved = resolve_at(app, p).expect("free Auto point");
+                        assert_eq!(resolved.1.z, p.z);
+                        store_cursor_resolution(app, Some(resolved));
+                        submit_canvas_point(app, resolved.1).unwrap();
+                    }
+                    if command == "line" {
+                        app.session.input(Input::Enter).unwrap();
+                    }
+                };
+                let target_right = Vec3::new(4.0, 0.0, 0.0);
+                let (a, b) = if circle {
+                    draw(&mut app, "circle", Vec3::ZERO, target_right);
+                    (Vec3::new(-7.0, 0.0, noise), Vec3::new(7.0, 0.0, noise))
+                } else {
+                    draw(&mut app, "line", -target_right, target_right);
+                    (Vec3::new(0.0, -4.0, noise), Vec3::new(0.0, 4.0, noise))
+                };
+                let target = app.session.doc().unwrap().model.iter().next().unwrap().handle;
+                if noise != 0.0 {
+                    app.session.settings.osmode = cadcraft_engine::snap::mode::NOD;
+                    for p in [a, b] {
+                        app.session.add_entity(EntityKind::Point(cadcraft_doc::Point { p, angle: 0.0 })).unwrap();
+                    }
+                }
+                draw(&mut app, "line", a, b);
+                app.session.settings.osmode = 0;
+                app.session.start("trim").unwrap();
+                let at = if circle { Vec3::new(0.0, 4.0, 0.0) } else { Vec3::new(-2.0, 0.0, 0.0) };
+                let xf = test_xf(&app);
+                let pick = screen_entity_point(&app, &xf, xf.to_screen3(at)).unwrap();
+                let Input::EntityPoint { handle: Some(h), point, point3 } = pick else { panic!("expected projected target") };
+                assert_eq!(h, target);
+                app.session.is_interactive_ui = true;
+                app.session.cursor_entity_point = Some((h, point, point3));
+                let preview = app.session.preview(point);
+                assert_eq!(preview.len(), 1);
+                app.session.input(pick).unwrap();
+                let doc = app.session.doc().unwrap();
+                assert!(doc.entity(target).is_none());
+                assert_eq!(doc.model.iter().filter(|e| !matches!(e.kind, EntityKind::Point(_))).count(), 2);
+                assert_eq!(doc.model.iter().any(|e| matches!(e.kind, EntityKind::Arc(_))), circle);
             }
         }
 
@@ -5641,6 +7380,138 @@ mod hatch_pick_tests {
     }
 
     #[test]
+    fn trim_hover_and_click_follow_the_elevated_line() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        let mut add_line = |a, b| {
+            let out = app.session.execute("line", &json!({ "points": [a, b] })).unwrap();
+            Handle::parse_hex(out["handles"][0].as_str().unwrap()).unwrap()
+        };
+        let flat = add_line([-5.0, 0.0, 0.0], [15.0, 0.0, 0.0]);
+        let raised = add_line([-5.0, 0.0, 10.0], [15.0, 0.0, 10.0]);
+        let edge = add_line([0.0, -5.0, 10.0], [0.0, 5.0, 10.0]);
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        app.session.zoom_extents().unwrap();
+        app.session.settings.selectionpreview = 3;
+        app.session.start("trim").unwrap();
+        let ctx = egui::Context::default();
+        let frame = |app: &mut CadApp, events, time| {
+            app.logic(&ctx);
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))),
+                events,
+                time: Some(time),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.ui(ui));
+            output.textures_delta.clear();
+        };
+        frame(&mut app, Vec::new(), 0.0);
+        let at = app.canvas.xf.unwrap().to_screen3(Vec3::new(-2.0, 0.0, 10.0));
+        frame(&mut app, vec![egui::Event::PointerMoved(at)], 0.1);
+        assert_eq!(app.session.cursor_entity_point.map(|(handle, _, _)| handle), Some(raised));
+        assert!(app.session.preview(app.session.cursor).iter().any(|entity| {
+            matches!(&entity.kind, cadcraft_doc::EntityKind::Line(line) if line.a.z == 10.0 && line.b.z == 10.0)
+        }));
+        let button =
+            |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+        frame(&mut app, vec![button(true), button(false)], 0.2);
+        let doc = app.session.doc().unwrap();
+        assert!(doc.entity(flat).is_some());
+        assert!(doc.entity(edge).is_some());
+        assert!(doc.entity(raised).is_none());
+        let fragment = doc.model.iter().find(|e| e.handle != flat && e.handle != edge).unwrap();
+        let cadcraft_doc::EntityKind::Line(line) = &fragment.kind else { panic!("expected a line fragment") };
+        assert_eq!(line.a, Vec3::new(0.0, 0.0, 10.0));
+        assert_eq!(line.b, Vec3::new(15.0, 0.0, 10.0));
+    }
+
+    #[test]
+    fn trim_elevated_circle_paints_preview_and_keeps_spatial_mesh() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("view.swiso", &json!({})).unwrap();
+        let center = Vec3::new(0.0, 0.0, 50.0);
+        app.session.set_camera(OrbitCamera { target: center, height: 40.0, ..app.session.camera() });
+        let target = app.session.add_entity(cadcraft_doc::EntityKind::Circle(cadcraft_doc::Circle { center, radius: 5.0 })).unwrap();
+        app.session.execute("line", &json!({ "points": [[0,0,50], [8,0,50]] })).unwrap();
+        app.session.execute("line", &json!({ "points": [[8,0,50], [-8,0,50]] })).unwrap();
+        for x in [-2, 2] {
+            app.session.execute("line", &json!({ "points": [[x,-8,0], [x,8,0]] })).unwrap();
+        }
+        app.session.start("trim").unwrap();
+        let ctx = egui::Context::default();
+        let frame = |app: &mut CadApp, events, time| {
+            app.logic(&ctx);
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))),
+                events,
+                time: Some(time),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.ui(ui));
+            output.textures_delta.clear();
+            output
+        };
+        frame(&mut app, Vec::new(), 0.0);
+        let xf = app.canvas.xf.unwrap();
+        let at = xf.to_screen3(center + Vec3::Y * 5.0);
+        let output = frame(&mut app, vec![egui::Event::PointerMoved(at)], 0.1);
+        assert!(output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Path(path) if path.stroke.width == 4.5
+                && path.points.iter().any(|point| point.distance(at) < 1.0))
+        }));
+        assert_eq!(app.session.cursor_entity_point.map(|(handle, _, _)| handle), Some(target));
+        let preview = app.session.preview(app.session.cursor);
+        let cadcraft_doc::EntityKind::Arc(removed) = &preview.first().expect("semicircle preview").kind else {
+            panic!("expected arc preview");
+        };
+        assert_eq!((removed.center, removed.start, removed.end), (center, 0.0, std::f64::consts::PI));
+        let button =
+            |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
+        frame(&mut app, vec![button(true), button(false)], 0.2);
+        let doc = app.session.doc().unwrap();
+        assert!(doc.entity(target).is_none());
+        let kept = doc
+            .model
+            .iter()
+            .find_map(|e| match &e.kind {
+                cadcraft_doc::EntityKind::Arc(arc) => Some(arc),
+                _ => None,
+            })
+            .expect("surviving semicircle");
+        assert_eq!((kept.center, kept.radius, kept.start, kept.end), (center, 5.0, removed.end, removed.start));
+        let mesh = super::build_3d_mesh(&app.session, Vec3::ZERO, app.session.camera().view_dir(), false, None);
+        let vertices = mesh.lines.chunks_exact(crate::gpu::VERTEX3D_SIZE);
+        let mut arc_vertices = 0;
+        for vertex in vertices {
+            let coord = |axis| f32::from_le_bytes(vertex[axis..axis + 4].try_into().unwrap());
+            let (x, y, z) = (coord(0), coord(4), coord(8));
+            if y.abs() > 0.01 {
+                assert!(y < 0.0, "the removed half must not appear in the mesh");
+                assert_eq!(z, 50.0);
+                assert!((x.hypot(y) - 5.0).abs() < 1e-5);
+                arc_vertices += 1;
+            }
+        }
+        assert!(arc_vertices > 0, "the retained elevated semicircle must appear in the GPU mesh");
+    }
+
+    #[test]
+    fn trim_rejects_a_line_that_projects_to_a_point() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.execute("line", &json!({ "points": [[0.0, 0.0, 10.0], [0.0, 10.0, 10.0]] })).unwrap();
+        let xf = Xf {
+            rect: Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0)),
+            center: Vec2::ZERO,
+            scale: 50.0,
+            camera: Some(OrbitCamera { elevation: 0.0, ..OrbitCamera::default() }),
+        };
+        let at = xf.to_screen3(Vec3::new(0.0, 0.0, 10.0));
+        let error = screen_entity_point(&app, &xf, at).unwrap_err();
+        assert!(error.to_string().contains("projects to a point"));
+        assert_eq!(app.session.doc().unwrap().model.iter().count(), 1);
+    }
+
+    #[test]
     fn double_clicking_a_hatch_opens_the_hatch_edit_dialog() {
         let mut app = CadApp::new(Session::new(), Services::default());
         app.session.execute("rectang", &json!({ "p1": [0, 0], "p2": [10, 10] })).unwrap();
@@ -5839,7 +7710,9 @@ mod hatch_pick_tests {
 
     #[test]
     fn canvas_front_view_auto_axis_matches_preview_click_and_keyboard_finish() {
-        let mut app = CadApp::new(Session::new(), Services::default());
+        let mut sess = Session::new();
+        let _ = sess.new_drawing(false);
+        let mut app = CadApp::new(sess, Services::default());
         app.session.execute("view.front", &json!({})).unwrap();
         app.session.settings.orthomode = true;
         app.session.settings.osmode = 0;
@@ -6150,7 +8023,9 @@ mod hatch_pick_tests {
 
     #[test]
     fn canvas_mouse_elevated_base_negative_z() {
-        let mut app = CadApp::new(Session::new(), Services::default());
+        let mut sess = Session::new();
+        let _ = sess.new_drawing(false);
+        let mut app = CadApp::new(sess, Services::default());
         app.session.execute("view.swiso", &json!({})).unwrap();
         app.session.settings.zlock = false;
         app.session.settings.orthomode = false;
@@ -6442,7 +8317,9 @@ mod hatch_pick_tests {
 
     #[test]
     fn test_osnap_priority_over_ortho_in_3d() {
-        let mut app = CadApp::new(Session::new(), Services::default());
+        let mut sess = Session::new();
+        let _ = sess.new_drawing(false);
+        let mut app = CadApp::new(sess, Services::default());
         app.session.execute("view.swiso", &json!({})).unwrap();
         app.session.settings.zlock = false;
         app.session.settings.orthomode = true;
@@ -6510,7 +8387,9 @@ mod hatch_pick_tests {
 
     #[test]
     fn test_2d_command_with_prompt_base_in_3d_view_keeps_snaps() {
-        let mut app = CadApp::new(Session::new(), Services::default());
+        let mut sess = Session::new();
+        let _ = sess.new_drawing(false);
+        let mut app = CadApp::new(sess, Services::default());
         app.session.execute("view.swiso", &json!({})).unwrap();
         app.session.settings.zlock = false;
         app.session.settings.orthomode = true;
@@ -6785,5 +8664,328 @@ mod hatch_pick_tests {
         let drawn_loc_b = ucs.to_local(drawn_line.b);
         assert!((drawn_loc_a.z - loc1.z).abs() < 1e-4, "Endpoint 1 local Z must match loc1.z: got {}, expected {}", drawn_loc_a.z, loc1.z);
         assert!((drawn_loc_b.z - loc2.z).abs() < 1e-4, "Endpoint 2 local Z must match loc2.z: got {}, expected {}", drawn_loc_b.z, loc2.z);
+    }
+
+    #[test]
+    fn test_faceted_solid_preserves_edges_with_sub_30_degree_dihedral() {
+        use std::f64::consts::PI;
+        // Construct a 16-gon prism. The angle between adjacent lateral face normals is:
+        // 360 / 16 = 22.5 degrees, which is <= 30 degrees.
+        let n = 16;
+        let r = 10.0;
+        let h = 20.0;
+        let mut bottom_ring = Vec::new();
+        let mut top_ring = Vec::new();
+        for i in 0..n {
+            let theta = (i as f64) * 2.0 * PI / (n as f64);
+            let x = r * theta.cos();
+            let y = r * theta.sin();
+            bottom_ring.push(Vec3::new(x, y, 0.0));
+            top_ring.push(Vec3::new(x, y, h));
+        }
+
+        let mut faces = Vec::new();
+        // 16 lateral quad faces
+        for i in 0..n {
+            let next = (i + 1) % n;
+            let b0 = bottom_ring[i];
+            let b1 = bottom_ring[next];
+            let t1 = top_ring[next];
+            let t0 = top_ring[i];
+            faces.push(cadcraft_doc::Face3d {
+                corners: [b0, b1, t1, t0],
+                hidden_edges: 0,
+            });
+        }
+        // Top and bottom cap faces (fan from center)
+        let center_bottom = Vec3::new(0.0, 0.0, 0.0);
+        let center_top = Vec3::new(0.0, 0.0, h);
+        for i in 0..n {
+            let next = (i + 1) % n;
+            faces.push(cadcraft_doc::Face3d {
+                corners: [center_bottom, bottom_ring[next], bottom_ring[i], bottom_ring[i]],
+                hidden_edges: 0,
+            });
+            faces.push(cadcraft_doc::Face3d {
+                corners: [center_top, top_ring[i], top_ring[next], top_ring[next]],
+                hidden_edges: 0,
+            });
+        }
+
+        // 1. Procedural solid with FeatureOp::Extrusion (faceted solid)
+        let mut rec1 = cadcraft_doc::Recipe::new();
+        rec1.add_feature(1, cadcraft_doc::FeatureOp::Extrusion {
+            profile: bottom_ring.clone(),
+            direction: Vec3::new(0.0, 0.0, h),
+        });
+        let mut faceted_solid = cadcraft_doc::Solid3d::new(rec1);
+        faceted_solid.faces = faces.clone();
+
+        let view_dir = Vec3::new(0.0, 1.0, 0.0);
+        let edges = super::classify_solid_edges(&faceted_solid, view_dir);
+
+        // Every lateral edge (bottom_ring[i] to top_ring[i]) has a dihedral angle of 22.5 deg <= 30 deg.
+        // Because it has procedural provenance of Extrusion, all 16 lateral edges MUST be preserved!
+        for i in 0..n {
+            let b = bottom_ring[i];
+            let t = top_ring[i];
+            let found = edges.iter().any(|(p1, p2)| {
+                (p1.near(b, 1e-4) && p2.near(t, 1e-4)) || (p1.near(t, 1e-4) && p2.near(b, 1e-4))
+            });
+            assert!(found, "Lateral edge {} (dihedral 22.5 deg <= 30 deg) must be preserved for faceted solid", i);
+        }
+
+        // 2. Analytic smooth cylinder with the same mesh:
+        let mut rec2 = cadcraft_doc::Recipe::new();
+        rec2.add_feature(1, cadcraft_doc::FeatureOp::Cylinder {
+            center: center_bottom,
+            radius: r,
+            height: h,
+            axis: Vec3::Z,
+        });
+        let mut smooth_solid = cadcraft_doc::Solid3d::new(rec2);
+        smooth_solid.faces = faces;
+
+        let smooth_edges = super::classify_solid_edges(&smooth_solid, view_dir);
+        // For smooth cylinder, interior lateral edges (not silhouette and dihedral 22.5 deg <= 30 deg)
+        // are treated as discretization facets and omitted, while silhouettes and caps are preserved.
+        let lateral_edges_count = (0..n).filter(|&i| {
+            let b = bottom_ring[i];
+            let t = top_ring[i];
+            smooth_edges.iter().any(|(p1, p2)| {
+                (p1.near(b, 1e-4) && p2.near(t, 1e-4)) || (p1.near(t, 1e-4) && p2.near(b, 1e-4))
+            })
+        }).count();
+        assert!(lateral_edges_count < n, "Smooth cylinder must not draw all discretization facet edges");
+        assert!(lateral_edges_count >= 2, "Smooth cylinder must retain silhouette lateral edges");
+    }
+
+    #[test]
+    fn test_spatial_3dpoly_wgpu_mesh_and_isometric_projection() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        app.session.cmdline("3dpoly 0,0,10 20,0,25 20,20,15 0,20,5 c").unwrap();
+        assert!(app.session.running.is_none());
+
+        app.session.execute("view.swiso", &serde_json::json!({})).unwrap();
+        let cam_swiso = app.session.camera();
+        let origin = cam_swiso.target;
+
+        // 1. WGPU 3D mesh route (`build_3d_mesh`) must contain 4 closed 3D segments (8 vertices * 16 bytes) with true Z
+        let mesh = super::build_3d_mesh(&app.session, origin, cam_swiso.view_dir(), false, None);
+        assert_eq!(mesh.lines.len(), 8 * 16, "Closed 4-point 3D polyline must emit 4 line segments (8 vertices)");
+        let zs: Vec<f32> = mesh
+            .lines
+            .chunks_exact(16)
+            .map(|c| f32::from_le_bytes([c[8], c[9], c[10], c[11]]) + origin.z as f32)
+            .collect();
+        assert!(zs.iter().any(|&z| (z - 25.0).abs() < 1e-3), "Mesh vertices must preserve Z=25: {zs:?}");
+        assert!(zs.iter().any(|&z| (z - 10.0).abs() < 1e-3), "Mesh vertices must preserve Z=10: {zs:?}");
+
+        // 2. Screen projection (`screen_entity_polylines` used by CPU path / hit-testing)
+        // must project spatial Z != 0 strictly above the Z=0 ground plane and move when orbiting
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)));
+        let mut time = 0.0;
+        let mut run_frame = |app: &mut CadApp| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+        app.session.zoom_extents().unwrap();
+        run_frame(&mut app);
+        let xf_swiso = app.canvas.xf.expect("xf must be set");
+        let st = app.session.state().unwrap();
+        let ent = st.doc.model.iter().next().expect("Polyline3d must exist");
+
+        let screen_paths = super::screen_entity_polylines(&st.doc, ent, &xf_swiso);
+        assert_eq!(screen_paths.len(), 1);
+        assert_eq!(screen_paths[0].len(), 5, "Closed 4-point path includes closing vertex");
+        // Vertex index 1 is (20, 0, 25); its screen position must differ from flattened (20, 0, 0)
+        let projected_3d = screen_paths[0][1];
+        let projected_ground = xf_swiso.to_screen3(Vec3::new(20.0, 0.0, 0.0));
+        assert!(
+            projected_3d.distance(projected_ground) > 5.0,
+            "Spatial vertex at Z=25 must not collapse onto Z=0 ground projection"
+        );
+
+        // Orbit to SEISO and confirm projection shifts cleanly
+        app.session.execute("view.seiso", &serde_json::json!({})).unwrap();
+        run_frame(&mut app);
+        let xf_seiso = app.canvas.xf.expect("xf must be set");
+        let st2 = app.session.state().unwrap();
+        let ent2 = st2.doc.model.iter().next().unwrap();
+        let orbited_paths = super::screen_entity_polylines(&st2.doc, ent2, &xf_seiso);
+        assert!(
+            orbited_paths[0][1].distance(projected_3d) > 5.0,
+            "3D polyline projection must change when orbiting camera"
+        );
+    }
+
+    #[test]
+    fn test_shared_vertex_line3d_and_3dpoly_coincident_across_routes_and_orbit() {
+        let mut app = CadApp::new(Session::new(), Services::default());
+        let p_shared = Vec3::new(30.0, 40.0, 0.0);
+        let p_top = Vec3::new(15.0, 20.0, 35.0);
+        let p_other1 = Vec3::new(10.0, 50.0, 20.0);
+        let p_other2 = Vec3::new(35.0, 10.0, 50.0);
+
+        // Synthetic 3D auxiliary line with one Z=0 endpoint and one Z!=0 endpoint, plus a Z=0 point,
+        // and a closed 3D polyline sharing `p_shared` (index 1) and `p_top` (index 0).
+        app.session.cmdline("line 30,40,0 15,20,35 ").unwrap();
+        app.session.cmdline("point 30,40,0").unwrap();
+        app.session.cmdline("3dpoly 15,20,35 30,40,0 35,10,50 10,50,20 c").unwrap();
+        assert!(app.session.running.is_none());
+
+        // 1. Verify stored XYZ coordinates match identically across Line, Point, and Polyline3d.
+        let st = app.session.state().unwrap();
+        let mut stored_line = None;
+        let mut stored_point = None;
+        let mut stored_poly = None;
+        for ent in st.doc.model.iter() {
+            match &ent.kind {
+                cadcraft_doc::EntityKind::Line(l) => stored_line = Some(l.clone()),
+                cadcraft_doc::EntityKind::Point(pt) => stored_point = Some(pt.p),
+                cadcraft_doc::EntityKind::Polyline3d(pl) => stored_poly = Some(pl.clone()),
+                _ => {}
+            }
+        }
+        let line = stored_line.expect("3D line stored");
+        let point = stored_point.expect("Z=0 point stored");
+        let poly = stored_poly.expect("Polyline3d stored");
+        assert!(line.a.near(p_shared, 1e-9) && line.b.near(p_top, 1e-9));
+        assert!(point.near(p_shared, 1e-9));
+        assert!(poly.closed && poly.points.len() == 4);
+        assert!(poly.points[0].near(p_top, 1e-9));
+        assert!(poly.points[1].near(p_shared, 1e-9));
+        assert!(poly.points[2].near(p_other2, 1e-9));
+        assert!(poly.points[3].near(p_other1, 1e-9));
+
+        // 2. Verify cadcraft_render with `skip_spatial: true` omits both 3D entities (no flattened duplicate)
+        // while retaining only the flat Z=0 point in the 2D display list.
+        let flat_list = cadcraft_render::build(
+            &st.doc,
+            &cadcraft_doc::Space::Model,
+            &cadcraft_render::Options { skip_spatial: true, ..cadcraft_render::Options::default() },
+        );
+        assert_eq!(flat_list.prims.len(), 1, "Only the flat Z=0 point belongs in the 2D list when skip_spatial=true");
+
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)));
+        let mut time = 0.0;
+        let mut run_frame = |app: &mut CadApp| {
+            time += 0.05;
+            app.logic(&ctx);
+            let input = egui::RawInput { screen_rect: screen, time: Some(time), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+            out.textures_delta.clear();
+        };
+
+        let mut check_view = |app: &mut CadApp, label: &str| {
+            run_frame(app);
+            let xf = app.canvas.xf.expect("xf must be set");
+            let cam = app.session.camera();
+            let origin = cam.target;
+            let c = xf.rect.center();
+
+            // WGPU 3D vertex buffer path (`build_3d_mesh`)
+            let mesh = super::build_3d_mesh(&app.session, origin, cam.view_dir(), false, None);
+            // 1 segment for Line (2 verts) + 4 segments for closed 4-pt Polyline3d (8 verts) = 10 verts
+            assert_eq!(mesh.lines.len(), 10 * 16, "{label}: expected 10 3D line vertices");
+            let mesh_pts: Vec<Vec3> = mesh
+                .lines
+                .chunks_exact(16)
+                .map(|b| {
+                    let x = f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64 + origin.x;
+                    let y = f32::from_le_bytes([b[4], b[5], b[6], b[7]]) as f64 + origin.y;
+                    let z = f32::from_le_bytes([b[8], b[9], b[10], b[11]]) as f64 + origin.z;
+                    Vec3::new(x, y, z)
+                })
+                .collect();
+
+            // Exact occurrences of p_shared and p_top across Line (verts 0..2) and Polyline3d (verts 2..10)
+            let line_shared = mesh_pts[0..2].iter().find(|v| v.near(p_shared, 1e-4)).expect("Line must emit p_shared");
+            let poly_shared = mesh_pts[2..10].iter().find(|v| v.near(p_shared, 1e-4)).expect("Poly must emit p_shared");
+            let line_top = mesh_pts[0..2].iter().find(|v| v.near(p_top, 1e-4)).expect("Line must emit p_top");
+            let poly_top = mesh_pts[2..10].iter().find(|v| v.near(p_top, 1e-4)).expect("Poly must emit p_top");
+
+            // Evaluate SHADER_3D projection for each GPU 3D mesh vertex
+            let project_shader3d = |p: Vec3| -> egui::Pos2 {
+                let d = p - cam.target;
+                let u = d.dot(cam.right_dir());
+                let v = d.dot(cam.up_dir());
+                egui::pos2(c.x + (u * xf.scale) as f32, c.y - (v * xf.scale) as f32)
+            };
+            let gpu3d_line_shared = project_shader3d(*line_shared);
+            let gpu3d_poly_shared = project_shader3d(*poly_shared);
+            let gpu3d_line_top = project_shader3d(*line_top);
+            let gpu3d_poly_top = project_shader3d(*poly_top);
+
+            // Evaluate 2D CanvasCallback (`gpu_mesh_xform`) projection for the Z=0 point
+            let mesh_origin = Vec2::new(20.0, 25.0);
+            let (m, off) = super::gpu_mesh_xform(mesh_origin, xf.center, xf.camera.as_ref());
+            let rel = [
+                (p_shared.x - mesh_origin.x) as f32,
+                (p_shared.y - mesh_origin.y) as f32,
+            ];
+            let qx = m[0] * rel[0] + m[2] * rel[1] + m[4] + off[0];
+            let qy = m[1] * rel[0] + m[3] * rel[1] + m[5] + off[1];
+            let gpu2d_point_shared = egui::pos2(c.x + qx * xf.scale as f32, c.y - qy * xf.scale as f32);
+
+            // CPU / picking route (`screen_entity_polylines` + `xf.to_screen3`)
+            let st = app.session.state().unwrap();
+            let mut cpu_line_pts = None;
+            let mut cpu_poly_pts = None;
+            for ent in st.doc.model.iter() {
+                match &ent.kind {
+                    cadcraft_doc::EntityKind::Line(_) => {
+                        cpu_line_pts = Some(super::screen_entity_polylines(&st.doc, ent, &xf));
+                    }
+                    cadcraft_doc::EntityKind::Polyline3d(_) => {
+                        cpu_poly_pts = Some(super::screen_entity_polylines(&st.doc, ent, &xf));
+                    }
+                    _ => {}
+                }
+            }
+            let cpu_line = cpu_line_pts.unwrap();
+            let cpu_poly = cpu_poly_pts.unwrap();
+            let ref_shared = xf.to_screen3(p_shared);
+            let ref_top = xf.to_screen3(p_top);
+
+            assert!(cpu_line[0][0].distance(ref_shared) < 1e-3, "{label}: CPU line shared mismatch");
+            assert!(cpu_poly[0][1].distance(ref_shared) < 1e-3, "{label}: CPU poly shared mismatch");
+            assert!(gpu3d_line_shared.distance(ref_shared) < 1e-3, "{label}: GPU3D line shared mismatch");
+            assert!(gpu3d_poly_shared.distance(ref_shared) < 1e-3, "{label}: GPU3D poly shared mismatch");
+            assert!(gpu2d_point_shared.distance(ref_shared) < 1e-2, "{label}: GPU2D point shared mismatch");
+
+            assert!(cpu_line[0][1].distance(ref_top) < 1e-3, "{label}: CPU line top mismatch");
+            assert!(cpu_poly[0][0].distance(ref_top) < 1e-3, "{label}: CPU poly top mismatch");
+            assert!(gpu3d_line_top.distance(ref_top) < 1e-3, "{label}: GPU3D line top mismatch");
+            assert!(gpu3d_poly_top.distance(ref_top) < 1e-3, "{label}: GPU3D poly top mismatch");
+
+            (ref_shared, ref_top)
+        };
+
+        app.session.zoom_extents().unwrap();
+        app.session.execute("view.swiso", &serde_json::json!({})).unwrap();
+        let (swiso_shared, swiso_top) = check_view(&mut app, "swiso");
+
+        app.session.execute("view.seiso", &serde_json::json!({})).unwrap();
+        let (seiso_shared, seiso_top) = check_view(&mut app, "seiso");
+        assert!(seiso_top.distance(swiso_top) > 5.0 || seiso_shared.distance(swiso_shared) > 5.0);
+
+        app.session.execute("view.top", &serde_json::json!({})).unwrap();
+        let _ = check_view(&mut app, "top");
+
+        app.session.execute("view.front", &serde_json::json!({})).unwrap();
+        let _ = check_view(&mut app, "front");
+
+        // Arbitrary oblique orbit with non-zero target
+        let mut orbit_cam = app.session.camera();
+        orbit_cam.target = Vec3::new(12.0, -5.0, 10.0);
+        orbit_cam.set_view_dir(Vec3::new(0.9, -1.4, 0.6));
+        app.session.set_camera(orbit_cam);
+        let _ = check_view(&mut app, "arbitrary_orbit");
     }
 }

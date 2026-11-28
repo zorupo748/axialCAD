@@ -10,6 +10,7 @@
 
 mod backend;
 pub mod control_token;
+pub mod gateway;
 mod server;
 mod tools;
 

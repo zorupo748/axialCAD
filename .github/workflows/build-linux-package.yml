@@ -1,6 +1,6 @@
 name: Build and Release Linux Package
 
-# Manual and branch-restricted build and release workflow that packages CADCraft
+# Manual and branch-restricted build and release workflow that packages axialCAD
 # on an Ubuntu 22.04 LTS runner (glibc 2.35 base).
 on:
   push:
@@ -62,7 +62,7 @@ jobs:
           set -euo pipefail
           COMMIT_SHA="$(git rev-parse HEAD)"
           SHORT_SHA="$(git rev-parse --short=7 HEAD)"
-          ARTIFACT_NAME="cadcraft-linux-x86_64-${SHORT_SHA}"
+          ARTIFACT_NAME="axialcad-linux-x86_64-${SHORT_SHA}"
           echo "COMMIT_SHA=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
           echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_OUTPUT"
           echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_ENV"
@@ -271,7 +271,7 @@ jobs:
           # 1. Validate tarball presence, checksum and contents if tar requested
           if [[ "$RAW_FORMATS" =~ "tar" ]]; then
             shopt -s nullglob
-            tar_candidates=( "$DIST"/cadcraft-*-linux-x86_64.tar.gz )
+            tar_candidates=( "$DIST"/axialcad-*-linux-x86_64.tar.gz )
             shopt -u nullglob
             if [[ ${#tar_candidates[@]} -ne 1 ]]; then
               echo "error: expected exactly 1 tarball in $DIST, found ${#tar_candidates[@]}: ${tar_candidates[*]}" >&2
@@ -338,7 +338,7 @@ jobs:
           # 2. Validate AppImage presence and checksum if appimage requested
           if [[ "$RAW_FORMATS" =~ "appimage" ]]; then
             shopt -s nullglob
-            appimage_candidates=( "$DIST"/cadcraft-*-linux-x86_64.AppImage )
+            appimage_candidates=( "$DIST"/axialcad-*-linux-x86_64.AppImage )
             shopt -u nullglob
             if [[ ${#appimage_candidates[@]} -ne 1 ]]; then
               echo "error: expected exactly 1 AppImage in $DIST, found ${#appimage_candidates[@]}: ${appimage_candidates[*]}" >&2
@@ -457,18 +457,18 @@ jobs:
           mkdir -p release-assets
 
           shopt -s nullglob
-          appimages=( artifacts/cadcraft-*-linux-x86_64.AppImage )
-          appimage_shas=( artifacts/cadcraft-*-linux-x86_64.AppImage.sha256 )
-          tarballs=( artifacts/cadcraft-*-linux-x86_64.tar.gz )
-          tarball_shas=( artifacts/cadcraft-*-linux-x86_64.tar.gz.sha256 )
-          manifests=( artifacts/cadcraft-*-linux-x86_64.manifest.txt )
+          appimages=( artifacts/axialcad-*-linux-x86_64.AppImage )
+          appimage_shas=( artifacts/axialcad-*-linux-x86_64.AppImage.sha256 )
+          tarballs=( artifacts/axialcad-*-linux-x86_64.tar.gz )
+          tarball_shas=( artifacts/axialcad-*-linux-x86_64.tar.gz.sha256 )
+          manifests=( artifacts/axialcad-*-linux-x86_64.manifest.txt )
           provenances=( artifacts/build-provenance.txt )
           shopt -u nullglob
 
           # Helper to extract version
           extract_pkg_version() {
             local filename="$(basename "$1")"
-            if [[ "$filename" =~ ^cadcraft-([0-9]+(\.[0-9]+)*(-[a-zA-Z0-9.-]+)?)-linux-x86_64\..+$ ]]; then
+            if [[ "$filename" =~ ^axialcad-([0-9]+(\.[0-9]+)*(-[a-zA-Z0-9.-]+)?)-linux-x86_64\..+$ ]]; then
               echo "${BASH_REMATCH[1]}"
             else
               echo "error: cannot extract semantic version from filename '$filename'" >&2
@@ -577,7 +577,7 @@ jobs:
           raw_formats = os.environ["RAW_FORMATS"]
 
           notes = textwrap.dedent(f"""\
-          # CADCraft Linux Preview (Borrador / Pre-release)
+          # axialCAD Linux Preview (Borrador / Pre-release)
 
           ### Información de Construcción y Procedencia
           - **Commit completo:** `{commit_sha}` (`{short_sha}`)
@@ -587,9 +587,9 @@ jobs:
 
           ### Archivos y Sumas de Verificación
           Cada archivo binario incluye su archivo `.sha256` adjunto para verificar la integridad de la descarga y la correspondencia con los artefactos producidos por el proceso de compilación:
-          - **AppImage:** `cadcraft-*-linux-x86_64.AppImage` (y `.sha256`)
-          - **Tarball de usuario:** `cadcraft-*-linux-x86_64.tar.gz` (y `.sha256`)
-          - **Manifiesto de contenido:** `cadcraft-*-linux-x86_64.manifest.txt`
+          - **AppImage:** `axialcad-*-linux-x86_64.AppImage` (y `.sha256`)
+          - **Tarball de usuario:** `axialcad-*-linux-x86_64.tar.gz` (y `.sha256`)
+          - **Manifiesto de contenido:** `axialcad-*-linux-x86_64.manifest.txt`
           - **Detalle de procedencia del runner:** `build-provenance.txt`
 
           > **Nota sobre integridad:**
@@ -598,7 +598,7 @@ jobs:
           ### Estado de Validación y Pruebas
           - **Verificación en hardware real:** Se ha verificado previamente la coincidencia de checksum y el arranque correcto del AppImage correspondiente al commit `8631294` en un portátil con Fedora.
           - **Alcance de las pruebas:** Un nuevo build o commit **no hereda automáticamente esa comprobación manual**.
-          - **Pruebas funcionales:** Las pruebas exhaustivas de todas las funciones de CADcraft **siguen pendientes**. Esta entrega es un borrador previo para validación de empaquetado y arranque.
+          - **Pruebas funcionales:** Las pruebas exhaustivas de todas las funciones de axialCAD **siguen pendientes**. Esta entrega es un borrador previo para validación de empaquetado y arranque.
 
           ---
           *Este borrador ha sido generado automáticamente de forma aislada por GitHub Actions para su revisión antes de la publicación final.*
@@ -615,7 +615,7 @@ jobs:
           gh release create "$RELEASE_TAG" \
             --repo "$TARGET_REPO" \
             --target "$COMMIT_SHA" \
-            --title "CADCraft $RELEASE_TAG (Draft Linux Preview)" \
+            --title "axialCAD $RELEASE_TAG (Draft Linux Preview)" \
             --notes-file release-notes.md \
             --draft \
             --prerelease \

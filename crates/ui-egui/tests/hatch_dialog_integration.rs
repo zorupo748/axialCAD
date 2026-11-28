@@ -511,3 +511,127 @@ fn hatch_ui_kittest_harness_escape_cancels_dialog_without_creating_entity() {
     h.run_steps(2);
     assert_eq!(h.state().session.doc().unwrap().model.len(), 1, "no entity created by subsequent Enter");
 }
+
+#[test]
+fn hatch_ui_flow_preview_matches_hatchclayer_during_pick_and_dialog() {
+    let mut app = CadApp::new(Session::default(), Services::default());
+    app.canvas.zoom_pending = false;
+    app.ui.show_command_line = false;
+    app.ui.show_ucs_icon = false;
+    app.ui.show_viewcube = false;
+
+    // Set CLAYER to a bright green layer ("Contornos vistos", ACI 3), distinct from HATCHCLAYER (ACI 8 gray)
+    app.session.execute("layer.new", &json!({ "name": "Contornos vistos", "current": true, "color": 3 })).unwrap();
+    app.session.execute("rectang", &json!({ "p1": [0, 0], "p2": [100, 100] })).unwrap();
+    app.session.execute("view.set", &json!({ "center": [50, 50], "height": 200 })).unwrap();
+    assert!(app.session.doc().unwrap().layer("01 Rayados 0.18").is_none());
+
+    let green_rgb = cadcraft_color::aci_rgb(3);
+    let gray_rgb = cadcraft_color::aci_rgb(8);
+    let green = egui::Color32::from_rgb(green_rgb.0, green_rgb.1, green_rgb.2);
+    let gray = egui::Color32::from_rgb(gray_rgb.0, gray_rgb.1, gray_rgb.2);
+
+    let count_strokes = |shapes: &[egui::epaint::ClippedShape], col: egui::Color32| -> usize {
+        fn walk(s: &egui::Shape, col: egui::Color32, n: &mut usize) {
+            match s {
+                egui::Shape::LineSegment { stroke, .. } if stroke.color == col => *n += 1,
+                egui::Shape::Path(p) if p.stroke.color == egui::epaint::ColorMode::Solid(col) => *n += 1,
+                egui::Shape::Vec(vs) => vs.iter().for_each(|x| walk(x, col, n)),
+                _ => {}
+            }
+        }
+        let mut n = 0;
+        for cs in shapes {
+            walk(&cs.shape, col, &mut n);
+        }
+        n
+    };
+
+    let ctx = egui::Context::default();
+    let paint_frame = |app: &mut CadApp| -> Vec<egui::epaint::ClippedShape> {
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1280.0, 800.0))),
+                events: vec![egui::Event::PointerMoved(egui::pos2(640.0, 400.0))],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            });
+            shapes = std::mem::take(&mut out.shapes);
+            out.textures_delta.clear();
+        }
+        shapes
+    };
+
+    // Paint baseline (only 4 green rectangle lines, 0 gray hatch lines)
+    let base_shapes = paint_frame(&mut app);
+    let base_green = count_strokes(&base_shapes, green);
+    assert_eq!(count_strokes(&base_shapes, gray), 0, "no gray lines before hatch");
+
+    // 1. Open Hatch dialog via command and start picking internal point (real UI button/command flow)
+    app.run("hatch", serde_json::Value::Null).unwrap();
+    assert_eq!(app.ui.dialog.as_deref(), Some("hatch"));
+    hatchdlg::start_pick(&mut app, cadcraft_engine::PickMode::Points);
+    assert_eq!(app.ui.dialog, None);
+
+    // Pick internal point inside rectangle
+    app.cmdline("50,50");
+
+    // Paint while HATCHPICK is still active: preview must be gray (ACI 8), NOT green (CLAYER)
+    let pick_shapes = paint_frame(&mut app);
+    assert!(count_strokes(&pick_shapes, gray) > 5, "HATCHPICK preview must paint gray hatch pattern lines");
+    assert_eq!(count_strokes(&pick_shapes, green), base_green, "HATCHPICK preview must NOT paint green CLAYER lines");
+    assert!(app.session.doc().unwrap().layer("01 Rayados 0.18").is_none(), "preview must not create persistent layer");
+    assert_eq!(app.session.doc().unwrap().header.str("CLAYER", ""), "Contornos vistos");
+
+    // 2. Press Enter to return to dialog; dialog preview must also paint gray (ACI 8), NOT green
+    app.cmdline("");
+    let dlg_shapes = paint_frame(&mut app);
+    assert_eq!(app.ui.dialog.as_deref(), Some("hatch"));
+    assert!(count_strokes(&dlg_shapes, gray) > 5, "dialog preview must paint gray hatch pattern lines");
+    assert_eq!(count_strokes(&dlg_shapes, green), base_green, "dialog preview must NOT paint green CLAYER lines");
+    assert!(app.session.doc().unwrap().layer("01 Rayados 0.18").is_none());
+
+    // 3. Cancel dialog: leaves no hatch entity and no persistent layer
+    app.ui.dialog = None;
+    app.hatch_dlg = None;
+    app.session.hatch_preview_params = None;
+    app.session.hatch_picks = None;
+    let cancelled_shapes = paint_frame(&mut app);
+    assert_eq!(count_strokes(&cancelled_shapes, gray), 0, "cancelling must leave no gray preview");
+    assert_eq!(app.session.doc().unwrap().model.len(), 1);
+    assert!(app.session.doc().unwrap().layer("01 Rayados 0.18").is_none());
+
+    // 4. Re-open, pick, and accept: final entity keeps the same gray HATCHCLAYER appearance
+    app.run("hatch", serde_json::Value::Null).unwrap();
+    hatchdlg::start_pick(&mut app, cadcraft_engine::PickMode::Points);
+    app.cmdline("50,50");
+    app.cmdline("");
+    let before_ok = count_strokes(&paint_frame(&mut app), gray);
+    assert!(before_ok > 5);
+    assert!(hatchdlg::ok(&mut app), "dialog OK should succeed");
+    app.ui.dialog = None;
+    let after_ok = count_strokes(&paint_frame(&mut app), gray);
+    assert_eq!(after_ok, before_ok, "accepted hatch keeps identical HATCHCLAYER appearance");
+    assert_eq!(app.session.doc().unwrap().header.str("CLAYER", ""), "Contornos vistos");
+
+    // 5. Existing HATCHCLAYER with custom color (ACI 1 Red): preview respects existing layer properties
+    app.session.execute("u", &json!({})).unwrap();
+    app.session.execute("layer.new", &json!({ "name": "01 Rayados 0.18", "color": 1 })).unwrap();
+    let red_rgb = cadcraft_color::aci_rgb(1);
+    let red = egui::Color32::from_rgb(red_rgb.0, red_rgb.1, red_rgb.2);
+    app.run("hatch", serde_json::Value::Null).unwrap();
+    hatchdlg::start_pick(&mut app, cadcraft_engine::PickMode::Points);
+    app.cmdline("50,50");
+    let pick_red_shapes = paint_frame(&mut app);
+    assert!(count_strokes(&pick_red_shapes, red) > 5, "HATCHPICK preview respects existing HATCHCLAYER red color");
+    assert_eq!(count_strokes(&pick_red_shapes, green), base_green, "HATCHPICK preview does not use green CLAYER");
+    app.cmdline("");
+    let dlg_red_shapes = paint_frame(&mut app);
+    assert!(count_strokes(&dlg_red_shapes, red) > 5, "dialog preview respects existing HATCHCLAYER red color");
+    assert_eq!(count_strokes(&dlg_red_shapes, green), base_green);
+}
+

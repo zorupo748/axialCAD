@@ -37,6 +37,7 @@ fn crossing(s: &mut Session) -> (Handle, Handle) {
 #[test]
 fn mline_is_one_object_with_the_standard_style() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let a = h(&s.execute("mline", &json!({"points": [[0, 0], [10, 0], [10, 5]]})).unwrap());
     assert_eq!(s.doc().unwrap().model.len(), 1);
     let m = mline(&s, a);
@@ -51,6 +52,7 @@ fn mline_is_one_object_with_the_standard_style() {
 #[test]
 fn mlstyle_defines_elements_caps_and_fill() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let r = s
         .execute(
             "mlstyle",
@@ -216,6 +218,7 @@ fn mledit_vertices_cuts_and_welds() {
 #[test]
 fn transforms_grips_explode() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let a = h(&s.execute("mline", &json!({"points": [[0, 0], [10, 0]]})).unwrap());
     s.execute("mledit", &json!({"tool": "ca", "handle": a.hex(), "p1": [4, 0], "p2": [6, 0]})).unwrap();
     // Mirrored: the second element moves to the other side.
@@ -239,6 +242,7 @@ fn transforms_grips_explode() {
 
     // Explode: lines in the elements' colours.
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     s.execute(
         "mlstyle",
         &json!({"name": "R", "elements": [{"offset": 0.5, "color": "red"}, {"offset": -0.5}], "endCaps": {"line": true, "outerArc": true}}),
@@ -257,6 +261,7 @@ fn transforms_grips_explode() {
 #[test]
 fn snaps_selection_extents_and_render() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     s.execute("mlstyle", &json!({"name": "R", "elements": [{"offset": 0.5, "color": "red"}, {"offset": -0.5}], "fill": "blue"})).unwrap();
     let a = h(&s.execute("mline", &json!({"points": [[0, 0], [10, 0]], "justification": "zero"})).unwrap());
     let d = s.doc().unwrap();

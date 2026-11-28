@@ -20,6 +20,7 @@ fn dims(s: &Session) -> Vec<(String, Dimension, DimGeometry)> {
 #[test]
 fn properties_override_one_dimensions_text_height_arrows_scale_and_precision() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     s.script("dimlinear 0,0 10,0 5,-3\ndimlinear 0,10 20,10 5,13\n").unwrap();
     let before = dims(&s);
     let (h, _, g0) = &before[0];

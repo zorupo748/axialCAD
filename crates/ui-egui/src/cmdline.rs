@@ -276,6 +276,12 @@ pub struct KeyPress {
     pub plain: bool,
 }
 
+/// Whether a `Paste` event belongs to the command line rather than the drawing clipboard.
+pub fn wants_text_paste(app: &CadApp) -> bool {
+    !app.cmd.buffer.is_empty()
+        || app.session.current_prompt().is_some_and(|p| p.accept.text && !p.accept.point && !p.accept.number)
+}
+
 /// Handle keyboard input destined for the command line (when no text field has focus).
 pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
     if ctx.egui_wants_keyboard_input() || app.ui.dialog.is_some() || app.session.in_script {
@@ -286,6 +292,7 @@ pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
     app.cmd.watch_selection(&selection);
     let mac = ctx.os() == egui::os::OperatingSystem::Mac;
     let text_prompt = app.session.current_prompt().is_some_and(|p| p.accept.text && !p.accept.point && !p.accept.number);
+    let wants_paste = wants_text_paste(app);
     options_still_fit(app);
     for ev in events {
         // The options menu takes the arrows, Enter and Escape; typing closes it.
@@ -316,11 +323,20 @@ pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
                 egui::Event::Key { key: Key::ArrowDown | Key::ArrowUp, pressed: true, .. } => {}
                 // Space arrives as a key and as text; the text picks.
                 egui::Event::Key { key: Key::Space, .. } => {}
+                egui::Event::Paste(_) if wants_paste => app.cmd.options = None,
                 egui::Event::Text(_) | egui::Event::Key { pressed: true, .. } => app.cmd.options = None,
                 _ => {}
             }
         }
         match ev {
+            egui::Event::Paste(t) if wants_paste => {
+                let clean: String = t.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+                if !clean.is_empty() {
+                    app.cmd.dyn_active_field = None;
+                    app.cmd.buffer.push_str(&clean);
+                    app.cmd.typed_since_selection = true;
+                }
+            }
             egui::Event::Text(t) => {
                 if t == "\t" {
                     tab(app);

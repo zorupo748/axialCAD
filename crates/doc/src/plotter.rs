@@ -191,11 +191,11 @@ impl PlotterConfig {
         if text.len() > MAX_PLOTTER_FILE {
             return Err("the plotter configuration file is too large".into());
         }
-        let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("not a CADCraft plotter configuration: {e}"))?;
+        let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("not an axialCAD plotter configuration: {e}"))?;
         match v.get(FILE_MARKER).and_then(serde_json::Value::as_u64) {
             Some(FILE_VERSION) => {}
-            Some(n) => return Err(format!("plotter configuration format version {n} is newer than this CADCraft reads")),
-            None => return Err(format!("not a CADCraft plotter configuration (no `{FILE_MARKER}`)")),
+            Some(n) => return Err(format!("plotter configuration format version {n} is newer than this axialCAD reads")),
+            None => return Err(format!("not an axialCAD plotter configuration (no `{FILE_MARKER}`)")),
         }
         let c: PlotterConfig = serde_json::from_value(v).map_err(|e| format!("bad plotter configuration: {e}"))?;
         let c = c.sanitized();
@@ -203,6 +203,32 @@ impl PlotterConfig {
             return Err("the plotter configuration has no name".into());
         }
         Ok(c)
+    }
+}
+
+/// User-facing display name for a built-in device. Maps internal built-in names ("CADCraft PDF")
+/// to their brand-facing labels ("axialCAD PDF"), preserving all user and custom device names.
+pub fn display_device_name(name: &str) -> &str {
+    match name {
+        "CADCraft PDF" => "axialCAD PDF",
+        "CADCraft PNG" => "axialCAD PNG",
+        "CADCraft SVG" => "axialCAD SVG",
+        other => other,
+    }
+}
+
+/// Canonical internal identifier for a device name or user-facing alias.
+/// Normalizes "axialCAD PDF" -> "CADCraft PDF", etc. Preserves all other device names.
+pub fn canonical_device_name(name: &str) -> &str {
+    let n = name.trim();
+    if n.eq_ignore_ascii_case("axialCAD PDF") || n.eq_ignore_ascii_case("CADCraft PDF") {
+        "CADCraft PDF"
+    } else if n.eq_ignore_ascii_case("axialCAD PNG") || n.eq_ignore_ascii_case("CADCraft PNG") {
+        "CADCraft PNG"
+    } else if n.eq_ignore_ascii_case("axialCAD SVG") || n.eq_ignore_ascii_case("CADCraft SVG") {
+        "CADCraft SVG"
+    } else {
+        n
     }
 }
 

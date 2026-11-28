@@ -7,6 +7,7 @@ use crate::{EngineError, Result, Session};
 mod table;
 
 const SESSION_VARS: &[&str] = &[
+    "MILLISECS",
     "AUDITCTL",
     "ELEVATION",
     "ELEVATIONMODE",
@@ -83,6 +84,7 @@ pub fn get(s: &Session, name: &str) -> Option<Value> {
         "ELEVATION" => json!(s.effective_drawing_plane_offset()),
         "ELEVATIONMODE" => json!(if s.drawing_plane_offset_is_manual() { "manual" } else { "automatic" }),
         "WORKPLANEMODE" => json!(if s.drawing_plane_is_manual() { "manual" } else { "automatic" }),
+        "MILLISECS" => json!(s.started_at.elapsed().as_millis() as i64),
         "OSMODE" => json!(st.osmode),
         "OSNAPHATCH" => json!(i32::from(st.osnaphatch)),
         // AutoCAD's values: positive on, negative off (4 = every annotative object).
@@ -241,6 +243,7 @@ fn as_pt(v: &Value) -> Option<cadcraft_geom::Vec2> {
 
 /// Variables `get` reports from session or drawing state that `set` can't change.
 const READ_ONLY: &[&str] = &[
+    "MILLISECS",
     "CMDNAMES",
     "DWGNAME",
     "DWGPREFIX",
@@ -358,7 +361,14 @@ pub fn set(s: &mut Session, name: &str, v: &Value) -> Result<()> {
         "GRIDMAJOR" => st.gridmajor = as_f64(v).ok_or_else(bad)?.clamp(1.0, 100.0) as u32,
         "DYNDIGRIP" => st.dyndigrip = as_i(v).filter(|i| (0..=31).contains(i)).and_then(|i| u32::try_from(i).ok()).ok_or_else(bad)?,
         "DYNDIVIS" => st.dyndivis = as_i(v).filter(|i| (0..=2).contains(i)).and_then(|i| u8::try_from(i).ok()).ok_or_else(bad)?,
-        "DYNMODE" => st.dynmode = as_bool(v).ok_or_else(bad)?,
+        "DYNMODE" => {
+            if let Some(b) = v.as_bool() {
+                st.dynmode = b;
+            } else {
+                let i = as_i(v).filter(|i| (-3..=3).contains(i)).ok_or_else(bad)?;
+                st.dynmode = i > 0;
+            }
+        }
         "DYNPIFORMAT" => st.dynpi_cartesian = as_bool(v).ok_or_else(bad)?,
         "DYNPICOORDS" => st.dynpi_absolute = as_bool(v).ok_or_else(bad)?,
         "DYNPROMPT" => st.dynprompt = as_bool(v).ok_or_else(bad)?,

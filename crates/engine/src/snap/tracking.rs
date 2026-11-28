@@ -815,18 +815,24 @@ impl crate::Session {
     /// acquires it for tracking), then grid snap, then tracking paths (polar, object snap
     /// tracking, Extension, Parallel, Apparent Intersection), then ortho.
     pub fn snap_cursor(&mut self, raw: Vec2, q: &CursorQuery) -> CursorSnap {
-        self.snap_cursor_with_object_snaps(raw, q, true)
+        self.snap_cursor_with_object_snaps(raw, q, true, 0)
     }
 
     /// Like [`Session::snap_cursor`], but without 2D object snaps or object-derived tracking.
     /// Used when a command's coordinate plane does not match the XY coordinates of those snaps.
     pub fn snap_cursor_without_object_snaps(&mut self, raw: Vec2, q: &CursorQuery) -> CursorSnap {
-        self.snap_cursor_with_object_snaps(raw, q, false)
+        self.snap_cursor_with_object_snaps(raw, q, false, 0)
     }
 
-    fn snap_cursor_with_object_snaps(&mut self, raw: Vec2, q: &CursorQuery, object_snaps: bool) -> CursorSnap {
+    /// Resolve the ordinary drafting constraints while the canvas handles APP in the view.
+    pub fn snap_cursor_without_apparent_intersection(&mut self, raw: Vec2, q: &CursorQuery) -> CursorSnap {
+        self.snap_cursor_with_object_snaps(raw, q, true, mode::APP)
+    }
+
+    fn snap_cursor_with_object_snaps(&mut self, raw: Vec2, q: &CursorQuery, object_snaps: bool, excluded: u32) -> CursorSnap {
         // Snap and grid spacing are the drawing's (SNAPUNIT/GRIDUNIT live in its header).
         let mut s = self.drafting_settings();
+        s.osmode &= !excluded;
         if !object_snaps {
             s.osmode = 0;
             s.otrack = false;

@@ -3,16 +3,53 @@
 
 use cadcraft_doc::{Entity, EntityKind, Handle, Prim};
 use cadcraft_geom::{
-    Arc, Circle, Line, Mat3, PolyVertex, Polyline, Segment, TAU, Vec2, angle_in_sweep, ccw_sweep, intersect_ext, line_line_infinite, norm_angle,
+    Arc, Bounds2, Circle, Line, Mat3, PolyVertex, Polyline, Segment, TAU, Vec2, Vec3, angle_in_sweep, ccw_sweep, intersect_ext, line_line,
+    line_line_infinite, norm_angle,
 };
 use serde_json::{Value, json};
 
 use super::helpers::*;
 use super::machines::{SelOutcome, SelectPhase, number};
 use super::trimextend::{self, TrimM};
-use super::*;
+use super::{CommandSpec, bad, bool_or, f64_or, f64_req, point_param, point_req, points_param, str_param, targets};
 use crate::select::{SelectKind, SelectMode};
 use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Session, Step};
+
+/// TRIMEXTENDMODE: 1 (default) Quick, 0 Standard.
+pub(crate) fn quick_mode(s: &Session) -> bool {
+    s.doc().map(|d| d.header.i64("TRIMEXTENDMODE", 1) != 0).unwrap_or(true)
+}
+/// EDGEMODE: 1 extends cutting and boundary edges virtually (Standard mode).
+pub(crate) fn edge_mode(s: &Session) -> bool {
+    s.doc().map(|d| d.header.i64("EDGEMODE", 0) != 0).unwrap_or(false)
+}
+/// PROJMODE: 0 None (default), 1 UCS, 2 View.
+pub(crate) fn proj_mode(s: &Session) -> i64 {
+    match s.doc().map(|d| d.header.i64("PROJMODE", 0)) {
+        Ok(mode @ (1 | 2)) => mode,
+        _ => 0,
+    }
+}
+pub(crate) fn no_intersection(msg: impl Into<String>) -> EngineError {
+    EngineError::NoIntersection(msg.into())
+}
+
+pub(crate) fn trim_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("AXIAL_TRIM_DEBUG").is_some_and(|value| value == "1"))
+}
+
+pub(crate) fn trim_trace(args: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    if trim_debug_enabled() {
+        let _ = writeln!(std::io::stderr().lock(), "[axial-trim] {args}");
+    }
+}
+
+/// Whether a trim error says the object meets no cutting edge (a Quick-mode trim then erases it).
+pub(crate) fn misses_edges(e: &EngineError) -> bool {
+    matches!(e, EngineError::NoIntersection(_))
+}
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -60,13 +97,13 @@ pub fn specs() -> Vec<CommandSpec> {
             .menu(&["Modify", "Trim"])
             .alias(&["tr"])
             .params(
-                "{handle, pick: [x,y] | fence: [[x,y],...] | crossing: [[x,y],[x,y]], edges?: [hex], edgeMode?: \"extend\"|\"none\", mode?: \"quick\"|\"standard\"}",
+                "{handle, pick: [x,y] or [x,y,z] | fence: [[x,y],...] | crossing: [[x,y],[x,y]], edges?: [hex], edgeMode?: \"extend\"|\"none\", mode?: \"quick\"|\"standard\"}. PROJMODE applies to direct line/circle/arc picks. Window, Crossing and Fence use XY.",
             )
             .interactive(|_| Ok(Box::new(TrimM::new(false)))),
         CommandSpec::new("extend", "Extend", trimextend::run_extend)
             .menu(&["Modify", "Extend"])
             .alias(&["ex"])
-            .params("{handle, pick: [x,y] | fence: [[x,y],...] | crossing: [[x,y],[x,y]], edges?: [hex], edgeMode?: \"extend\"|\"none\"}")
+            .params("{handle, pick: [x,y] or [x,y,z] | fence: [[x,y],...] | crossing: [[x,y],[x,y]], edges?: [hex], edgeMode?: \"extend\"|\"none\"}. PROJMODE applies to direct line picks. Window, Crossing, Fence and arc extension use XY.")
             .interactive(|_| Ok(Box::new(TrimM::new(true)))),
         CommandSpec::new("fillet", "Fillet", run_fillet)
             .menu(&["Modify", "Fillet"])
@@ -100,6 +137,14 @@ pub fn specs() -> Vec<CommandSpec> {
 // ---------------- core operations ----------------
 
 pub(crate) fn transform_entities(s: &mut Session, hs: &[Handle], m: &Mat3, copy: bool) -> Result<Vec<Handle>> {
+    edit_entities(s, hs, copy, |kind| kind.transform(m))
+}
+
+pub(super) fn translate_entities_3d(s: &mut Session, hs: &[Handle], delta: Vec3, copy: bool) -> Result<Vec<Handle>> {
+    edit_entities(s, hs, copy, |kind| kind.translate_3d(delta))
+}
+
+fn edit_entities(s: &mut Session, hs: &[Handle], copy: bool, edit: impl Fn(&mut EntityKind)) -> Result<Vec<Handle>> {
     let d = s.doc_mut()?;
     let mut out = Vec::new();
     for h in hs {
@@ -108,7 +153,7 @@ pub(crate) fn transform_entities(s: &mut Session, hs: &[Handle], m: &Mat3, copy:
             let Some(e) = d.entity(*h).map(|e| (**e).clone()) else { continue };
             let nh = d.new_handle();
             let mut ne = Entity { handle: nh, ..e };
-            ne.kind.transform(m);
+            edit(&mut ne.kind);
             if let Some(st) = d.space_mut(&sp) {
                 st.push(ne);
                 out.push(nh);
@@ -118,7 +163,7 @@ pub(crate) fn transform_entities(s: &mut Session, hs: &[Handle], m: &Mat3, copy:
             if locked {
                 continue;
             }
-            d.modify_entity(*h, |e| e.kind.transform(m))?;
+            d.modify_entity(*h, |e| edit(&mut e.kind))?;
             out.push(*h);
         }
     }
@@ -340,7 +385,7 @@ struct StretchM {
     mode: Option<SelectMode>,
     /// First corner of the window being drawn.
     corner: Option<Vec2>,
-    base: Option<Vec2>,
+    base: Option<Vec3>,
 }
 
 impl StretchM {
@@ -519,16 +564,18 @@ impl Interactive for StretchM {
         match (self.phase, self.corner) {
             (StretchPhase::Select, Some(c)) => Prompt::new("Specify opposite corner", Accept::POINT).base(c),
             (StretchPhase::Select, None) => Prompt::new(if self.removing { "Remove objects" } else { "Select objects" }, Accept::POINT),
-            (StretchPhase::Base, _) => Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]).default("Displacement"),
+            (StretchPhase::Base, _) => Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]).default("Displacement").spatial_point(),
             (StretchPhase::Displacement, _) => Prompt::new("Specify displacement", Accept::POINT).default("0,0"),
-            (StretchPhase::Second, _) => Prompt::new("Specify second point or <use first point as displacement>", Accept::POINT).base_opt(self.base),
+            (StretchPhase::Second, _) => {
+                Prompt::new("Specify second point or <use first point as displacement>", Accept::POINT).base3_opt(self.base).spatial_point()
+            }
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
         match (self.phase, i) {
             (StretchPhase::Select, i) => self.select(s, i),
-            (StretchPhase::Base, Input::Point(p)) => {
-                self.base = Some(p);
+            (StretchPhase::Base, i @ (Input::Point(_) | Input::Point3(_))) => {
+                self.base = i.point3();
                 self.phase = StretchPhase::Second;
                 Ok(Step::Continue)
             }
@@ -542,8 +589,9 @@ impl Interactive for StretchM {
             }
             (StretchPhase::Displacement, Input::Point(p)) => self.apply(s, p),
             (StretchPhase::Displacement, Input::Enter) => Ok(Step::Done),
-            (StretchPhase::Second, Input::Point(p)) => self.apply(s, p - self.base.unwrap_or(p)),
-            (StretchPhase::Second, Input::Enter) => self.apply(s, self.base.unwrap_or(Vec2::ZERO)),
+            (StretchPhase::Second, Input::Point(p)) => self.apply(s, p - self.base.map_or(p, Vec3::xy)),
+            (StretchPhase::Second, Input::Point3(p)) => self.apply(s, p.xy() - self.base.map_or(p.xy(), Vec3::xy)),
+            (StretchPhase::Second, Input::Enter) => self.apply(s, self.base.map_or(Vec2::ZERO, Vec3::xy)),
             _ => Ok(Step::Continue),
         }
     }
@@ -569,7 +617,8 @@ impl Interactive for StretchM {
             (StretchPhase::Select, Some(a), _) => rect(a),
             (StretchPhase::Second, _, Some(base)) => {
                 let Ok(doc) = s.doc() else { return Vec::new() };
-                let m = Mat3::translate(c - base);
+                let delta = c - base.xy();
+                let m = Mat3::translate(delta);
                 let mut out: Vec<EntityKind> = self
                     .objs
                     .iter()
@@ -580,12 +629,12 @@ impl Interactive for StretchM {
                         if self.whole.contains(&e.handle) {
                             e.kind.transform(&m);
                         } else {
-                            stretch_entity(&mut e, &self.windows, c - base);
+                            stretch_entity(&mut e, &self.windows, delta);
                         }
                         e.kind
                     })
                     .collect();
-                out.push(line(base, c));
+                out.push(line3(base, s.preview_point3(c, base)));
                 out
             }
             _ => Vec::new(),
@@ -831,33 +880,52 @@ pub(crate) struct Edges<'a> {
     pub implied: bool,
 }
 
+fn cutting_entities<'a>(s: &'a Session, edges: Edges<'a>, exclude: Handle) -> Result<impl Iterator<Item = &'a Entity> + 'a> {
+    let d = s.doc()?;
+    let store = d.space(&s.space()).ok_or(EngineError::NoDocument)?;
+    Ok(store
+        .iter()
+        .map(|entity| entity.as_ref())
+        .filter(move |e| e.handle != exclude && d.is_visible(e) && edges.only.is_none_or(|hs| hs.contains(&e.handle))))
+}
+
 /// All primitives of the cutting edges (excluding `exclude`).
 fn edge_segments(s: &Session, edges: Edges, exclude: Handle) -> Result<Vec<Segment>> {
-    let d = s.doc()?;
-    let space = s.space();
-    let store = d.space(&space).ok_or(EngineError::NoDocument)?;
     let mut out = Vec::new();
-    for e in store.iter() {
-        if e.handle == exclude || !d.is_visible(e) {
-            continue;
-        }
-        if let Some(es) = edges.only
-            && !es.contains(&e.handle)
-        {
-            continue;
-        }
+    for e in cutting_entities(s, edges, exclude)? {
         if edges.implied
             && let Some(segs) = implied_edge(&e.kind)
         {
             out.extend(segs);
-            continue;
-        }
-        for p in e.kind.prims() {
-            out.extend(prim_to_segments(&p));
+        } else {
+            for p in e.kind.prims() {
+                out.extend(prim_to_segments(&p));
+            }
         }
     }
     Ok(out)
 }
+
+/// A direct pick. Window, Crossing and Fence continue to use their existing 2D paths.
+#[derive(Clone, Copy)]
+pub(crate) struct CurvePick {
+    pub xy: Vec2,
+    pub world: Option<Vec3>,
+}
+
+fn require_horizontal_arc(entity: &Entity) -> Result<()> {
+    if (matches!(entity.kind, EntityKind::Arc(_) | EntityKind::Circle(_))) && !entity.common.extrusion.near(Vec3::Z, 1e-6) {
+        return Err(EngineError::Other("TRIM and EXTEND require a circle or arc with world Z extrusion.".into()));
+    }
+    Ok(())
+}
+
+fn arc_at_height(center: Vec3, radius: f64, start: f64, end: f64) -> EntityKind {
+    EntityKind::Arc(cadcraft_doc::Arc { center, radius: radius.abs(), start: norm_angle(start), end: norm_angle(end) })
+}
+
+#[path = "trim_projection.rs"]
+mod trim_projection;
 
 /// `k` as an implied edge (EDGEMODE 1), for lines, arcs and open polylines.
 fn implied_edge(k: &EntityKind) -> Option<Vec<Segment>> {
@@ -907,91 +975,273 @@ fn prim_to_segments(p: &Prim) -> Vec<Segment> {
     }
 }
 
-/// Trim `h` at the piece containing `pick`. Returns the handles that replace it.
-pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Result<Vec<Handle>> {
+#[derive(Clone, Debug)]
+pub(crate) struct TrimPieces {
+    pub kept: Vec<EntityKind>,
+    pub removed: Vec<EntityKind>,
+}
+
+/// Planar TRIM route for Window, Crossing and Fence. It deliberately ignores PROJMODE.
+pub(crate) fn trim_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges) -> Result<TrimPieces> {
+    trim_geometry_impl(s, h, pick, edges, None, false)
+}
+
+fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: Option<CurvePick>, quick: bool) -> Result<TrimPieces> {
     if super::curves::is_locked(s, h) {
         return Err(EngineError::Other("The object is on a locked layer.".into()));
     }
     let e = s.doc()?.entity(h).map(|e| (**e).clone()).ok_or_else(|| EngineError::Other("no such object".into()))?;
-    let cut = edge_segments(s, edges, h)?;
-    let pieces: Vec<EntityKind> = match &e.kind {
+    if click.is_some() {
+        require_horizontal_arc(&e)?;
+    }
+    let pick = click.and_then(|p| p.world).map_or(pick, Vec3::xy);
+    match &e.kind {
         EntityKind::Line(l) => {
-            let ln = Line::new(l.a.xy(), l.b.xy());
-            let mut ts: Vec<f64> = cut
-                .iter()
-                .flat_map(|c| intersect_ext(&Segment::Line(ln), c, false))
-                .map(|x| ln.param_of(x))
-                .filter(|t| *t > 1e-9 && *t < 1.0 - 1e-9)
-                .collect();
+            let direction = l.b - l.a;
+            let length = direction.len();
+            if !length.is_finite() || length <= 1e-12 {
+                return Err(EngineError::Other("Degenerate line: length is zero.".into()));
+            }
+            let (tp, raw_ts) = if let Some(click) = click {
+                trim_projection::line_hits(s, &e, l, click, edges, false)?
+            } else {
+                let ln = Line::new(l.a.xy(), l.b.xy());
+                if ln.a.dist(ln.b) <= 1e-12 {
+                    return Err(EngineError::Other("Degenerate projection: the line has no usable length in XY.".into()));
+                }
+                let cut = edge_segments(s, edges, h)?;
+                let ts = cut.iter().flat_map(|c| intersect_ext(&Segment::Line(ln), c, false)).map(|p| ln.param_of(p)).collect();
+                (ln.param_of(pick), ts)
+            };
+            let tol = trim_projection::contact_tolerance(length, length);
+            let t_tol = (tol / length.max(1e-9)).clamp(1e-9, 1e-2);
+            let has_start_cut = raw_ts.iter().any(|&t| t.abs() <= t_tol || (t < 0.0 && t >= -t_tol));
+            let has_end_cut = raw_ts.iter().any(|&t| (t - 1.0).abs() <= t_tol || (t > 1.0 && t <= 1.0 + t_tol));
+            let mut ts: Vec<f64> = raw_ts.into_iter().filter(|&t| t > t_tol && t < 1.0 - t_tol).collect();
             ts.sort_by(f64::total_cmp);
-            let tp = ln.param_of(pick).clamp(0.0, 1.0);
-            let lo = ts.iter().copied().filter(|t| *t < tp).fold(0.0, f64::max);
-            let hi = ts.iter().copied().filter(|t| *t > tp).fold(1.0, f64::min);
-            if lo == 0.0 && hi == 1.0 {
-                return Err(EngineError::Other("Object does not intersect a cutting edge.".into()));
+            ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if ts.is_empty() {
+                if (has_start_cut && has_end_cut) || (quick && (has_start_cut || has_end_cut)) {
+                    return Ok(TrimPieces { kept: vec![], removed: vec![line3(l.a, l.b)] });
+                }
+                return Err(no_intersection("Object does not intersect a cutting edge."));
             }
-            let mut v = Vec::new();
-            if lo > 0.0 {
-                v.push(line(ln.a, ln.at(lo)));
-            }
-            if hi < 1.0 {
-                v.push(line(ln.at(hi), ln.b));
-            }
-            v
-        }
-        EntityKind::Arc(a) => {
-            let ga = Arc::new(a.center.xy(), a.radius, a.start, a.end);
-            let seg = Segment::Arc { arc: ga, ccw: true };
-            let sweep = ga.sweep();
-            let param = |p: Vec2| norm_angle(ga.center.angle_to(p) - ga.start);
-            let mut ts: Vec<f64> =
-                cut.iter().flat_map(|c| intersect_ext(&seg, c, false)).map(param).filter(|t| *t > 1e-9 && *t < sweep - 1e-9).collect();
-            ts.sort_by(f64::total_cmp);
-            let tp = param(pick).min(sweep);
-            let lo = ts.iter().copied().filter(|t| *t < tp).fold(0.0, f64::max);
-            let hi = ts.iter().copied().filter(|t| *t > tp).fold(sweep, f64::min);
-            if lo == 0.0 && hi == sweep {
-                return Err(EngineError::Other("Object does not intersect a cutting edge.".into()));
-            }
-            let mut v = Vec::new();
-            if lo > 0.0 {
-                v.push(arc(&Arc::new(ga.center, ga.radius, ga.start, ga.start + lo)));
-            }
-            if hi < sweep {
-                v.push(arc(&Arc::new(ga.center, ga.radius, ga.start + hi, ga.end)));
-            }
-            v
-        }
-        EntityKind::Circle(c) => {
-            let full = Segment::Arc { arc: Arc { center: c.center.xy(), radius: c.radius, start: 0.0, end: TAU - 1e-12 }, ccw: true };
-            let mut angs: Vec<f64> = cut.iter().flat_map(|x| intersect_ext(&full, x, false)).map(|p| c.center.xy().angle_to(p)).collect();
-            angs.sort_by(f64::total_cmp);
-            angs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-            if angs.len() < 2 {
-                return Err(EngineError::Other("Circle must intersect cutting edges at two or more points.".into()));
-            }
-            let ap = c.center.xy().angle_to(pick);
-            // The removed arc runs between the two intersections around the pick.
-            let n = angs.len();
-            let mut keep = None;
-            for i in 0..n {
-                let a0 = angs[i];
-                let a1 = angs[(i + 1) % n];
-                if angle_in_sweep(ap, a0, a1) {
-                    keep = Some(arc(&Arc::new(c.center.xy(), c.radius, a1, a0)));
+            let tp = tp.clamp(0.0, 1.0);
+            let mut cuts = Vec::with_capacity(ts.len() + 2);
+            cuts.push(0.0);
+            cuts.extend(&ts);
+            cuts.push(1.0);
+            let mut lo = cuts[0];
+            let mut hi = cuts[1];
+            for w in cuts.windows(2) {
+                if tp >= w[0] - 1e-9 && tp <= w[1] + 1e-9 {
+                    lo = w[0];
+                    hi = w[1];
+                    break;
                 }
             }
-            keep.into_iter().collect()
+            if (hi - lo).abs() < 1e-9 {
+                return Err(EngineError::Other("No piece to trim at pick point.".into()));
+            }
+            let mut kept = Vec::new();
+            if lo > 0.0 {
+                kept.push(line3(l.a, l.a + direction * lo));
+            }
+            if hi < 1.0 {
+                kept.push(line3(l.a + direction * hi, l.b));
+            }
+            let removed = vec![line3(l.a + direction * lo, l.a + direction * hi)];
+            Ok(TrimPieces { kept, removed })
         }
-        EntityKind::LwPolyline(p) => trim_polyline(p, &cut, pick)?,
-        k => super::modify2::trim_other(k, &cut, pick)?,
+        EntityKind::Arc(a) => {
+            let center = if click.is_some() { a.center } else { v3(a.center.xy()) };
+            let ga = Arc::new(Vec2::ZERO, a.radius, a.start, a.end);
+            let sweep = ga.sweep();
+            let (local_pick, hits) = if let Some(click) = click {
+                let (local_pick, hits) = trim_projection::round_hits(s, &e, a.center, a.radius, click, edges)?;
+                (local_pick, hits)
+            } else {
+                let cut = edge_segments(s, edges, h)?;
+                let full = Segment::Arc { arc: Arc::new(a.center.xy(), a.radius, 0.0, 0.0), ccw: true };
+                let angles = cut.iter().flat_map(|c| intersect_ext(&full, c, false)).map(|p| a.center.xy().angle_to(p)).collect();
+                (pick - a.center.xy(), angles)
+            };
+            let tol = trim_projection::contact_tolerance(ga.radius, ga.radius);
+            // Keep the two endpoint neighborhoods disjoint across the angular seam as well.
+            let endpoint_spacing = sweep.min(TAU - sweep);
+            let contact_angle = (tol / ga.radius.max(1e-9)).clamp(1e-9, 1e-2);
+            let ang_tol = contact_angle.min(endpoint_spacing / 4.0);
+            let has_start_cut = hits.iter().any(|&angle| {
+                let d = norm_angle(angle - ga.start);
+                d <= ang_tol || d >= TAU - ang_tol
+            });
+            let has_end_cut = hits.iter().any(|&angle| {
+                let d = norm_angle(angle - ga.start);
+                (d - sweep).abs() <= ang_tol
+            });
+            let mut ts: Vec<f64> = hits
+                .iter()
+                .filter_map(|&angle| {
+                    let d = norm_angle(angle - ga.start);
+                    (d > ang_tol && d < sweep - ang_tol).then_some(d)
+                })
+                .collect();
+            ts.sort_by(f64::total_cmp);
+            ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if ts.is_empty() {
+                let free_end = quick
+                    && hits.iter().any(|&angle| {
+                        let d = norm_angle(angle - ga.start);
+                        let to_start = d.min(TAU - d);
+                        let to_end = (d - sweep).abs();
+                        let to_end = to_end.min(TAU - to_end);
+                        (to_start <= ang_tol && to_end > contact_angle) || (to_end <= ang_tol && to_start > contact_angle)
+                    });
+                if (has_start_cut && has_end_cut) || free_end {
+                    return Ok(TrimPieces { kept: vec![], removed: vec![arc_at_height(center, ga.radius, ga.start, ga.end)] });
+                }
+                return Err(no_intersection("Object does not intersect a cutting edge."));
+            }
+            let param = |angle| norm_angle(angle - ga.start);
+            let tp = param(ga.closest(local_pick).angle()).min(sweep);
+            let mut cuts = Vec::with_capacity(ts.len() + 2);
+            cuts.push(0.0);
+            cuts.extend(&ts);
+            cuts.push(sweep);
+            let mut lo = cuts[0];
+            let mut hi = cuts[1];
+            for w in cuts.windows(2) {
+                if tp >= w[0] - 1e-9 && tp <= w[1] + 1e-9 {
+                    lo = w[0];
+                    hi = w[1];
+                    break;
+                }
+            }
+            if (hi - lo).abs() < 1e-9 {
+                return Err(EngineError::Other("No piece to trim at pick point.".into()));
+            }
+            let mut kept = Vec::new();
+            if lo > 0.0 {
+                kept.push(arc_at_height(center, ga.radius, ga.start, ga.start + lo));
+            }
+            if hi < sweep {
+                kept.push(arc_at_height(center, ga.radius, ga.start + hi, ga.end));
+            }
+            let removed = vec![arc_at_height(center, ga.radius, ga.start + lo, ga.start + hi)];
+            Ok(TrimPieces { kept, removed })
+        }
+        EntityKind::Circle(c) => {
+            let center = if click.is_some() { c.center } else { v3(c.center.xy()) };
+            let (local_pick, mut angles) = if let Some(click) = click {
+                trim_projection::round_hits(s, &e, c.center, c.radius, click, edges)?
+            } else {
+                let cut = edge_segments(s, edges, h)?;
+                let full = Segment::Arc { arc: Arc::new(c.center.xy(), c.radius, 0.0, 0.0), ccw: true };
+                let angles = cut.iter().flat_map(|edge| intersect_ext(&full, edge, false)).map(|p| c.center.xy().angle_to(p)).collect();
+                (pick - c.center.xy(), angles)
+            };
+            angles.sort_by(f64::total_cmp);
+            angles.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if let (Some(first), Some(last)) = (angles.first(), angles.last())
+                && first + TAU - last < 1e-9
+            {
+                angles.pop();
+            }
+            if angles.is_empty() || (click.is_none() && angles.len() == 1) {
+                return Err(no_intersection("Circle must intersect cutting edges at two or more points."));
+            }
+            if angles.len() == 1 {
+                return Ok(TrimPieces { kept: vec![], removed: vec![] });
+            }
+            let ap = norm_angle(local_pick.angle());
+            let (&first, &last) = angles.first().zip(angles.last()).ok_or_else(|| EngineError::Other("Could not resolve the circle cut.".into()))?;
+            let (a0, a1) = angles
+                .iter()
+                .copied()
+                .zip(angles.iter().copied().skip(1).chain([first]))
+                .find(|&(a, b)| angle_in_sweep(ap, a, b))
+                .unwrap_or((last, first));
+            Ok(TrimPieces { kept: vec![arc_at_height(center, c.radius, a1, a0)], removed: vec![arc_at_height(center, c.radius, a0, a1)] })
+        }
+        EntityKind::LwPolyline(p) => trim_polyline(p, &edge_segments(s, edges, h)?, pick),
+        k => super::modify2::trim_other(k, &edge_segments(s, edges, h)?, pick),
+    }
+}
+
+/// Trim `h` at the piece containing `pick`. Returns the handles that replace it.
+pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Result<Vec<Handle>> {
+    let pieces = trim_geometry(s, h, pick, edges)?;
+    replace_trimmed(s, h, pieces)
+}
+
+pub(crate) fn trim_at_pick(s: &mut Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool) -> Result<Vec<Handle>> {
+    let pieces = direct_trim(s, h, pick, edges, quick, "apply")?;
+    if pieces.removed.is_empty() {
+        return Ok(vec![h]);
+    }
+    let handles = replace_trimmed(s, h, pieces)?;
+    if trim_debug_enabled() {
+        trim_trace(format_args!("phase=apply committed handle={} replacements={handles:?}", h.hex()));
+    }
+    Ok(handles)
+}
+
+fn direct_trim(s: &Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool, phase: &str) -> Result<TrimPieces> {
+    let debug = trim_debug_enabled();
+    if debug {
+        let kind = s.doc().ok().and_then(|d| d.entity(h)).map(|e| e.kind.type_name());
+        trim_trace(format_args!(
+            "phase={phase} route=direct handle={} kind={kind:?} projmode={} quick={quick} xy={:?} wcs={:?}",
+            h.hex(),
+            proj_mode(s),
+            pick.xy,
+            pick.world,
+        ));
+    }
+    let result = match trim_geometry_impl(s, h, pick.xy, edges, Some(pick), quick) {
+        Err(e) if misses_edges(&e) => {
+            let Some(entity) = s.doc()?.entity(h) else { return Err(e) };
+            if debug {
+                trim_trace(format_args!("phase={phase} no_intersection handle={} detail={e}", h.hex()));
+            }
+            if quick && proj_mode(s) == 0 && matches!(entity.kind, EntityKind::Arc(_) | EntityKind::Circle(_)) {
+                Ok(TrimPieces { kept: vec![], removed: vec![] })
+            } else if quick {
+                Ok(TrimPieces { kept: vec![], removed: vec![entity.kind.clone()] })
+            } else {
+                Err(e)
+            }
+        }
+        result => result,
     };
+    if debug {
+        match &result {
+            Ok(pieces) => {
+                trim_trace(format_args!(
+                    "phase={phase} handle={} kept={} removed={} removed_kind={:?}",
+                    h.hex(),
+                    pieces.kept.len(),
+                    pieces.removed.len(),
+                    pieces.removed.first().map(EntityKind::type_name),
+                ));
+                if let Some(EntityKind::Arc(arc)) = pieces.removed.first() {
+                    trim_trace(format_args!("phase={phase} removed_arc center={:?} start={} end={}", arc.center, arc.start, arc.end));
+                }
+            }
+            Err(error) => trim_trace(format_args!("phase={phase} handle={} error={error}", h.hex())),
+        }
+    }
+    result
+}
+
+fn replace_trimmed(s: &mut Session, h: Handle, pieces: TrimPieces) -> Result<Vec<Handle>> {
+    let e = s.doc()?.entity(h).map(|e| (**e).clone()).ok_or_else(|| EngineError::Other("no such object".into()))?;
     let common = e.common.clone();
     let space = s.space();
     let d = s.doc_mut()?;
     d.remove_entity(h);
     let mut out = Vec::new();
-    for k in pieces {
+    for k in pieces.kept {
         let nh = d.new_handle();
         if let Some(st) = d.space_mut(&space) {
             st.push(Entity { handle: nh, common: common.clone(), kind: k });
@@ -999,6 +1249,11 @@ pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Resu
         }
     }
     Ok(out)
+}
+
+/// The piece of `h` that would be removed by a trim at `pick`.
+pub(crate) fn trim_preview(s: &Session, h: Handle, pick: CurvePick, edges: Edges) -> Result<Vec<EntityKind>> {
+    direct_trim(s, h, pick, edges, quick_mode(s), "preview").map(|pieces| pieces.removed)
 }
 
 /// Sub-polyline between length parameters `a` and `b` (open polylines).
@@ -1033,7 +1288,7 @@ fn sub_polyline(segs: &[Segment], a: f64, b: f64) -> Vec<PolyVertex> {
     out
 }
 
-fn trim_polyline(p: &cadcraft_doc::LwPolyline, cut: &[Segment], pick: Vec2) -> Result<Vec<EntityKind>> {
+fn trim_polyline(p: &cadcraft_doc::LwPolyline, cut: &[Segment], pick: Vec2) -> Result<TrimPieces> {
     let pl = Polyline { vertices: p.vertices.clone(), closed: p.closed };
     let segs = pl.segments();
     let total: f64 = segs.iter().map(Segment::len).sum();
@@ -1056,36 +1311,44 @@ fn trim_polyline(p: &cadcraft_doc::LwPolyline, cut: &[Segment], pick: Vec2) -> R
     ts.retain(|t| *t > 1e-9 && *t < total - 1e-9);
     ts.sort_by(f64::total_cmp);
     if ts.is_empty() {
-        return Err(EngineError::Other("Object does not intersect a cutting edge.".into()));
+        return Err(no_intersection("Object does not intersect a cutting edge."));
     }
     let lo = ts.iter().copied().filter(|t| *t < tp).fold(f64::NEG_INFINITY, f64::max);
     let hi = ts.iter().copied().filter(|t| *t > tp).fold(f64::INFINITY, f64::min);
     let mk = |vs: Vec<PolyVertex>| lwpoly(vs, false);
-    let mut out = Vec::new();
+    let mut kept = Vec::new();
+    let mut removed = Vec::new();
     if p.closed {
         // Keep the complementary run from hi around to lo.
         // The pick lies before the first cut or after the last: the piece wraps past the start
         // vertex, so the run to keep is the stretch between the first and the last cut.
-        let (lo, hi) = (
+        let (lo_f, hi_f) = (
             if lo.is_finite() { lo } else { ts.last().copied().unwrap_or(0.0) - total },
             if hi.is_finite() { hi } else { ts.first().copied().unwrap_or(total) + total },
         );
         let doubled: Vec<Segment> = segs.iter().chain(segs.iter()).copied().collect();
-        let (a, mut b) = if hi > total { (hi - total, lo) } else { (hi, lo + total) };
+        let (a, mut b) = if hi_f > total { (hi_f - total, lo_f) } else { (hi_f, lo_f + total) };
         // A single cut leaves the whole outline, opened there.
         if b <= a + 1e-9 {
             b += total;
         }
-        out.push(mk(sub_polyline(&doubled, a, b)));
+        kept.push(mk(sub_polyline(&doubled, a, b)));
+        let (ra, rb) = if lo_f < 0.0 { (lo_f + total, hi_f + total) } else { (lo_f, hi_f) };
+        removed.push(mk(sub_polyline(&doubled, ra, rb)));
     } else {
         if lo.is_finite() {
-            out.push(mk(sub_polyline(&segs, 0.0, lo)));
+            kept.push(mk(sub_polyline(&segs, 0.0, lo)));
         }
         if hi.is_finite() {
-            out.push(mk(sub_polyline(&segs, hi, total)));
+            kept.push(mk(sub_polyline(&segs, hi, total)));
         }
+        let r_lo = if lo.is_finite() { lo } else { 0.0 };
+        let r_hi = if hi.is_finite() { hi } else { total };
+        removed.push(mk(sub_polyline(&segs, r_lo, r_hi)));
     }
-    Ok(out.into_iter().filter(|k| matches!(k, EntityKind::LwPolyline(l) if l.vertices.len() >= 2)).collect())
+    let kept = kept.into_iter().filter(|k| matches!(k, EntityKind::LwPolyline(l) if l.vertices.len() >= 2)).collect();
+    let removed = removed.into_iter().filter(|k| matches!(k, EntityKind::LwPolyline(l) if l.vertices.len() >= 2)).collect();
+    Ok(TrimPieces { kept, removed })
 }
 
 fn param_on(s: &Segment, p: Vec2) -> f64 {
@@ -1099,20 +1362,307 @@ fn param_on(s: &Segment, p: Vec2) -> f64 {
     }
 }
 
+fn line_in_bounds(l: &Line, bx: &Bounds2, sides: &[Line; 4], tol: f64, crossing: bool) -> bool {
+    let expanded = bx.expand(tol);
+    if crossing {
+        if expanded.contains(l.at(0.5)) || expanded.contains(l.a) || expanded.contains(l.b) {
+            return true;
+        }
+        sides.iter().any(|sd| line_line(sd, l).is_some())
+    } else {
+        expanded.contains(l.a) && expanded.contains(l.b)
+    }
+}
+
+fn arc_in_bounds(ga: &Arc, bx: &Bounds2, sides: &[Line; 4], tol: f64, crossing: bool) -> bool {
+    let expanded = bx.expand(tol);
+    if crossing {
+        if expanded.contains(ga.mid_point()) || expanded.contains(ga.start_point()) || expanded.contains(ga.end_point()) {
+            return true;
+        }
+        let seg = Segment::Arc { arc: *ga, ccw: true };
+        sides.iter().any(|sd| !intersect_ext(&seg, &Segment::Line(*sd), false).is_empty())
+    } else {
+        expanded.contains_box(&ga.bounds())
+    }
+}
+
+fn polyline_in_bounds(pl: &Polyline, bx: &Bounds2, sides: &[Line; 4], tol: f64, crossing: bool) -> bool {
+    let expanded = bx.expand(tol);
+    if crossing {
+        for seg in pl.segments() {
+            match seg {
+                Segment::Line(l) => {
+                    if line_in_bounds(&l, bx, sides, tol, true) {
+                        return true;
+                    }
+                }
+                Segment::Arc { arc, .. } => {
+                    if arc_in_bounds(&arc, bx, sides, tol, true) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    } else {
+        expanded.contains_box(&pl.bounds())
+    }
+}
+
+pub(crate) fn trim_window_entity(
+    s: &Session,
+    h: Handle,
+    a: Vec2,
+    bx: Bounds2,
+    edges: Edges,
+    quick: bool,
+    crossing: bool,
+) -> Result<Option<Vec<EntityKind>>> {
+    if super::curves::is_locked(s, h) {
+        return Ok(None);
+    }
+    let e = s.doc()?.entity(h).map(|e| (**e).clone()).ok_or_else(|| EngineError::Other("no such object".into()))?;
+    if !s.doc()?.is_visible(&e) {
+        return Ok(None);
+    }
+    let tol = crate::select::window_tol(&bx);
+    let sides = [
+        Line::new(bx.min, Vec2::new(bx.max.x, bx.min.y)),
+        Line::new(Vec2::new(bx.max.x, bx.min.y), bx.max),
+        Line::new(bx.max, Vec2::new(bx.min.x, bx.max.y)),
+        Line::new(Vec2::new(bx.min.x, bx.max.y), bx.min),
+    ];
+    let cut = edge_segments(s, edges, h)?;
+    match &e.kind {
+        EntityKind::Line(l) => {
+            let ln = Line::new(l.a.xy(), l.b.xy());
+            let mut ts: Vec<f64> = cut
+                .iter()
+                .flat_map(|c| intersect_ext(&Segment::Line(ln), c, false))
+                .map(|x| ln.param_of(x))
+                .filter(|t| *t > 1e-9 && *t < 1.0 - 1e-9)
+                .collect();
+            ts.sort_by(f64::total_cmp);
+            ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if ts.is_empty() {
+                if quick && line_in_bounds(&ln, &bx, &sides, tol, crossing) {
+                    return Ok(Some(Vec::new()));
+                }
+                return Ok(None);
+            }
+            let mut cuts = Vec::with_capacity(ts.len() + 2);
+            cuts.push(0.0);
+            cuts.extend(&ts);
+            cuts.push(1.0);
+            let mut kept = Vec::new();
+            let total_intervals = cuts.len() - 1;
+            for w in cuts.windows(2) {
+                let (Some(&t0), Some(&t1)) = (w.first(), w.get(1)) else { continue };
+                let sub = Line::new(ln.at(t0), ln.at(t1));
+                if !line_in_bounds(&sub, &bx, &sides, tol, crossing) {
+                    kept.push(line(sub.a, sub.b));
+                }
+            }
+            if kept.len() < total_intervals { Ok(Some(kept)) } else { Ok(None) }
+        }
+        EntityKind::Arc(a_arc) => {
+            let ga = Arc::new(a_arc.center.xy(), a_arc.radius, a_arc.start, a_arc.end);
+            let seg = Segment::Arc { arc: ga, ccw: true };
+            let sweep = ga.sweep();
+            let param = |p: Vec2| norm_angle(ga.center.angle_to(p) - ga.start);
+            let mut ts: Vec<f64> =
+                cut.iter().flat_map(|c| intersect_ext(&seg, c, false)).map(param).filter(|t| *t > 1e-9 && *t < sweep - 1e-9).collect();
+            ts.sort_by(f64::total_cmp);
+            ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if ts.is_empty() {
+                if quick && arc_in_bounds(&ga, &bx, &sides, tol, crossing) {
+                    return Ok(Some(Vec::new()));
+                }
+                return Ok(None);
+            }
+            let mut cuts = Vec::with_capacity(ts.len() + 2);
+            cuts.push(0.0);
+            cuts.extend(&ts);
+            cuts.push(sweep);
+            let mut kept = Vec::new();
+            let total_intervals = cuts.len() - 1;
+            for w in cuts.windows(2) {
+                let (Some(&t0), Some(&t1)) = (w.first(), w.get(1)) else { continue };
+                let sub_arc = Arc::new(ga.center, ga.radius, ga.start + t0, ga.start + t1);
+                if !arc_in_bounds(&sub_arc, &bx, &sides, tol, crossing) {
+                    kept.push(arc(&sub_arc));
+                }
+            }
+            if kept.len() < total_intervals { Ok(Some(kept)) } else { Ok(None) }
+        }
+        EntityKind::Circle(c) => {
+            let full = Segment::Arc { arc: Arc { center: c.center.xy(), radius: c.radius, start: 0.0, end: TAU - 1e-12 }, ccw: true };
+            let mut angs: Vec<f64> = cut.iter().flat_map(|x| intersect_ext(&full, x, false)).map(|p| c.center.xy().angle_to(p)).collect();
+            angs.sort_by(f64::total_cmp);
+            angs.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if angs.len() < 2 {
+                let full_arc = Arc::new(c.center.xy(), c.radius, 0.0, TAU - 1e-12);
+                if quick && arc_in_bounds(&full_arc, &bx, &sides, tol, crossing) {
+                    return Ok(Some(Vec::new()));
+                }
+                return Ok(None);
+            }
+            let n = angs.len();
+            let mut kept = Vec::new();
+            for i in 0..n {
+                let a0 = angs[i];
+                let a1 = angs[(i + 1) % n];
+                let sub_arc = Arc::new(c.center.xy(), c.radius, a0, a1);
+                if !arc_in_bounds(&sub_arc, &bx, &sides, tol, crossing) {
+                    kept.push(arc(&sub_arc));
+                }
+            }
+            if kept.len() < n { Ok(Some(kept)) } else { Ok(None) }
+        }
+        EntityKind::LwPolyline(p) => {
+            let pl = Polyline { vertices: p.vertices.clone(), closed: p.closed };
+            let segs = pl.segments();
+            let total: f64 = segs.iter().map(Segment::len).sum();
+            let mut ts: Vec<f64> = Vec::new();
+            let mut acc = 0.0;
+            for s in &segs {
+                let len = s.len();
+                for x in cut.iter().flat_map(|c| intersect_ext(s, c, false)) {
+                    ts.push(acc + param_on(s, x) * len);
+                }
+                acc += len;
+            }
+            ts.retain(|t| *t > 1e-9 && *t < total - 1e-9);
+            ts.sort_by(f64::total_cmp);
+            ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            if ts.is_empty() {
+                if quick && polyline_in_bounds(&pl, &bx, &sides, tol, crossing) {
+                    return Ok(Some(Vec::new()));
+                }
+                return Ok(None);
+            }
+            if !p.closed {
+                let mut cuts = Vec::with_capacity(ts.len() + 2);
+                cuts.push(0.0);
+                cuts.extend(&ts);
+                cuts.push(total);
+                let mut kept = Vec::new();
+                let total_intervals = cuts.len() - 1;
+                for w in cuts.windows(2) {
+                    let (Some(&t0), Some(&t1)) = (w.first(), w.get(1)) else { continue };
+                    let sub_vs = sub_polyline(&segs, t0, t1);
+                    if sub_vs.len() >= 2 {
+                        let sub_pl = Polyline { vertices: sub_vs.clone(), closed: false };
+                        if !polyline_in_bounds(&sub_pl, &bx, &sides, tol, crossing) {
+                            kept.push(lwpoly(sub_vs, false));
+                        }
+                    }
+                }
+                if kept.len() < total_intervals { Ok(Some(kept)) } else { Ok(None) }
+            } else {
+                let inside = |p: Vec2| bx.expand(tol).contains(p);
+                let mut best: Option<Vec2> = None;
+                for pl_hit in crate::select::hit_polylines(s.doc()?, &e, tol) {
+                    for w in pl_hit.windows(2) {
+                        let (Some(p), Some(q)) = (w.first(), w.get(1)) else { continue };
+                        let seg = Line::new(*p, *q);
+                        let cands = [*p, *q, seg.closest(a)].into_iter().chain(sides.iter().filter_map(|sd| line_line(sd, &seg)));
+                        for c in cands.filter(|c| inside(*c)) {
+                            if best.is_none_or(|b| c.dist(a) < b.dist(a)) {
+                                best = Some(c);
+                            }
+                        }
+                    }
+                }
+                if let Some(pick) = best {
+                    match trim_geometry(s, h, pick, edges) {
+                        Ok(pieces) => Ok(Some(pieces.kept)),
+                        Err(err) if quick && misses_edges(&err) => Ok(Some(Vec::new())),
+                        _ => Ok(None),
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+        _ => {
+            let inside = |p: Vec2| bx.expand(tol).contains(p);
+            let mut best: Option<Vec2> = None;
+            for pl_hit in crate::select::hit_polylines(s.doc()?, &e, tol) {
+                for w in pl_hit.windows(2) {
+                    let (Some(p), Some(q)) = (w.first(), w.get(1)) else { continue };
+                    let seg = Line::new(*p, *q);
+                    let cands = [*p, *q, seg.closest(a)].into_iter().chain(sides.iter().filter_map(|sd| line_line(sd, &seg)));
+                    for c in cands.filter(|c| inside(*c)) {
+                        if best.is_none_or(|b| c.dist(a) < b.dist(a)) {
+                            best = Some(c);
+                        }
+                    }
+                }
+            }
+            if let Some(pick) = best {
+                match trim_geometry(s, h, pick, edges) {
+                    Ok(pieces) => Ok(Some(pieces.kept)),
+                    Err(err) if quick && misses_edges(&err) => Ok(Some(Vec::new())),
+                    _ => Ok(None),
+                }
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
 /// Extend the end of `h` nearest `pick` to the nearest boundary edge.
 pub(crate) fn extend(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Result<()> {
+    let (kind, _) = extend_geometry(s, h, pick, edges, None)?;
+    s.doc_mut()?.modify_entity(h, |e| e.kind = kind)?;
+    Ok(())
+}
+
+pub(crate) fn extend_at_pick(s: &mut Session, h: Handle, pick: CurvePick, edges: Edges) -> Result<()> {
+    let (kind, _) = extend_geometry(s, h, pick.xy, edges, Some(pick))?;
+    s.doc_mut()?.modify_entity(h, |e| e.kind = kind)?;
+    Ok(())
+}
+
+pub(crate) fn extend_preview(s: &Session, h: Handle, pick: CurvePick, edges: Edges) -> Result<Option<EntityKind>> {
+    extend_geometry(s, h, pick.xy, edges, Some(pick)).map(|(_, added)| added)
+}
+
+fn extend_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: Option<CurvePick>) -> Result<(EntityKind, Option<EntityKind>)> {
     if super::curves::is_locked(s, h) {
         return Err(EngineError::Other("The object is on a locked layer.".into()));
     }
     let e = s.doc()?.entity(h).map(|e| (**e).clone()).ok_or_else(|| EngineError::Other("no such object".into()))?;
-    let cut = edge_segments(s, edges, h)?;
+    if click.is_some() {
+        require_horizontal_arc(&e)?;
+    }
+    let pick = click.and_then(|p| p.world).map_or(pick, Vec3::xy);
     let new_kind = match &e.kind {
         EntityKind::Line(l) => {
+            if let Some(click) = click {
+                let (tp, hits) = trim_projection::line_hits(s, &e, l, click, edges, true)?;
+                let from_b = tp > 0.5;
+                let t = if from_b {
+                    hits.into_iter().filter(|&t| t.is_finite() && t > 1.0 + 1e-9).min_by(f64::total_cmp)
+                } else {
+                    hits.into_iter().filter(|&t| t.is_finite() && t < -1e-9).max_by(f64::total_cmp)
+                }
+                .ok_or_else(|| EngineError::Other("Object does not intersect an edge.".into()))?;
+                let end = l.a + (l.b - l.a) * t;
+                if !end.is_finite() {
+                    return Err(EngineError::Other("Extended endpoint is not finite.".into()));
+                }
+                return Ok(if from_b { (line3(l.a, end), Some(line3(l.b, end))) } else { (line3(end, l.b), Some(line3(end, l.a))) });
+            }
             let (a, b) = (l.a.xy(), l.b.xy());
             let from_b = pick.dist(b) < pick.dist(a);
             let (fixed, end) = if from_b { (a, b) } else { (b, a) };
             let dir = (end - fixed).normalized();
             let ray = Segment::Line(Line::new(end, end + dir * 1e8));
+            let cut = edge_segments(s, edges, h)?;
             let best = cut
                 .iter()
                 .flat_map(|c| intersect_ext(&ray, c, false))
@@ -1122,6 +1672,8 @@ pub(crate) fn extend(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Re
             if from_b { line(a, np) } else { line(np, b) }
         }
         EntityKind::Arc(a) => {
+            // EXTEND of an arc still resolves hits in XY, even for direct picks.
+            let cut = edge_segments(s, edges, h)?;
             let ga = Arc::new(a.center.xy(), a.radius, a.start, a.end);
             let from_end = pick.dist(ga.end_point()) < pick.dist(ga.start_point());
             let full = Segment::Arc { arc: Arc { start: 0.0, end: TAU - 1e-12, ..ga }, ccw: true };
@@ -1133,9 +1685,16 @@ pub(crate) fn extend(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Re
                 hits.iter().copied().min_by(|x, y| ccw_sweep(*x, ga.start).total_cmp(&ccw_sweep(*y, ga.start)))
             };
             let t = pick_ang.ok_or_else(|| EngineError::Other("Object does not intersect an edge.".into()))?;
-            if from_end { arc(&Arc::new(ga.center, ga.radius, ga.start, t)) } else { arc(&Arc::new(ga.center, ga.radius, t, ga.end)) }
+            let center = if click.is_some() { a.center } else { v3(a.center.xy()) };
+            return Ok(if from_end {
+                (arc_at_height(center, a.radius, a.start, t), Some(arc_at_height(center, a.radius, a.end, t)))
+            } else {
+                (arc_at_height(center, a.radius, t, a.end), Some(arc_at_height(center, a.radius, t, a.start)))
+            });
         }
+        EntityKind::Circle(_) if click.is_some() => return Err(EngineError::Other("A closed circle has no end to extend.".into())),
         EntityKind::LwPolyline(p) if !p.closed && p.vertices.len() >= 2 => {
+            let cut = edge_segments(s, edges, h)?;
             let mut vs = p.vertices.clone();
             let n = vs.len();
             let from_end = vs.last().is_some_and(|l| pick.dist(l.p) < vs.first().map(|f| pick.dist(f.p)).unwrap_or(f64::INFINITY));
@@ -1155,10 +1714,9 @@ pub(crate) fn extend(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Re
             }
             lwpoly(vs, false)
         }
-        k => super::modify2::extend_other(k, &cut, pick)?,
+        k => super::modify2::extend_other(k, &edge_segments(s, edges, h)?, pick)?,
     };
-    s.doc_mut()?.modify_entity(h, |e| e.kind = new_kind)?;
-    Ok(())
+    Ok((new_kind, None))
 }
 
 // ---------------- fillet / chamfer ----------------
@@ -1733,7 +2291,7 @@ struct SelectThen {
     op: Op,
     sel: SelectPhase,
     objs: Vec<Handle>,
-    pts: Vec<Vec2>,
+    pts: Vec<Vec3>,
     reference: bool,
     /// ROTATE Reference: the reference angle (radians), once known. Its first point, and the
     /// first of the two new-angle points, are kept in `ref_from`.
@@ -1741,7 +2299,7 @@ struct SelectThen {
     /// ROTATE Reference: the new angle is given by two points (the `Points` option).
     ref_points: bool,
     /// SCALE Reference: first point of a reference length given by two points.
-    ref_from: Option<Vec2>,
+    ref_from: Option<Vec3>,
     /// SCALE Reference: the reference length, once known.
     ref_len: Option<f64>,
     copy_mode: bool,
@@ -1838,9 +2396,13 @@ impl SelectThen {
     /// SCALE Reference: reference length (typed, or two points), then new length (typed, or a
     /// point measured from the base point). The scale factor is new length / reference length.
     fn scale_reference(&mut self, s: &mut Session, i: Input) -> Result<Step> {
-        let Some(base) = self.pts.first().copied() else { return Ok(Step::Done) };
+        let Some(base) = self.pts.first().copied().map(Vec3::xy) else { return Ok(Step::Done) };
+        let i = match i {
+            Input::Point(p) => Input::Point3(p.to3(0.0)),
+            other => other,
+        };
         match (self.ref_len, self.ref_from, i) {
-            (None, None, Input::Point(p)) => {
+            (None, None, Input::Point3(p)) => {
                 self.ref_from = Some(p);
                 Ok(Step::Continue)
             }
@@ -1852,11 +2414,11 @@ impl SelectThen {
                 self.ref_len = Some(1.0);
                 Ok(Step::Continue)
             }
-            (None, Some(a), Input::Point(p)) => {
-                self.ref_len = Some(require_length(Some(a.dist(p)))?);
+            (None, Some(a), Input::Point3(p)) => {
+                self.ref_len = Some(require_length(Some(a.xy().dist(p.xy())))?);
                 Ok(Step::Continue)
             }
-            (Some(r), _, Input::Point(p)) => self.scale_by(s, base, base.dist(p) / r),
+            (Some(r), _, Input::Point3(p)) => self.scale_by(s, base, base.dist(p.xy()) / r),
             (Some(r), _, Input::Text(t)) => {
                 let n = require_length(number(&t))?;
                 self.scale_by(s, base, n / r)
@@ -1870,7 +2432,11 @@ impl SelectThen {
     /// point measured from the base point, or two points after `Points`). The objects turn by the
     /// new angle minus the reference angle.
     fn rotate_reference(&mut self, s: &mut Session, i: Input) -> Result<Step> {
-        let Some(base) = self.pts.first().copied() else { return Ok(Step::Done) };
+        let Some(base) = self.pts.first().copied().map(Vec3::xy) else { return Ok(Step::Done) };
+        let i = match i {
+            Input::Point(p) => Input::Point3(p.to3(0.0)),
+            other => other,
+        };
         let au = s.angle_settings();
         let angle = |t: &str| au.direction(t).filter(|a| a.is_finite()).ok_or_else(|| EngineError::Other("Requires an angle or point.".into()));
         let two_points = |a: Vec2, p: Vec2| {
@@ -1878,11 +2444,11 @@ impl SelectThen {
         };
         let Some(r) = self.ref_angle else {
             match (self.ref_from, i) {
-                (None, Input::Point(p)) => self.ref_from = Some(p),
+                (None, Input::Point3(p)) => self.ref_from = Some(p),
                 (None, Input::Text(t)) => self.ref_angle = Some(angle(&t)?),
                 (None, Input::Enter) => self.ref_angle = Some(0.0),
-                (Some(a), Input::Point(p)) => {
-                    self.ref_angle = Some(two_points(a, p)?);
+                (Some(a), Input::Point3(p)) => {
+                    self.ref_angle = Some(two_points(a.xy(), p.xy())?);
                     self.ref_from = None;
                 }
                 _ => {}
@@ -1894,14 +2460,14 @@ impl SelectThen {
                 self.ref_points = true;
                 return Ok(Step::Continue);
             }
-            (false, _, Input::Point(p)) => base.angle_to(p),
+            (false, _, Input::Point3(p)) => base.angle_to(p.xy()),
             (false, _, Input::Text(t)) => angle(&t)?,
             (false, _, Input::Enter) => 0.0,
-            (true, None, Input::Point(p)) => {
+            (true, None, Input::Point3(p)) => {
                 self.ref_from = Some(p);
                 return Ok(Step::Continue);
             }
-            (true, Some(a), Input::Point(p)) => two_points(a, p)?,
+            (true, Some(a), Input::Point3(p)) => two_points(a.xy(), p.xy())?,
             _ => return Ok(Step::Continue),
         };
         transform_entities(s, &self.objs, &Mat3::rotate_about(base, new - r), self.copy_mode)?;
@@ -1912,12 +2478,14 @@ impl SelectThen {
     /// The prompt while ROTATE Reference collects its angles.
     fn rotate_reference_prompt(&self) -> Prompt {
         match (self.ref_angle, self.ref_points, self.ref_from) {
-            (None, _, None) => Prompt::new("Specify the reference angle", Accept::POINT_OR_NUMBER).default("0"),
-            (None, _, Some(p)) | (Some(_), true, Some(p)) => Prompt::new("Specify second point", Accept::POINT).base(p),
-            (Some(_), false, _) => {
-                Prompt::new("Specify the new angle", Accept::POINT_OR_NUMBER).kw(&["Points"]).default("0").base_opt(self.pts.first().copied())
-            }
-            (Some(_), true, None) => Prompt::new("Specify first point", Accept::POINT),
+            (None, _, None) => Prompt::new("Specify the reference angle", Accept::POINT_OR_NUMBER).default("0").spatial_point(),
+            (None, _, Some(p)) | (Some(_), true, Some(p)) => Prompt::new("Specify second point", Accept::POINT).base3(p).spatial_point(),
+            (Some(_), false, _) => Prompt::new("Specify the new angle", Accept::POINT_OR_NUMBER)
+                .kw(&["Points"])
+                .default("0")
+                .base3_opt(self.pts.first().copied())
+                .spatial_point(),
+            (Some(_), true, None) => Prompt::new("Specify first point", Accept::POINT).spatial_point(),
         }
     }
 
@@ -1927,7 +2495,7 @@ impl SelectThen {
         let (Some(base), Ok(d)) = (self.pts.first().copied(), s.doc()) else { return Vec::new() };
         match (self.ref_angle, self.ref_points, self.ref_from) {
             (Some(r), false, _) => {
-                let m = Mat3::rotate_about(base, base.angle_to(c) - r);
+                let m = Mat3::rotate_about(base.xy(), base.xy().angle_to(c) - r);
                 let mut out: Vec<EntityKind> = self
                     .objs
                     .iter()
@@ -1939,10 +2507,10 @@ impl SelectThen {
                         k
                     })
                     .collect();
-                out.push(line(base, c));
+                out.push(line3(base, s.preview_point3(c, base)));
                 out
             }
-            (_, _, Some(a)) => vec![line(a, c)],
+            (_, _, Some(a)) => vec![line3(a, s.preview_point3(c, a))],
             _ => Vec::new(),
         }
     }
@@ -2024,19 +2592,19 @@ impl Interactive for SelectThen {
         let base = self.pts.first().copied();
         if self.op == Op::Scale && self.reference {
             return match (self.ref_len, self.ref_from) {
-                (Some(_), _) => Prompt::new("Specify new length", Accept::POINT_OR_NUMBER).base_opt(base),
-                (None, Some(p)) => Prompt::new("Specify second point", Accept::POINT).base(p),
-                (None, None) => Prompt::new("Specify reference length", Accept::POINT_OR_NUMBER).default("1"),
+                (Some(_), _) => Prompt::new("Specify new length", Accept::POINT_OR_NUMBER).base3_opt(base).spatial_point(),
+                (None, Some(p)) => Prompt::new("Specify second point", Accept::POINT).base3(p).spatial_point(),
+                (None, None) => Prompt::new("Specify reference length", Accept::POINT_OR_NUMBER).default("1").spatial_point(),
             };
         }
         if self.op == Op::Rotate && self.reference {
             return self.rotate_reference_prompt();
         }
         match (self.op, k) {
-            (Op::Move | Op::Copy, 0) => Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]),
-            (Op::Move, _) => Prompt::new("Specify second point or <use first point as displacement>", Accept::POINT).base_opt(base),
-            (Op::Copy, _) => Prompt::new("Specify second point", Accept::POINT).kw(&["Array", "Exit", "Undo"]).base_opt(base),
-            (Op::Rotate | Op::Scale, 0) => Prompt::new("Specify base point", Accept::POINT),
+            (Op::Move | Op::Copy, 0) => Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]).spatial_point(),
+            (Op::Move, _) => Prompt::new("Specify second point or <use first point as displacement>", Accept::POINT).base3_opt(base).spatial_point(),
+            (Op::Copy, _) => Prompt::new("Specify second point", Accept::POINT).kw(&["Array", "Exit", "Undo"]).base3_opt(base).spatial_point(),
+            (Op::Rotate | Op::Scale, 0) => Prompt::new("Specify base point", Accept::POINT).spatial_point(),
             // ROTATE and SCALE offer the angle/factor used last time.
             (Op::Rotate, _) => {
                 let (au, ap) = s.doc().map(|d| (d.header.i64("AUNITS", 0), d.header.i64("AUPREC", 0))).unwrap_or((0, 0));
@@ -2045,14 +2613,16 @@ impl Interactive for SelectThen {
                 Prompt::new("Specify rotation angle", Accept::POINT_OR_NUMBER)
                     .kw(&["Copy", "Reference"])
                     .default(crate::units::format_angle(a, au, ap))
-                    .base_opt(base)
+                    .base3_opt(base)
+                    .spatial_point()
             }
             (Op::Scale, _) => Prompt::new("Specify scale factor", Accept::POINT_OR_NUMBER)
                 .kw(&["Copy", "Reference"])
                 .default(format!("{:.4}", s.last_used.scale_factor))
-                .base_opt(base),
-            (Op::Mirror, 0) => Prompt::new("Specify first point of mirror line", Accept::POINT),
-            (Op::Mirror, _) => Prompt::new("Specify second point of mirror line", Accept::POINT).base_opt(base),
+                .base3_opt(base)
+                .spatial_point(),
+            (Op::Mirror, 0) => Prompt::new("Specify first point of mirror line", Accept::POINT).spatial_point(),
+            (Op::Mirror, _) => Prompt::new("Specify second point of mirror line", Accept::POINT).base3_opt(base).spatial_point(),
             _ => Prompt::new("", Accept::POINT),
         }
     }
@@ -2072,8 +2642,9 @@ impl Interactive for SelectThen {
         }
         if self.ask_erase {
             let yes = matches!(&i, Input::Keyword(k) if k == "Yes") || matches!(&i, Input::Text(t) if t.trim().to_ascii_lowercase().starts_with('y'));
-            let (a, b) = (self.pts[0], self.pts[1]);
-            transform_entities(s, &self.objs, &Mat3::mirror(a, b), !yes)?;
+            let Some(&a) = self.pts.first() else { return Ok(Step::Done) };
+            let Some(&b) = self.pts.get(1) else { return Ok(Step::Done) };
+            transform_entities(s, &self.objs, &Mat3::mirror(a.xy(), b.xy()), !yes)?;
             s.set_selection(Vec::new());
             return Ok(Step::Done);
         }
@@ -2084,6 +2655,11 @@ impl Interactive for SelectThen {
         if self.op == Op::Rotate && self.reference {
             return self.rotate_reference(s, i);
         }
+        let i = match i {
+            Input::Point(p) => Input::Point3(p.to3(0.0)),
+            other => other,
+        };
+        let base = self.pts.first().copied().unwrap_or(Vec3::ZERO).xy();
         match (self.op, k, i) {
             (_, _, Input::Keyword(kw)) if kw == "Copy" => {
                 self.copy_mode = true;
@@ -2098,24 +2674,29 @@ impl Interactive for SelectThen {
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
-            (_, 0, Input::Point(p)) => {
+            (_, 0, Input::Point3(p)) => {
                 self.pts.push(p);
                 Ok(Step::Continue)
             }
-            (Op::Move, 1, Input::Point(p)) => {
-                let d = p - self.pts[0];
-                transform_entities(s, &self.objs, &Mat3::translate(d), false)?;
+            (Op::Move, 1, Input::Point3(p)) => {
+                if s.input_is_spatial_end_override
+                    && let Some(&base) = self.pts.first()
+                {
+                    translate_entities_3d(s, &self.objs, p - base, false)?;
+                } else {
+                    transform_entities(s, &self.objs, &Mat3::translate(p.xy() - base), false)?;
+                }
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
             (Op::Move, 1, Input::Enter) => {
-                let d = self.pts[0];
+                let d = base;
                 transform_entities(s, &self.objs, &Mat3::translate(d), false)?;
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
-            (Op::Copy, _, Input::Point(p)) => {
-                let d = p - self.pts[0];
+            (Op::Copy, _, Input::Point3(p)) => {
+                let d = p.xy() - base;
                 transform_entities(s, &self.objs, &Mat3::translate(d), true)?;
                 Ok(Step::Continue)
             }
@@ -2123,9 +2704,9 @@ impl Interactive for SelectThen {
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
-            (Op::Rotate, 1, inp @ (Input::Point(_) | Input::Text(_) | Input::Enter)) => {
+            (Op::Rotate, 1, inp @ (Input::Point3(_) | Input::Text(_) | Input::Enter)) => {
                 let a = match inp {
-                    Input::Point(p) => self.pts[0].angle_to(p),
+                    Input::Point3(p) => base.angle_to(p.xy()),
                     Input::Text(t) => s
                         .angle_settings()
                         .rotation(&t)
@@ -2134,13 +2715,13 @@ impl Interactive for SelectThen {
                     _ => s.last_used.rotate_angle,
                 };
                 s.last_used.rotate_angle = a;
-                transform_entities(s, &self.objs, &Mat3::rotate_about(self.pts[0], a), self.copy_mode)?;
+                transform_entities(s, &self.objs, &Mat3::rotate_about(base, a), self.copy_mode)?;
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
-            (Op::Scale, 1, inp @ (Input::Point(_) | Input::Text(_) | Input::Enter)) => {
+            (Op::Scale, 1, inp @ (Input::Point3(_) | Input::Text(_) | Input::Enter)) => {
                 let f = match inp {
-                    Input::Point(p) => self.pts[0].dist(p),
+                    Input::Point3(p) => base.dist(p.xy()),
                     Input::Text(t) => {
                         number(&t).filter(|f| f.is_finite() && *f > 0.0).ok_or_else(|| EngineError::Other("Requires a positive number.".into()))?
                     }
@@ -2148,13 +2729,13 @@ impl Interactive for SelectThen {
                 };
                 if f > 1e-12 && f.is_finite() {
                     s.last_used.scale_factor = f;
-                    transform_entities(s, &self.objs, &Mat3::scale_about(self.pts[0], f), self.copy_mode)?;
+                    transform_entities(s, &self.objs, &Mat3::scale_about(base, f), self.copy_mode)?;
                 }
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }
-            (Op::Mirror, 1, Input::Point(p)) => {
-                if p.near(self.pts[0], 1e-12) {
+            (Op::Mirror, 1, Input::Point3(p)) => {
+                if p.xy().near(base, 1e-12) {
                     return Err(EngineError::Other("Mirror line points must differ.".into()));
                 }
                 self.pts.push(p);
@@ -2172,7 +2753,8 @@ impl Interactive for SelectThen {
         if !self.sel.done {
             return Vec::new();
         }
-        let Some(base) = self.pts.first().copied() else { return Vec::new() };
+        let Some(base3) = self.pts.first().copied() else { return Vec::new() };
+        let base = base3.xy();
         let m = match self.op {
             Op::Move | Op::Copy => Mat3::translate(c - base),
             Op::Rotate => Mat3::rotate_about(base, base.angle_to(c)),
@@ -2180,12 +2762,13 @@ impl Interactive for SelectThen {
             Op::Scale => match self.ref_len.and_then(|r| positive_length(Some(base.dist(c) / r))) {
                 Some(f) => Mat3::scale_about(base, f),
                 None if self.ref_len.is_some() => return Vec::new(),
-                None => return self.ref_from.map(|a| vec![line(a, c)]).unwrap_or_default(),
+                None => return self.ref_from.map(|a| vec![line3(a, s.preview_point3(c, a))]).unwrap_or_default(),
             },
             Op::Mirror if !self.ask_erase => Mat3::mirror(base, c),
             _ => return Vec::new(),
         };
         let Ok(d) = s.doc() else { return Vec::new() };
+        let spatial_move = if self.op == Op::Move { s.preview_spatial_end_override(c, base3).map(|p| p - base3) } else { None };
         let mut out: Vec<EntityKind> = self
             .objs
             .iter()
@@ -2193,18 +2776,40 @@ impl Interactive for SelectThen {
             .filter_map(|h| d.entity(*h))
             .map(|e| {
                 let mut k = e.kind.clone();
-                k.transform(&m);
+                if let Some(delta) = spatial_move {
+                    k.translate_3d(delta);
+                } else {
+                    k.transform(&m);
+                }
                 k
             })
             .collect();
-        out.push(line(base, c));
+        out.push(line3(base3, s.preview_point3(c, base3)));
         out
     }
     fn drag(&self, s: &Session, c: Vec2) -> Option<crate::prompt::Drag> {
         if (self.op == Op::Rotate && self.reference) || !self.sel.done {
             return None;
         }
-        let base = self.pts.first().copied()?;
+        // Spatial objects are omitted from the XY GPU mesh. Use the WCS preview path.
+        let d = s.doc().ok()?;
+        if self.objs.iter().filter_map(|h| d.entity(*h)).any(|e| match &e.kind {
+            EntityKind::Line(l) => l.a.z != 0.0 || l.b.z != 0.0,
+            EntityKind::Circle(c) => c.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6),
+            EntityKind::Arc(a) => a.center.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6),
+            EntityKind::LwPolyline(p) => p.elevation.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6),
+            EntityKind::Polyline3d(p) => p.is_spatial(),
+            EntityKind::Text(t) => t.insert.z.abs() > 1e-6 || !e.common.extrusion.near(Vec3::Z, 1e-6),
+            EntityKind::Face3d(_) | EntityKind::Solid3d(_) => true,
+            _ => false,
+        }) {
+            return None;
+        }
+        let base3 = self.pts.first().copied()?;
+        if self.op == Op::Move && s.preview_spatial_end_override(c, base3).is_some() {
+            return None;
+        }
+        let base = base3.xy();
         let matrix = match self.op {
             Op::Move | Op::Copy => Mat3::translate(c - base),
             Op::Rotate => Mat3::rotate_about(base, base.angle_to(c)),
@@ -2213,13 +2818,12 @@ impl Interactive for SelectThen {
             Op::Mirror if !self.ask_erase => Mat3::mirror(base, c),
             _ => return None,
         };
-        let mut extra = vec![line(base, c)];
+        let mut extra = vec![line3(base3, s.preview_point3(c, base3))];
         if self.op != Op::Mirror {
             return Some(crate::prompt::Drag { handles: self.objs.clone(), matrix, extra, clipboard: false });
         }
         // Mirrored text keeps reading left to right (MIRRTEXT 0), which the matrix alone can't
         // draw: those objects are transformed one by one, the rest is mirrored on the GPU.
-        let d = s.doc().ok()?;
         let mut handles = Vec::with_capacity(self.objs.len());
         let mut texts = 0;
         for h in &self.objs {
@@ -3025,7 +3629,7 @@ impl Interactive for DisplaceM {
             return Prompt::new("Specify displacement", Accept::POINT).default("0,0");
         }
         if self.at_base() {
-            return Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]).default("Displacement");
+            return Prompt::new("Specify base point", Accept::POINT).kw(&["Displacement"]).default("Displacement").spatial_point();
         }
         self.inner.prompt(s)
     }

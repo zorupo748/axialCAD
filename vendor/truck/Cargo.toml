@@ -1,0 +1,26 @@
+# Modified by axialCAD from ricosjp/truck rev 78d699b0792b39e27c2bf073b682986701644e91.
+# Licensed under Apache-2.0; the original license is in LICENSE.
+# Change: limit the workspace to the vendored crates (removed example-pages-generator and readme-generator).
+[workspace]
+resolver = "2"
+members = [
+	"truck-assembly",
+	"truck-base",
+	"truck-derivers",
+	"truck-drafting",
+	"truck-geometry",
+	"truck-geotrait",
+	"truck-js",
+	"truck-meshalgo",
+	"truck-modeling",
+	"truck-platform",
+	"truck-polymesh",
+	"truck-rendimpl",
+	"truck-shapeops",
+	"truck-stepio",
+	"truck-topology",
+]
+
+
+[profile.release.package.truck-js]
+opt-level = "z"

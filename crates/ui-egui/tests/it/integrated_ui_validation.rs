@@ -22,8 +22,8 @@ impl Drop for RestoreQnewTemplate {
     }
 }
 
-fn harness(state: Option<UiState>, width: f32, height: f32) -> Harness<'static, CadApp> {
-    let mut app = CadApp::new(Session::default(), Services::default());
+fn harness_with(session: Session, state: Option<UiState>, width: f32, height: f32) -> Harness<'static, CadApp> {
+    let mut app = CadApp::new(session, Services::default());
     if let Some(state) = state {
         app.ui = state;
     }
@@ -38,6 +38,16 @@ fn harness(state: Option<UiState>, width: f32, height: f32) -> Harness<'static, 
     );
     harness.run_steps(4);
     harness
+}
+
+fn harness(state: Option<UiState>, width: f32, height: f32) -> Harness<'static, CadApp> {
+    harness_with(Session::default(), state, width, height)
+}
+
+fn imperial_harness(state: Option<UiState>, width: f32, height: f32) -> Harness<'static, CadApp> {
+    let mut session = Session::default();
+    let _ = session.new_drawing(false);
+    harness_with(session, state, width, height)
 }
 
 fn type_text(h: &mut Harness<'static, CadApp>, text: &str) {
@@ -155,7 +165,7 @@ fn test_selection_window_escape_clears_the_first_corner() {
     ui.show_palettes = false;
     let _ = ui.docking.set_visible(Panel::Layers, false);
     let _ = ui.docking.set_visible(Panel::Properties, false);
-    let mut h = harness(Some(ui), 1280.0, 760.0);
+    let mut h = imperial_harness(Some(ui), 1280.0, 760.0);
     h.state_mut().session.execute("view.top", &json!({})).unwrap();
     h.state_mut().session.execute("line", &json!({"points": [[10.0, 20.0], [30.0, 20.0]]})).unwrap();
     let mut camera = h.state().session.camera();
@@ -355,7 +365,7 @@ fn test_line_z0_option_uses_clicked_global_ground_point_once() {
         ui.show_palettes = false;
         let _ = ui.docking.set_visible(Panel::Layers, false);
         let _ = ui.docking.set_visible(Panel::Properties, false);
-        let mut h = harness(Some(ui), 1280.0, 760.0);
+        let mut h = imperial_harness(Some(ui), 1280.0, 760.0);
         h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
         let mut camera = h.state().session.camera();
         camera.height = 300.0;
@@ -1073,7 +1083,7 @@ fn test_line_z0_parallel_camera_rejects_stale_click_and_free_disables_mode() {
     ui.show_palettes = false;
     let _ = ui.docking.set_visible(Panel::Layers, false);
     let _ = ui.docking.set_visible(Panel::Properties, false);
-    let mut h = harness(Some(ui), 1280.0, 760.0);
+    let mut h = imperial_harness(Some(ui), 1280.0, 760.0);
     h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
     let mut camera = h.state().session.camera();
     camera.height = 300.0;
@@ -1109,7 +1119,7 @@ fn test_line_z0_parallel_camera_rejects_stale_click_and_free_disables_mode() {
 
 #[test]
 fn test_graphical_height_adjustment_escape_cancels_without_altering_drawing() {
-    let mut h = harness(None, 1280.0, 760.0);
+    let mut h = imperial_harness(None, 1280.0, 760.0);
     let initial_entities = h.state().session.doc().unwrap().model.len();
     h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
     h.state_mut().session.set_drawing_plane(cadcraft_geom::DrawingPlane::XZ);
@@ -1140,7 +1150,7 @@ fn test_graphical_height_adjustment_escape_cancels_without_altering_drawing() {
 
 #[test]
 fn test_graphical_height_adjustment_escape_restores_automatic_mode() {
-    let mut h = harness(None, 1280.0, 760.0);
+    let mut h = imperial_harness(None, 1280.0, 760.0);
     h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
     let mut camera = h.state().session.camera();
     camera.target.z = 20.0;
@@ -1208,7 +1218,7 @@ fn test_elevation_status_right_click_returns_to_automatic_mode() {
 
 #[test]
 fn test_graphical_height_adjustment_click_keeps_the_new_plane_offset() {
-    let mut h = harness(None, 1280.0, 760.0);
+    let mut h = imperial_harness(None, 1280.0, 760.0);
     h.state_mut().session.execute("view.swiso", &json!({})).unwrap();
     h.state_mut().session.set_drawing_plane(cadcraft_geom::DrawingPlane::YZ);
     h.state_mut().session.set_drawing_plane_offset(2.0);

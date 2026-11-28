@@ -190,3 +190,982 @@ fn mspace_and_isometric_cursor_use_the_paper_display_transform() {
     c.app.run("pspace", json!({})).unwrap();
     c.assert_ink(at, DARK_INK, "back in paper space");
 }
+
+#[test]
+fn object_selection_shows_pickbox_without_crosshair_and_transitions_cleanly() {
+    let mut c = Canvas::new(false);
+    let at = c.screen(Vec2::new(100.0, 100.0));
+
+    let count_cursor = |c: &mut Canvas| -> (usize, usize) {
+        let shapes = c.paint(at);
+        let mut arms = Vec::new();
+        let mut boxes = Vec::new();
+        for shape in &shapes {
+            cursor_strokes(&shape.shape, at, &mut arms, &mut boxes);
+        }
+        (arms.len(), boxes.len())
+    };
+
+    // Idle with PICKFIRST=1: both crosshair and pickbox
+    assert_eq!(count_cursor(&mut c), (4, 1), "idle with PICKFIRST shows crosshair and pickbox");
+
+    // TRIM object pick stage: only pickbox, no crosshair arms
+    c.app.cmdline("TRIM");
+    assert_eq!(count_cursor(&mut c), (0, 1), "TRIM pick stage shows small pickbox without crosshair");
+
+    // Transition inside TRIM to Fence (point input): crosshair without pickbox
+    c.app.cmdline("F");
+    assert_eq!(count_cursor(&mut c), (4, 0), "TRIM Fence point prompt restores crosshair without pickbox");
+
+    // Finish Fence (Enter) back to TRIM pick stage: pickbox without crosshair
+    c.app.cmdline("");
+    assert_eq!(count_cursor(&mut c), (0, 1), "returning to TRIM pick restores pickbox without crosshair");
+
+    // Cancel back to idle
+    c.app.session.cancel();
+    assert_eq!(count_cursor(&mut c), (4, 1), "idle restores crosshair and pickbox");
+
+    // Generic Accept::SELECT command (ERASE): pickbox without crosshair
+    c.app.cmdline("ERASE");
+    assert_eq!(count_cursor(&mut c), (0, 1), "ERASE selection shows pickbox without crosshair");
+    c.app.session.cancel();
+
+    // Point input command (LINE): crosshair without pickbox
+    c.app.cmdline("LINE");
+    assert_eq!(count_cursor(&mut c), (4, 0), "LINE point prompt shows crosshair without pickbox");
+    c.app.session.cancel();
+
+    // Multi-stage command (MOVE): object selection (pickbox only) -> base point (crosshair only) -> second point (crosshair only)
+    c.app.session.cmdline("LINE 80,80 120,80").unwrap();
+    c.app.session.cmdline("").unwrap();
+    let line_h = c.app.session.doc().unwrap().model.last().unwrap().handle;
+    c.app.cmdline("MOVE");
+    assert_eq!(count_cursor(&mut c), (0, 1), "MOVE object selection shows pickbox without crosshair");
+    c.app.session.input(cadcraft_engine::Input::Pick(vec![line_h])).unwrap();
+    c.app.cmdline("");
+    assert_eq!(count_cursor(&mut c), (4, 0), "MOVE base point prompt restores crosshair without pickbox");
+    c.app.cmdline("0,0");
+    let (arms_second, boxes_second) = count_cursor(&mut c);
+    assert!(arms_second >= 4 && boxes_second == 0, "MOVE second point prompt keeps crosshair without pickbox");
+    c.app.session.cancel();
+}
+
+#[test]
+fn trim_hover_paints_dashed_mask_and_suppresses_whole_entity_hover() {
+    let mut c = Canvas::new(false);
+    c.app.session.cmdline("CIRCLE 100,100 40").unwrap();
+    c.app.session.cmdline("LINE 40,100 160,100").unwrap();
+    c.app.session.cmdline("").unwrap();
+    // Ensure DASHED linetype is present in the drawing to verify preview tessellation stays unbroken before screen-space dashing.
+    let dashed_lt = cadcraft_engine::doc::library::standard_linetypes()
+        .into_iter()
+        .find(|l| l.name == "DASHED")
+        .unwrap();
+    c.app.session.doc_mut().unwrap().linetypes.push(dashed_lt);
+
+    c.app.cmdline("TRIM");
+    let top_half = c.screen(Vec2::new(100.0, 140.0));
+    let center_screen = c.screen(Vec2::new(100.0, 100.0));
+    let shapes = c.paint(top_half);
+
+    // Whole-entity rollover hover must be suppressed
+    assert_eq!(c.app.canvas.hover, None, "generic whole-entity hover must be suppressed during TRIM pick");
+
+    // Cursor must be small pickbox only
+    let mut arms = Vec::new();
+    let mut boxes = Vec::new();
+    for shape in &shapes {
+        cursor_strokes(&shape.shape, top_half, &mut arms, &mut boxes);
+    }
+    assert_eq!(arms.len(), 0, "no crosshair arms during TRIM pick");
+    assert_eq!(boxes.len(), 1, "pickbox shown during TRIM pick");
+
+    // Check painted mask and dashed foreground strokes strictly in the top semicircle (y < center_screen.y)
+    let bg_col = theme::Tokens::DARK.canvas;
+    let mut mask_strokes = 0usize;
+    let mut dashed_segments_top = 0usize;
+    let mut dashed_segments_bottom = 0usize;
+
+    fn inspect(shape: &Shape, bg_col: Color32, center_y: f32, mask_strokes: &mut usize, top: &mut usize, bot: &mut usize) {
+        match shape {
+            Shape::Path(p)
+                if (p.stroke.width - 4.5).abs() < 0.01
+                    && p.stroke.color == egui::epaint::ColorMode::Solid(bg_col) =>
+            {
+                *mask_strokes += 1;
+            }
+            Shape::LineSegment { points: [a, b], stroke } if (stroke.width - 2.0).abs() < 0.01 && stroke.color == LIGHT_INK => {
+                let mid_y = 0.5 * (a.y + b.y);
+                if mid_y <= center_y + 1.0 {
+                    *top += 1;
+                } else {
+                    *bot += 1;
+                }
+            }
+            Shape::Path(p)
+                if (p.stroke.width - 2.0).abs() < 0.01
+                    && p.stroke.color == egui::epaint::ColorMode::Solid(LIGHT_INK)
+                    && !p.points.is_empty() =>
+            {
+                let mid_y = p.points.iter().map(|pt| pt.y).sum::<f32>() / p.points.len() as f32;
+                if mid_y <= center_y + 1.0 {
+                    *top += 1;
+                } else {
+                    *bot += 1;
+                }
+            }
+            Shape::Vec(vs) => vs.iter().for_each(|s| inspect(s, bg_col, center_y, mask_strokes, top, bot)),
+            _ => {}
+        }
+    }
+
+    for s in &shapes {
+        inspect(&s.shape, bg_col, center_screen.y, &mut mask_strokes, &mut dashed_segments_top, &mut dashed_segments_bottom);
+    }
+
+    assert!(mask_strokes >= 1, "expected underlying background mask stroke for trimmed fragment, got {mask_strokes}");
+    assert!(dashed_segments_top >= 3, "expected multiple screen-space dashed strokes on top semicircle, got {dashed_segments_top}");
+    assert_eq!(dashed_segments_bottom, 0, "bottom semicircle must NOT be highlighted when hovering top half");
+}
+
+#[test]
+fn trim_hover_line_between_two_limits_restores_and_confirms() {
+    let mut c = Canvas::new(false);
+    // Horizontal line from x=40 to x=160 at y=100, cut by two vertical lines at x=80 and x=120
+    c.app.session.cmdline("LINE 40,100 160,100").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("LINE 80,60 80,140").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("LINE 120,60 120,140").unwrap();
+    c.app.session.cmdline("").unwrap();
+    // Isolated line that cannot be trimmed
+    c.app.session.cmdline("LINE 40,170 160,170").unwrap();
+    c.app.session.cmdline("").unwrap();
+
+    c.app.cmdline("TRIM");
+    // Use Standard mode for this test (non-intersecting entities show no preview)
+    c.app.session.execute("setvar", &serde_json::json!({ "name": "TRIMEXTENDMODE", "value": 0 })).unwrap();
+    let mid_span = c.screen(Vec2::new(100.0, 100.0));
+    let left_cut_x = c.screen(Vec2::new(80.0, 100.0)).x;
+    let right_cut_x = c.screen(Vec2::new(120.0, 100.0)).x;
+    let bg_col = theme::Tokens::DARK.canvas;
+
+    let count_trim_overlay = |shapes: &[egui::epaint::ClippedShape]| -> (usize, usize, usize) {
+        let mut masks = 0usize;
+        let mut inside_dashes = 0usize;
+        let mut outside_dashes = 0usize;
+        fn walk(s: &Shape, bg_col: Color32, lx: f32, rx: f32, masks: &mut usize, ins: &mut usize, outs: &mut usize) {
+            match s {
+                Shape::Path(p)
+                    if (p.stroke.width - 4.5).abs() < 0.01
+                        && p.stroke.color == egui::epaint::ColorMode::Solid(bg_col) =>
+                {
+                    *masks += 1;
+                }
+                Shape::LineSegment { points: [a, b], stroke } if (stroke.width - 2.0).abs() < 0.01 && stroke.color == LIGHT_INK => {
+                    let mx = 0.5 * (a.x + b.x);
+                    if mx >= lx - 1.0 && mx <= rx + 1.0 {
+                        *ins += 1;
+                    } else {
+                        *outs += 1;
+                    }
+                }
+                Shape::Vec(vs) => vs.iter().for_each(|x| walk(x, bg_col, lx, rx, masks, ins, outs)),
+                _ => {}
+            }
+        }
+        for cs in shapes {
+            walk(&cs.shape, bg_col, left_cut_x, right_cut_x, &mut masks, &mut inside_dashes, &mut outside_dashes);
+        }
+        (masks, inside_dashes, outside_dashes)
+    };
+
+    // 1. Hover middle span between the two cutting lines
+    let shapes = c.paint(mid_span);
+    let (masks, in_dashes, out_dashes) = count_trim_overlay(&shapes);
+    assert!(masks >= 1, "middle span must be masked over original continuous stroke");
+    assert!(in_dashes >= 2, "middle span must show multiple dashed segments, got {in_dashes}");
+    assert_eq!(out_dashes, 0, "outer spans of the line must not be dashed");
+
+    // 2. Hover isolated line with no valid cut: no fictitious removal preview
+    let isolated_pt = c.screen(Vec2::new(100.0, 170.0));
+    let iso_shapes = c.paint(isolated_pt);
+    assert_eq!(count_trim_overlay(&iso_shapes), (0, 0, 0), "no fictitious trim preview on non-intersecting entity");
+
+    // 3. Move cursor to empty space: normal representation restored
+    let empty_pt = c.screen(Vec2::new(20.0, 20.0));
+    let empty_shapes = c.paint(empty_pt);
+    assert_eq!(count_trim_overlay(&empty_shapes), (0, 0, 0), "moving cursor away restores normal representation");
+
+    // 4. Confirm trim on middle span: removes only the middle segment, leaving 2 outer line segments + 2 cutting lines + 1 isolated line = 5 lines
+    c.app.cmdline("100,100");
+    c.app.session.cancel();
+    assert_eq!(c.app.session.doc().unwrap().model.len(), 5, "confirming trim replaces the cut line with its two outer segments");
+}
+
+#[test]
+fn trim_successive_cuts_on_same_object_ui() {
+    let mut c = Canvas::new(false);
+    c.app.session.cmdline("CIRCLE 100,100 40").unwrap();
+    c.app.session.cmdline("LINE 40,100 160,100").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("LINE 100,40 100,160").unwrap();
+    c.app.session.cmdline("").unwrap();
+
+    let dashed_lt = cadcraft_engine::doc::library::standard_linetypes()
+        .into_iter()
+        .find(|l| l.name == "DASHED")
+        .unwrap();
+    c.app.session.doc_mut().unwrap().linetypes.push(dashed_lt);
+
+    c.app.cmdline("TRIM");
+
+    let count_dashes = |shapes: &[egui::epaint::ClippedShape]| -> usize {
+        let mut count = 0;
+        fn walk(s: &Shape, count: &mut usize) {
+            match s {
+                Shape::LineSegment { stroke, .. } if (stroke.width - 2.0).abs() < 0.01 && stroke.color == LIGHT_INK => {
+                    *count += 1;
+                }
+                Shape::Path(p) if (p.stroke.width - 2.0).abs() < 0.01 && p.stroke.color == egui::epaint::ColorMode::Solid(LIGHT_INK) => {
+                    *count += 1;
+                }
+                Shape::Vec(vs) => vs.iter().for_each(|x| walk(x, count)),
+                _ => {}
+            }
+        }
+        for cs in shapes {
+            walk(&cs.shape, &mut count);
+        }
+        count
+    };
+
+    // 1. Hover top-right quadrant (128.28, 128.28)
+    let tr_pt = c.screen(Vec2::new(128.28, 128.28));
+    let s1 = c.paint(tr_pt);
+    let d1 = count_dashes(&s1);
+    println!("Dashes on preview 1 (top-right): {d1}");
+    assert!(d1 >= 2, "first preview must show dashed line");
+
+    // 2. Click with mouse to trim top-right quadrant
+    let input = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(tr_pt),
+            egui::Event::PointerButton { pos: tr_pt, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: tr_pt, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let _ = c.ctx.run_ui(input, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+
+    println!("Entities after mouse click: {}", c.app.session.doc().unwrap().model.len());
+    for (i, e) in c.app.session.doc().unwrap().model.iter().enumerate() {
+        println!("  e[{}]: handle={:?}, kind={:?}", i, e.handle, e.kind);
+    }
+
+    // 3. Hover top-left quadrant (71.72, 128.28)
+    let tl_pt = c.screen(Vec2::new(71.72, 128.28));
+    let s2 = c.paint(tl_pt);
+    let d2 = count_dashes(&s2);
+    println!("Dashes on preview 2 (top-left): {d2}");
+    assert!(d2 >= 2, "second preview on remaining geometry must show dashed line");
+
+    // 4. Click with mouse to trim top-left quadrant
+    let input2 = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(tl_pt),
+            egui::Event::PointerButton { pos: tl_pt, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: tl_pt, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let _ = c.ctx.run_ui(input2, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+
+    println!("Entities after second mouse click: {}", c.app.session.doc().unwrap().model.len());
+    for (i, e) in c.app.session.doc().unwrap().model.iter().enumerate() {
+        println!("  e[{}]: handle={:?}, kind={:?}", i, e.handle, e.kind);
+    }
+}
+
+#[test]
+fn trim_successive_cuts_on_line_ui() {
+    let mut c = Canvas::new(false);
+    c.app.session.cmdline("LINE 0,100 200,100").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("LINE 50,50 50,150").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("LINE 100,50 100,150").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("LINE 150,50 150,150").unwrap();
+    c.app.session.cmdline("").unwrap();
+
+    let dashed_lt = cadcraft_engine::doc::library::standard_linetypes()
+        .into_iter()
+        .find(|l| l.name == "DASHED")
+        .unwrap();
+    c.app.session.doc_mut().unwrap().linetypes.push(dashed_lt);
+
+    c.app.cmdline("TRIM");
+
+    let count_dashes = |shapes: &[egui::epaint::ClippedShape]| -> usize {
+        let mut count = 0;
+        fn walk(s: &Shape, count: &mut usize) {
+            match s {
+                Shape::LineSegment { stroke, .. } if (stroke.width - 2.0).abs() < 0.01 && stroke.color == LIGHT_INK => {
+                    *count += 1;
+                }
+                Shape::Path(p) if (p.stroke.width - 2.0).abs() < 0.01 && p.stroke.color == egui::epaint::ColorMode::Solid(LIGHT_INK) => {
+                    *count += 1;
+                }
+                Shape::Vec(vs) => vs.iter().for_each(|x| walk(x, count)),
+                _ => {}
+            }
+        }
+        for cs in shapes {
+            walk(&cs.shape, &mut count);
+        }
+        count
+    };
+
+    // 1. Hover first span (25, 100)
+    let p1 = c.screen(Vec2::new(25.0, 100.0));
+    let s1 = c.paint(p1);
+    let d1 = count_dashes(&s1);
+    println!("Line d1: {d1}");
+    assert!(d1 >= 2);
+
+    // 2. Click to trim first span
+    let input = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p1),
+            egui::Event::PointerButton { pos: p1, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p1, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let _ = c.ctx.run_ui(input, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+
+    // 3. Hover second span (75, 100)
+    let p2 = c.screen(Vec2::new(75.0, 100.0));
+    let s2 = c.paint(p2);
+    let d2 = count_dashes(&s2);
+    println!("Line d2: {d2}");
+    assert!(d2 >= 2);
+}
+
+
+#[test]
+fn trim_quick_hover_shows_full_erase_preview_when_no_interior_cuts() {
+    let mut c = Canvas::new(false);
+    // Circle radius 10 at (0,0) + horizontal diameter
+    c.app.session.cmdline("CIRCLE 0,0 10").unwrap();
+    c.app.session.cmdline("LINE -10,0 10,0").unwrap();
+    c.app.session.cmdline("").unwrap();
+    
+    // Ensure Quick mode (default)
+    assert!(c.app.session.doc().unwrap().header.i64("TRIMEXTENDMODE", 1) != 0);
+    
+    let dashed_lt = cadcraft_engine::doc::library::standard_linetypes()
+        .into_iter()
+        .find(|l| l.name == "DASHED")
+        .unwrap();
+    c.app.session.doc_mut().unwrap().linetypes.push(dashed_lt);
+
+    c.app.cmdline("TRIM");
+
+    let count_dashes = |shapes: &[egui::epaint::ClippedShape]| -> usize {
+        let mut count = 0;
+        fn walk(s: &egui::epaint::Shape, count: &mut usize) {
+            match s {
+                egui::epaint::Shape::LineSegment { stroke, .. } if (stroke.width - 2.0).abs() < 0.01 && stroke.color == LIGHT_INK => {
+                    *count += 1;
+                }
+                egui::epaint::Shape::Path(p) if (p.stroke.width - 2.0).abs() < 0.01 && p.stroke.color == egui::epaint::ColorMode::Solid(LIGHT_INK) => {
+                    *count += 1;
+                }
+                egui::epaint::Shape::Vec(vs) => vs.iter().for_each(|x| walk(x, count)),
+                _ => {}
+            }
+        }
+        for cs in shapes {
+            walk(&cs.shape, &mut count);
+        }
+        count
+    };
+
+    // 1. Trim upper semicircle (pick at (0, 10) - north pole)
+    let p_top = c.screen(Vec2::new(0.0, 10.0));
+    let shapes_top = c.paint(p_top);
+    let dashes_top = count_dashes(&shapes_top);
+    assert!(dashes_top >= 2, "upper semicircle should show preview");
+
+    // Click to trim upper semicircle
+    let input_top = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_top),
+            egui::Event::PointerButton { pos: p_top, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_top, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let _ = c.ctx.run_ui(input_top, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+
+    // 2. Verify upper semicircle removed, lower arc remains + cutting line
+    let ents_after_first = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after_first.len(), 2, "should have cutting line + lower arc");
+    
+    // 3. Hover over lower semicircle (pick at (0, -10) - south pole)
+    // This arc has NO interior cuts (cutting line at endpoints only)
+    // In Quick mode, hover should preview FULL ERASE of this arc
+    let p_bot = c.screen(Vec2::new(0.0, -10.0));
+    let shapes_bot = c.paint(p_bot);
+    let dashes_bot = count_dashes(&shapes_bot);
+    assert!(dashes_bot >= 2, "lower semicircle should show FULL ERASE preview in Quick mode, got {dashes_bot}");
+
+    // 4. Verify hover does NOT modify document
+    let ents_during_hover = c.app.session.doc().unwrap().model.iter().count();
+    assert_eq!(ents_during_hover, 2, "hover must not modify document");
+
+    // 5. Click to erase lower semicircle
+    let input_bot = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_bot),
+            egui::Event::PointerButton { pos: p_bot, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_bot, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let _ = c.ctx.run_ui(input_bot, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+
+    // 6. Verify lower arc erased, only cutting line remains
+    let ents_final = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_final.len(), 1, "only cutting line should remain");
+    match &ents_final[0].kind {
+        cadcraft_doc::EntityKind::Line(_) => {},
+        k => panic!("expected Line, got {:?}", k),
+    }
+}
+
+#[test]
+fn trim_quick_internal_undo_restores_arc_and_preview() {
+    let mut c = Canvas::new(false);
+    // Circle radius 10 at (0,0) + horizontal diameter
+    c.app.session.cmdline("CIRCLE 0,0 10").unwrap();
+    c.app.session.cmdline("LINE -10,0 10,0").unwrap();
+    c.app.session.cmdline("").unwrap();
+    
+    // Ensure Quick mode (default)
+    assert!(c.app.session.doc().unwrap().header.i64("TRIMEXTENDMODE", 1) != 0);
+    
+    let dashed_lt = cadcraft_engine::doc::library::standard_linetypes()
+        .into_iter()
+        .find(|l| l.name == "DASHED")
+        .unwrap();
+    c.app.session.doc_mut().unwrap().linetypes.push(dashed_lt);
+
+    c.app.cmdline("TRIM");
+
+    let count_dashes = |shapes: &[egui::epaint::ClippedShape]| -> usize {
+        let mut count = 0;
+        fn walk(s: &egui::epaint::Shape, count: &mut usize) {
+            match s {
+                egui::epaint::Shape::LineSegment { stroke, .. } if (stroke.width - 2.0).abs() < 0.01 && stroke.color == LIGHT_INK => {
+                    *count += 1;
+                }
+                egui::epaint::Shape::Path(p) if (p.stroke.width - 2.0).abs() < 0.01 && p.stroke.color == egui::epaint::ColorMode::Solid(LIGHT_INK) => {
+                    *count += 1;
+                }
+                egui::epaint::Shape::Vec(vs) => vs.iter().for_each(|x| walk(x, count)),
+                _ => {}
+            }
+        }
+        for cs in shapes {
+            walk(&cs.shape, &mut count);
+        }
+        count
+    };
+
+    // 1. Trim upper semicircle (pick at (0, 10) - north pole)
+    let p_top = c.screen(Vec2::new(0.0, 10.0));
+    let shapes_top = c.paint(p_top);
+    let dashes_top = count_dashes(&shapes_top);
+    assert!(dashes_top >= 2, "upper semicircle should show preview");
+
+    let input_top = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_top),
+            egui::Event::PointerButton { pos: p_top, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_top, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let _ = c.ctx.run_ui(input_top, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+
+    // 2. Verify upper semicircle removed, lower arc remains + cutting line
+    let ents_after_first = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after_first.len(), 2, "should have cutting line + lower arc");
+
+    // 3. Trim lower semicircle (pick at (0, -10) - south pole)
+    // This arc has NO interior cuts (cutting line at endpoints only)
+    // In Quick mode, this triggers full-erase fallback
+    let p_bot = c.screen(Vec2::new(0.0, -10.0));
+    let shapes_bot_before = c.paint(p_bot);
+    let dashes_bot_before = count_dashes(&shapes_bot_before);
+    assert!(dashes_bot_before >= 2, "lower semicircle should show FULL ERASE preview in Quick mode");
+
+    let input_bot = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_bot),
+            egui::Event::PointerButton { pos: p_bot, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_bot, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let _ = c.ctx.run_ui(input_bot, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+
+    // 4. Verify lower arc erased, only cutting line remains (TRIM still active)
+    let ents_after_second = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after_second.len(), 1, "only cutting line should remain after second trim");
+    match &ents_after_second[0].kind {
+        cadcraft_doc::EntityKind::Line(_) => {},
+        k => panic!("expected Line, got {:?}", k),
+    }
+
+    // 5. INTERNAL UNDO within TRIM: send "Undo" keyword directly to session
+    // This uses TRIM's local undo stack (self.undo), not global Session undo
+    c.app.session.input(cadcraft_engine::Input::Keyword("Undo".into())).unwrap();
+
+    // 6. Verify internal UNDO restored the lower arc (TRIM still active)
+    let ents_after_internal_undo = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after_internal_undo.len(), 2, "internal UNDO should restore lower arc + cutting line");
+    
+    let mut has_line = false;
+    let mut has_arc = false;
+    for e in &ents_after_internal_undo {
+        match &e.kind {
+            cadcraft_doc::EntityKind::Line(_) => has_line = true,
+            cadcraft_doc::EntityKind::Arc(_) => has_arc = true,
+            _ => {}
+        }
+    }
+    assert!(has_line && has_arc, "internal UNDO should restore both line and arc");
+
+    // 7. Hover over restored lower arc: should show FULL ERASE preview again
+    let shapes_bot_after_undo = c.paint(p_bot);
+    let dashes_bot_after_undo = count_dashes(&shapes_bot_after_undo);
+    assert!(dashes_bot_after_undo >= 2, "hover after internal UNDO should show FULL ERASE preview again");
+
+    // 8. Verify hover does NOT modify document
+    let ents_during_hover = c.app.session.doc().unwrap().model.iter().count();
+    assert_eq!(ents_during_hover, 2, "hover must not modify document");
+
+    // TRIM still active - no global UNDO/REDO tested here
+}
+
+#[test]
+fn trim_quick_global_undo_redo_after_finish() {
+    let mut c = Canvas::new(false);
+    // Circle radius 10 at (0,0) + horizontal diameter
+    c.app.session.cmdline("CIRCLE 0,0 10").unwrap();
+    c.app.session.cmdline("LINE -10,0 10,0").unwrap();
+    c.app.session.cmdline("").unwrap();
+    
+    // Ensure Quick mode (default)
+    assert!(c.app.session.doc().unwrap().header.i64("TRIMEXTENDMODE", 1) != 0);
+    
+    let dashed_lt = cadcraft_engine::doc::library::standard_linetypes()
+        .into_iter()
+        .find(|l| l.name == "DASHED")
+        .unwrap();
+    c.app.session.doc_mut().unwrap().linetypes.push(dashed_lt);
+
+    c.app.cmdline("TRIM");
+
+    // 1. Trim upper semicircle (pick at (0, 10) - north pole)
+    let p_top = c.screen(Vec2::new(0.0, 10.0));
+    let input_top = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_top),
+            egui::Event::PointerButton { pos: p_top, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_top, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut output = c.ctx.run_ui(input_top, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+    output.textures_delta.clear();
+
+    // 2. Trim lower semicircle (pick at (0, -10) - south pole)
+    let p_bot = c.screen(Vec2::new(0.0, -10.0));
+    let input_bot = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_bot),
+            egui::Event::PointerButton { pos: p_bot, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_bot, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut output = c.ctx.run_ui(input_bot, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+    output.textures_delta.clear();
+
+    // 3. FINISH TRIM: press Enter to exit TRIM command (Step::Done)
+    // This registers the entire TRIM session as one global undoable block
+    c.app.session.input(cadcraft_engine::Input::Enter).unwrap();
+
+    // 4. Verify TRIM finished: only cutting line remains
+    let ents_after_finish = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after_finish.len(), 1, "after TRIM finish, only cutting line should remain");
+    match &ents_after_finish[0].kind {
+        cadcraft_doc::EntityKind::Line(_) => {},
+        k => panic!("expected Line, got {:?}", k),
+    }
+
+    // 5. Verify TRIM command is no longer active (command line idle)
+    // No interactive command should be running
+
+    // 6. GLOBAL UNDO: execute("undo") - should undo the entire TRIM block (both trims)
+    c.app.session.execute("undo", &serde_json::json!({ "count": 1 })).unwrap();
+
+    let ents_after_global_undo = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    // Global UNDO of TRIM block should restore state BEFORE the entire TRIM command
+    // That means: full circle + cutting line = 2 entities
+    assert_eq!(ents_after_global_undo.len(), 2, "global UNDO should restore full circle + cutting line");
+    
+    let mut has_circle = false;
+    let mut has_line = false;
+    for e in &ents_after_global_undo {
+        match &e.kind {
+            cadcraft_doc::EntityKind::Circle(_) => has_circle = true,
+            cadcraft_doc::EntityKind::Line(_) => has_line = true,
+            _ => {}
+        }
+    }
+    assert!(has_circle && has_line, "global UNDO should restore full circle + cutting line");
+
+    // 7. GLOBAL REDO: execute("redo") - should re-apply entire TRIM block
+    c.app.session.execute("redo", &serde_json::json!({ "count": 1 })).unwrap();
+    
+    let ents_after_global_redo = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after_global_redo.len(), 1, "global REDO should re-apply TRIM block, only cutting line remains");
+    match &ents_after_global_redo[0].kind {
+        cadcraft_doc::EntityKind::Line(_) => {},
+        k => panic!("expected Line after global REDO, got {:?}", k),
+    }
+
+    // 8. Verify line is the original cutting line (conserved throughout)
+    match &ents_after_global_redo[0].kind {
+        cadcraft_doc::EntityKind::Line(l) => {
+            assert!((l.a.x - (-10.0)).abs() < 1e-4 && (l.b.x - 10.0).abs() < 1e-4, "cutting line geometry conserved");
+        },
+        _ => panic!("expected cutting line"),
+    }
+}
+
+#[test]
+fn trim_selection_window_overlay_appearance_and_layer_independence() {
+    let mut c = Canvas::new(false);
+    c.app.session.cmdline("LINE 0,0 100,0").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("LINE 25,-10 25,10").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("LINE 50,-10 50,10").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("LINE 75,-10 75,10").unwrap();
+    c.app.session.cmdline("").unwrap();
+
+    // Create and switch to a distinct active layer with red color
+    c.app.session.cmdline("LAYER M RED_LAYER C 1  ").unwrap();
+    c.app.session.cmdline("").unwrap();
+    c.app.session.cmdline("").unwrap();
+    assert!(c.app.session.running.is_none(), "LAYER command must be finished");
+    assert_eq!(c.app.session.doc().unwrap().header.str("CLAYER", "0"), "RED_LAYER");
+
+    // Start TRIM
+    c.app.cmdline("TRIM");
+    assert_eq!(c.app.session.running.as_ref().map(|r| r.id.as_str()), Some("trim"));
+
+    // 1. Move to empty space at (70, -25) and click to initiate crossing selection
+    let p_start = c.screen(Vec2::new(70.0, -25.0));
+    let _ = c.paint(p_start);
+    let input_start = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_start),
+            egui::Event::PointerButton { pos: p_start, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_start, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut output_start = c.ctx.run_ui(input_start, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+    output_start.textures_delta.clear();
+
+    // Verify pending_window is active with corner at (70, -25)
+    let pw = c.app.session.pending_window.expect("pending_window must be set during TRIM crossing");
+    assert!((pw.corner.x - 70.0).abs() < 1e-4 && (pw.corner.y - (-25.0)).abs() < 1e-4);
+
+    // 2. Drag cursor to the LEFT to (30, 25): Crossing window (x < corner.x)
+    let p_left = c.screen(Vec2::new(30.0, 25.0));
+    let shapes_crossing = c.paint(p_left);
+
+    // Verify that the crossing window is rendered with semi-transparent fill and crossing stroke
+    let tokens = theme::Tokens::get();
+    let mut has_fill = false;
+    let mut has_crossing_stroke = false;
+    let mut has_red_stroke = false;
+    fn check_crossing(s: &egui::Shape, tokens: &theme::Tokens, has_fill: &mut bool, has_crossing_stroke: &mut bool, has_red_stroke: &mut bool) {
+        match s {
+            egui::Shape::Rect(r) => {
+                if r.fill.a() > 0 && r.fill.a() < 255 {
+                    *has_fill = true;
+                }
+                if r.stroke.color == tokens.crossing_stroke {
+                    *has_crossing_stroke = true;
+                }
+                if r.stroke.color == Color32::from_rgb(255, 0, 0) || r.stroke.color == Color32::RED {
+                    *has_red_stroke = true;
+                }
+            }
+            egui::Shape::LineSegment { stroke, .. } => {
+                if stroke.color == tokens.crossing_stroke {
+                    *has_crossing_stroke = true;
+                }
+                if stroke.color == Color32::from_rgb(255, 0, 0) || stroke.color == Color32::RED {
+                    *has_red_stroke = true;
+                }
+            }
+            egui::Shape::Vec(v) => {
+                for inner in v {
+                    check_crossing(inner, tokens, has_fill, has_crossing_stroke, has_red_stroke);
+                }
+            }
+            _ => {}
+        }
+    }
+    for s in &shapes_crossing {
+        check_crossing(&s.shape, &tokens, &mut has_fill, &mut has_crossing_stroke, &mut has_red_stroke);
+    }
+    assert!(has_fill, "TRIM crossing window must render a semi-transparent fill");
+    assert!(has_crossing_stroke, "TRIM crossing window must use theme crossing stroke");
+    assert!(!has_red_stroke, "TRIM crossing window must NOT use active layer's red color");
+
+    // 3. Move cursor to the RIGHT to (90, 10): Window selection (x > corner.x)
+    let p_right = c.screen(Vec2::new(90.0, 10.0));
+    let shapes_window = c.paint(p_right);
+    let mut has_window_stroke = false;
+    fn check_window(s: &egui::Shape, tokens: &theme::Tokens, has_window_stroke: &mut bool) {
+        match s {
+            egui::Shape::Rect(r) => {
+                if r.stroke.color == tokens.window_stroke {
+                    *has_window_stroke = true;
+                }
+            }
+            egui::Shape::LineSegment { stroke, .. } => {
+                if stroke.color == tokens.window_stroke {
+                    *has_window_stroke = true;
+                }
+            }
+            egui::Shape::Vec(v) => {
+                for inner in v {
+                    check_window(inner, tokens, has_window_stroke);
+                }
+            }
+            _ => {}
+        }
+    }
+    for s in &shapes_window {
+        check_window(&s.shape, &tokens, &mut has_window_stroke);
+    }
+    assert!(has_window_stroke, "TRIM selection to the right must use theme window stroke (solid)");
+
+    // 4. Confirm crossing selection at (30, 10)
+    let input_end = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_left),
+            egui::Event::PointerButton { pos: p_left, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_left, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut output_end = c.ctx.run_ui(input_end, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+    output_end.textures_delta.clear();
+
+    // Verify pending_window is cleared
+    assert!(c.app.session.pending_window.is_none(), "pending_window must be cleared after confirming crossing");
+
+    // Verify trimming occurred: H middle segment and cutter V2 (50, -10 to 50, 10) removed
+    let ents_after = c.app.session.doc().unwrap().model.iter().collect::<Vec<_>>();
+    assert_eq!(ents_after.len(), 4, "crossing trim in one pass leaves exactly 4 lines");
+}
+
+#[test]
+fn trim_selection_overlay_respects_selectionarea_disabled() {
+    let mut c = Canvas::new(false);
+    c.app.cmdline("TRIM");
+
+    // Start window at (70, -25)
+    let p_start = c.screen(Vec2::new(70.0, -25.0));
+    let input_start = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_start),
+            egui::Event::PointerButton { pos: p_start, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_start, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut output = c.ctx.run_ui(input_start, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+    output.textures_delta.clear();
+
+    // 1. With SELECTIONAREA disabled: no fill must be rendered on the selection box
+    c.app.session.settings.selectionarea = false;
+    let p_drag = c.screen(Vec2::new(30.0, 25.0));
+    let expected_r = Rect::from_two_pos(p_start, p_drag);
+    let shapes_no_fill = c.paint(p_drag);
+
+    let mut fill_found = false;
+    fn check_box_fill(s: &egui::Shape, expected: Rect, fill_found: &mut bool) {
+        match s {
+            egui::Shape::Rect(r) if (r.rect.min.distance(expected.min) < 2.0) && (r.rect.max.distance(expected.max) < 2.0) && r.fill.a() > 0 => {
+                *fill_found = true;
+            }
+            egui::Shape::Vec(v) => {
+                for inner in v {
+                    check_box_fill(inner, expected, fill_found);
+                }
+            }
+            _ => {}
+        }
+    }
+    for s in &shapes_no_fill {
+        check_box_fill(&s.shape, expected_r, &mut fill_found);
+    }
+    assert!(!fill_found, "when SELECTIONAREA is false, pending_window must NOT render any fill");
+
+    // 2. With SELECTIONAREA enabled: fill must be rendered on the selection box
+    c.app.session.settings.selectionarea = true;
+    let shapes_with_fill = c.paint(p_drag);
+    fill_found = false;
+    for s in &shapes_with_fill {
+        check_box_fill(&s.shape, expected_r, &mut fill_found);
+    }
+    assert!(fill_found, "when SELECTIONAREA is true, pending_window must render semi-transparent fill");
+}
+
+#[test]
+fn trim_explicit_crossing_keyword_forces_green_overlay_dragging_right() {
+    let mut c = Canvas::new(false);
+    c.app.cmdline("TRIM");
+
+    // Enter explicit Crossing mode via keyword "C"
+    c.app.cmdline("C");
+
+    // First corner at (30, 25)
+    let p_first = c.screen(Vec2::new(30.0, 25.0));
+    let input_first = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+        events: vec![
+            egui::Event::PointerMoved(p_first),
+            egui::Event::PointerButton { pos: p_first, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: p_first, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mut output = c.ctx.run_ui(input_first, |ui| {
+        c.app.logic(ui.ctx());
+        c.app.ui(ui);
+    });
+    output.textures_delta.clear();
+
+    let pw = c.app.session.pending_window.as_ref().expect("pending_window active");
+    assert!(pw.force_crossing, "pending_window must have force_crossing=true");
+
+    // Drag to the RIGHT at (70, 25) (c.x > corner.x)
+    let p_right = c.screen(Vec2::new(70.0, 25.0));
+    let shapes = c.paint(p_right);
+
+    let tokens = theme::Tokens::get();
+    let mut has_crossing_stroke = false;
+    let mut has_window_stroke = false;
+    fn check_strokes(s: &egui::Shape, tokens: &theme::Tokens, has_cross: &mut bool, has_win: &mut bool) {
+        match s {
+            egui::Shape::Rect(r) => {
+                if r.stroke.color == tokens.crossing_stroke { *has_cross = true; }
+                if r.stroke.color == tokens.window_stroke { *has_win = true; }
+            }
+            egui::Shape::LineSegment { stroke, .. } => {
+                if stroke.color == tokens.crossing_stroke { *has_cross = true; }
+                if stroke.color == tokens.window_stroke { *has_win = true; }
+            }
+            egui::Shape::Vec(v) => {
+                for inner in v {
+                    check_strokes(inner, tokens, has_cross, has_win);
+                }
+            }
+            _ => {}
+        }
+    }
+    for s in &shapes {
+        check_strokes(&s.shape, &tokens, &mut has_crossing_stroke, &mut has_window_stroke);
+    }
+    assert!(has_crossing_stroke, "explicit Crossing keyword must force green dashed crossing stroke even when dragging right");
+    assert!(!has_window_stroke, "explicit Crossing keyword must NOT use blue window stroke");
+
+    // Cancel and verify cleanup of overlay
+    c.app.session.cancel();
+    assert!(c.app.session.pending_window.is_none(), "pending_window must be cleared on cancel");
+    let shapes_after = c.paint(p_right);
+    let mut cross_found = false;
+    let mut win_found = false;
+    for s in &shapes_after {
+        check_strokes(&s.shape, &tokens, &mut cross_found, &mut win_found);
+    }
+    assert!(!cross_found && !win_found, "overlay must be completely cleaned up after cancel");
+}
+
+
+

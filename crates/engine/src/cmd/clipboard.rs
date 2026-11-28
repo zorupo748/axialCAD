@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use cadcraft_doc::{Block, Drawing, Entity, EntityKind, HVal, Handle};
-use cadcraft_geom::{Mat3, Vec2};
+use cadcraft_geom::{Vec2, Vec3};
 
 use super::{bad, has_doc};
 use crate::{Result, Session};
@@ -37,14 +37,14 @@ pub struct ClipSource {
 }
 
 /// Put copies of `ents` from the active drawing on the clipboard, with `base` as base point.
-pub(crate) fn copy(s: &mut Session, ents: Vec<Entity>, base: Vec2) -> Result<()> {
+pub(crate) fn copy(s: &mut Session, ents: Vec<Entity>, base: Vec3) -> Result<()> {
     let uid = s.state()?.uid;
     let defs = defs_for(s.doc()?, &ents);
     set(s, ents, base, defs, Some(uid));
     Ok(())
 }
 
-fn set(s: &mut Session, ents: Vec<Entity>, base: Vec2, defs: Drawing, uid: Option<u64>) {
+fn set(s: &mut Session, ents: Vec<Entity>, base: Vec3, defs: Drawing, uid: Option<u64>) {
     let serial = s.clipboard_source.as_ref().map_or(0, |c| c.serial).wrapping_add(1);
     s.clipboard = ents;
     s.clipboard_base = base;
@@ -72,9 +72,9 @@ pub fn from_active(s: &Session) -> bool {
     s.clipboard_source.as_ref().is_some_and(|c| c.uid.is_some() && c.uid == active)
 }
 
-/// Paste the clipboard into the active drawing's current space, moved by `m`; selects and
+/// Paste the clipboard into the active drawing's current space, moved by `delta`; selects and
 /// returns the new objects.
-pub(crate) fn paste(s: &mut Session, m: &Mat3) -> Result<Vec<Handle>> {
+pub(crate) fn paste(s: &mut Session, delta: Vec3) -> Result<Vec<Handle>> {
     let ents = s.clipboard.clone();
     let defs = s.clipboard_source.as_ref().map(|c| c.defs.clone());
     let space = s.space();
@@ -83,7 +83,7 @@ pub(crate) fn paste(s: &mut Session, m: &Mat3) -> Result<Vec<Handle>> {
     let mut out = Vec::new();
     for e in &ents {
         let mut e = adopt(d, e, &renames);
-        e.kind.transform(m);
+        e.kind.translate_3d(delta);
         d.ensure_layer(&e.common.layer);
         out.push(e.handle);
         if let Some(st) = d.space_mut(&space) {
@@ -111,7 +111,7 @@ pub(crate) fn paste_block(s: &mut Session, at: Vec2) -> Result<Handle> {
         .find(|n| d.block(n).is_none())
         .ok_or_else(|| bad("pasteblock", "no free block name"))?;
     let mut b = Block::new(&name);
-    b.base = base.to3(0.0);
+    b.base = base;
     for e in &ents {
         let e = adopt(d, e, &renames);
         d.ensure_layer(&e.common.layer);
@@ -138,7 +138,7 @@ pub fn system_text(s: &Session) -> Option<String> {
         }
         None => BTreeMap::new(),
     };
-    d.header.set("INSBASE", HVal::Point(s.clipboard_base.to3(0.0)));
+    d.header.set("INSBASE", HVal::Point(s.clipboard_base));
     for e in &s.clipboard {
         let e = adopt(&mut d, e, &renames);
         d.ensure_layer(&e.common.layer);
@@ -162,7 +162,7 @@ pub fn load_system_text(s: &mut Session, text: &str) -> bool {
         return false;
     }
     let ents: Vec<Entity> = src.model.iter().map(|e| (**e).clone()).collect();
-    let base = src.header.point("INSBASE").map(|p| p.xy()).filter(|p| p.is_finite()).unwrap_or(Vec2::ZERO);
+    let base = src.header.point("INSBASE").filter(|p| p.is_finite()).unwrap_or(Vec3::ZERO);
     let defs = defs_for(&src, &ents);
     set(s, ents, base, defs, None);
     true

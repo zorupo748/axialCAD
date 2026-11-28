@@ -1423,6 +1423,19 @@ fn header(tags: &[Tag], d: &mut Drawing) {
                 }
                 continue;
             }
+            if name == "PROJMODE" {
+                if let [tag] = vals.as_slice()
+                    && tag.code == 70
+                    && let cadcraft_dxf::Value::Int(value) = tag.value
+                {
+                    let mode = match value {
+                        1 | 2 => value,
+                        _ => 0,
+                    };
+                    d.header.set_i64("PROJMODE", mode);
+                }
+                continue;
+            }
             let hv = match vals.as_slice() {
                 [x, y, z] if x.code == 10 => HVal::Point(Vec3::new(x.f64(), y.f64(), z.f64())),
                 [x, y] if x.code == 10 => HVal::Point(Vec3::new(x.f64(), y.f64(), 0.0)),
@@ -1784,6 +1797,7 @@ fn read_budgeted(bytes: &[u8], mut table_cells_left: usize) -> Result<Drawing> {
     d.layouts.clear();
     // A file without $INSUNITS declares no units (#1209); only new drawings take the template's.
     d.header.set_i64("INSUNITS", 0);
+    d.header.set_i64("PROJMODE", 0);
     let mut rx = Rx { pstyles: plot_style_names(&secs), ..Rx::default() };
     let mut blocks: Vec<(String, Vec3, String, Vec<(Option<String>, bool, Entity)>, i64)> = Vec::new();
     let mut layout_objs: Vec<(String, u32, String, PageSetup)> = Vec::new();

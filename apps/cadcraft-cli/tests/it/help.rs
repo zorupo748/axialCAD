@@ -10,6 +10,20 @@ fn help_flags_print_usage_to_stdout_and_exit_zero() {
         assert!(out.status.success(), "{args:?}: {:?}", out.status);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.starts_with("usage:"), "{args:?}: {stdout:?}");
+        assert!(stdout.contains("  axialcad-cli info FILE.dxf"), "{args:?}: {stdout:?}");
+        assert!(stdout.contains("legacy alias: cadcraft-cli remains available for compatibility."), "{args:?}: {stdout:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).is_empty(), "{args:?}: stderr should be empty");
+    }
+}
+
+#[test]
+fn version_flags_report_axialcad_cli_and_keep_the_cargo_version() {
+    for args in [&["--version"][..], &["-V"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_cadcraft-cli")).args(args).output().expect("run cadcraft-cli");
+        assert!(out.status.success(), "{args:?}: {:?}", out.status);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.starts_with(&format!("axialCAD CLI {}", env!("CARGO_PKG_VERSION"))), "{args:?}: {stdout:?}");
+        assert!(!stdout.contains("cadcraft-cli"), "{args:?}: {stdout:?}");
         assert!(String::from_utf8_lossy(&out.stderr).is_empty(), "{args:?}: stderr should be empty");
     }
 }

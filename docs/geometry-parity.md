@@ -1,10 +1,10 @@
 # Geometry parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-22 · **Change:** minor (bounded constraint expression and parameter depth) · **Target:** Autodesk AutoCAD 2027
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-28 · **Change:** minor (TRIM endpoint contacts) · **Target:** Autodesk AutoCAD 2027
 
 CAD users trust numbers: a trimmed endpoint, an offset, an intersection or an area is either right
 to the last displayed digit or the tool is unusable for production drawings. This document
-audits CADCraft's geometry kernel (`crates/geom`, the curve code in `crates/engine/src/cmd`,
+audits axialCAD's geometry kernel (`crates/geom`, the curve code in `crates/engine/src/cmd`,
 `crates/constraints`) curve by curve against what AutoCAD users rely on. Snaps and tracking are
 in [ui-parity.md](ui-parity.md); dimension and hatch behaviour in [gaps.md](gaps.md).
 
@@ -21,7 +21,7 @@ drawings behave differently from mid-sized ones. 3D geometry doesn't exist. Rema
 Read from the source on 2026-10-10 (main at bd2412f), with file:line evidence in the tables. No
 numeric comparison against AutoCAD has been run yet: the plan is a set of synthetic drawings whose
 exact answers are known analytically, measured in both apps black-box (LIST, ID, AREA results)
-and in CADCraft headless. Until then the percentages are judgements.
+and in axialCAD headless. Until then the percentages are judgements.
 
 Weights (how much AutoCAD users lean on each area in 2D drafting): numeric robustness 15%,
 curve representation 10%, intersections 15%, offsets 15%, trim/extend/fillet/chamfer/break/join
@@ -30,7 +30,7 @@ constraints 10%.
 
 ## Numbers and tolerances (≈ 30%)
 
-| Item | AutoCAD | CADCraft | Evidence |
+| Item | AutoCAD | axialCAD | Evidence |
 |---|---|---|---|
 | Representation | IEEE double, 3D throughout | f64, **2D kernel** (`Vec2`); Z kept only on entity points and 3D polylines | `geom/src/vec.rs` |
 | Tolerance model | Relative to geometry (the ACIS/AcGe tolerance context), stable at survey coordinates | one absolute `EPS = 1e-9`, plus ad-hoc absolute 1e-12/1e-14 in intersections and 1e-3/1e-4 world units for tessellating curves; a few relative tolerances (line–line denominator, hatch, solver) | `geom/src/lib.rs:26`, `intersect.rs:8,19,34,50`, `cmd/modify.rs:469-474`, `snap.rs:98-110` |
@@ -41,7 +41,7 @@ constraints 10%.
 
 ## Curves (≈ 60%)
 
-| Curve | AutoCAD | CADCraft |
+| Curve | AutoCAD | axialCAD |
 |---|---|---|
 | Line, ray, xline | yes | yes, exact |
 | Circle, arc, bulge polyline | yes | yes, exact |
@@ -52,11 +52,11 @@ constraints 10%.
 | Spline editing: knot insertion, split, refine, rebuild, convert to polyline | SPLINEDIT, grips | knot insertion and splitting (`curves.rs:539-622`); refine/rebuild partial |
 | Helix | yes | **no** |
 | 3D polyline | yes | stored and drawn; no 3D operations |
-| Regions, 3D solids, surfaces, meshes (ACIS/B-rep, NURBS surfaces, subdivision) | yes | Regions exact; B-Rep 3D solids (`cadcraft-brep`: box, cylinder, extrusion, booleans `solid.union`/`subtract`/`intersect`, recipes, metrics, STL); surfaces and meshes in progress |
+| Regions, 3D solids, surfaces, meshes (ACIS/B-rep, NURBS surfaces, subdivision) | yes | Regions exact; B-Rep 3D solids (`cadcraft-brep`: box, cylinder, extrusion, booleans `solid.union`/`subtract`/`intersect`, recipes, metrics, STL, COPYBASE 3D); simple extruded solids validated in slicers; fine-tolerance (0.05 mm) meshing of perforated solids open |
 
 ## Intersections (≈ 40%)
 
-| Pair | AutoCAD | CADCraft |
+| Pair | AutoCAD | axialCAD |
 |---|---|---|
 | line–line, line–circle/arc, circle–circle | exact | closed form, exact; tangency decided by a fixed `|disc| ≤ 1e-12·a`, so near-tangent cases depend on scale |
 | line/arc–ellipse | exact (quartic) | **tessellated**: 1e-4 world units in TRIM, 1e-3 in snaps; TRIM refines with 720 samples + 60-step bisection, near-exact against line/arc cutters (`modify2.rs:1946-1995`) |
@@ -67,7 +67,7 @@ constraints 10%.
 
 ## Offsets (≈ 30%)
 
-| Curve | AutoCAD OFFSET | CADCraft (`cmd/modify.rs:276-424`) |
+| Curve | AutoCAD OFFSET | axialCAD (`cmd/modify.rs:276-424`) |
 |---|---|---|
 | Line, ray, xline | exact | exact |
 | Circle, arc | exact | exact (radius change) |
@@ -78,8 +78,38 @@ constraints 10%.
 
 ## Trim, extend, fillet, chamfer, break, join, lengthen (≈ 70%)
 
-| Command | AutoCAD supports | CADCraft supports |
+**TRIM and EXTEND projection.** `PROJMODE` defaults to None (WCS contact), with UCS XY
+and View as explicit alternatives. This applies to direct TRIM of lines, circles and arcs, and
+to direct EXTEND of lines, including JSON handle-and-pick calls. A vertical line needs a
+three-coordinate JSON pick. In None, lines, circles, arcs, rays, construction lines,
+polyline segments, horizontal ellipses and planar splines can supply WCS cutting edges.
+UCS and View project lightweight and 3D polyline cutters from their WCS geometry.
+For direct TRIM of a round target, a projected LINE endpoint can supply a
+cut within the linear contact tolerance in the target plane.
+Contact allows 2e-5 of the local operand size, bounded between 1e-8 and 1e-2 drawing
+units. With no interior cut, direct Quick TRIM can remove a line or arc with a
+contact at one endpoint. A lone hit that is within contact tolerance of both arc
+ends is ambiguous. Quick TRIM also previews and erases an entire line with no
+physical contacts. In None, a circle or arc with zero contacts is kept.
+Window, Crossing, Fence and arc EXTEND
+still use WCS XY, even in None. Direct edits of other target types retain their planar
+algorithms. The extrusion guard rejects direct TRIM of circles and arcs whose
+extrusion differs from world +Z by more than 1e-6. The target stays in the drawing.
+
+For diagnostics, launch with `AXIAL_TRIM_DEBUG=1` and capture standard error.
+The trace records the pick route, resolved WCS coordinates, projection, circle
+contacts and the planned outcome for preview and apply.
+
+In an oblique view, `screen_projected_pick_at` took a median of 54 ms per search
+(P95 57 ms) with 10,000 elevated circles. The measurement used 51 samples in the
+optimized test profile and covered hit testing alone.
+
+| Command | AutoCAD supports | axialCAD supports |
 |---|---|---|
+| 2026-11-28 | minor | Direct TRIM accepts projected LINE endpoint contacts on round targets within tolerance, including a circle cut by two radial lines. |
+| 2026-11-28 | minor | Quick TRIM previews and erases lines without physical contacts. Documented extrusion validation, opt-in TRIM tracing and oblique hit-test timings. |
+| 2026-11-28 | minor | Direct TRIM preserves elevation when projecting polyline cutters into UCS and View. |
+| 2026-11-28 | minor | Direct Quick TRIM in None accepts a single unambiguous endpoint contact and can finish trimming a pair of crossing lines within one command. |
 | TRIM | every curve type, quick and standard modes | line, arc, circle, polyline; ellipse and spline via sampled cutting (`modify.rs:485-656`, `modify2.rs` `trim_other`); a closed spline leaves one open spline On a closed polyline a pick before the first or after the last cut keeps the run between the cuts and nothing more (#726). |
 | EXTEND | every open curve | line, arc, polyline, elliptical arc, open spline (runs on along its end tangent, `modify2/curve_edits.rs`) |
 | FILLET | lines, arcs, circles, polylines, ellipses, splines, xlines, rays; Trim/No trim | lines, arcs, circles (TTR circle), polyline mode, Trim/No trim, Multiple; elliptical arcs and splines with any of these (tangent circle from sampled offsets refined by Newton's method, `geom/src/fillet.rs`; arcs trimmed or extended round the ellipse, splines split at the touch point); two straight segments of one polyline (adjacent, or with one between that the corner replaces), a polyline's straight end segment with a line (the line joins it); not polyline arc segments, xlines or rays |
@@ -94,7 +124,7 @@ Where line and arc are supported the results are exact.
 
 ## Measurement (≈ 40%)
 
-| Quantity | AutoCAD | CADCraft |
+| Quantity | AutoCAD | axialCAD |
 |---|---|---|
 | Closest point: line, arc, circle, polyline | exact | exact |
 | Closest point: ellipse, spline | exact to tolerance | **sampled** (`curve.rs:264`, `curves.rs:637`) |
@@ -116,7 +146,7 @@ lines are scanline families clipped against the tessellated loops (`render/src/h
 
 ## Constraint solver (≈ 50%)
 
-| Item | AutoCAD | CADCraft (`crates/constraints`) |
+| Item | AutoCAD | axialCAD (`crates/constraints`) |
 |---|---|---|
 | Geometric constraints (12) | coincident, collinear, concentric, fix, parallel, perpendicular, horizontal, vertical, tangent, smooth (G2), symmetric, equal | all 12; Smooth is G2 (common point, tangent and curvature, `curves.rs`) between a spline and a line, arc, elliptical arc, polyline segment or spline; between two non-spline curves it stays tangency |
 | Dimensional constraints | linear, horizontal, vertical, aligned, angular, radial, diameter; dynamic and annotational; reference | distance (aligned/horizontal/vertical), angular, radius, diameter; parameters and expressions (`expr.rs`), with one depth limit across syntax trees and parameter references |
@@ -157,6 +187,7 @@ Total ≈ 90–140 h; items 1–6 parallelise across two or three agents.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-28 | minor | Successive TRIM cuts can remove lines and arcs bounded at both endpoints in None projection. Very short arcs require distinct contacts at their endpoints. |
 | 2026-10-22 | minor | Constraint expressions count operator chains toward the syntax-tree depth limit; evaluation shares one depth limit across operators and parameter references, with a 1 MiB-stack regression (#1936) |
 | 2026-10-14 | trivial | JOIN Close: a single arc becomes its circle, a single elliptical arc its full ellipse (#1175) |
 | 2026-10-12 | trivial | TRIM on a closed polyline keeps only the complementary run when the pick lies past the last cut (#726) |

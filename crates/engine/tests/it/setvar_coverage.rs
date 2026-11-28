@@ -20,7 +20,7 @@ fn defaults_are_the_ones_the_commands_use() {
         ("POLYSIDES", json!(4)),
         ("OFFSETDIST", json!(-1.0)),
         ("TRIMMODE", json!(1)),
-        ("PROJMODE", json!(1)),
+        ("PROJMODE", json!(0)),
         ("EDGEMODE", json!(0)),
         ("HPNAME", json!("ANSI31")),
         ("HPSCALE", json!(1.0)),

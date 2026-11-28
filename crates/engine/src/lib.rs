@@ -37,6 +37,7 @@ pub mod units;
 
 use std::sync::Arc;
 
+use cadcraft_color::Color;
 use cadcraft_doc::{Common, Drawing, Entity, EntityKind, Handle, Space};
 use cadcraft_geom::{Bounds2, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,8 @@ pub enum EngineError {
     BadParams { cmd: String, msg: String },
     #[error("no active document")]
     NoDocument,
+    #[error("{0}")]
+    NoIntersection(String),
     #[error("{0}")]
     Other(String),
     /// A command panicked; the guard kept the drawing as it was (a bug: please report it).
@@ -508,6 +511,10 @@ pub struct Settings {
     pub zlock: bool,
     /// Softly track global X/Y/Z directions while drawing LINE in oblique views.
     pub axistrack: bool,
+    /// VSCURRENT: current visual style name ("2dWireframe", "Conceptual", etc.).
+    pub vscurrent: String,
+    /// Acompañar vista al definir SCP (view continuously follows candidate UCS orientation).
+    pub ucs_follow_view: bool,
 }
 
 impl Default for Settings {
@@ -529,7 +536,7 @@ impl Default for Settings {
             gridunit: Vec2::new(0.5, 0.5),
             gridmajor: 5,
             zoomfactor: 60,
-            measureinit: false,
+            measureinit: true,
             view_layer_snapshot: true,
             dynmode: true,
             dyndigrip: 31,
@@ -578,6 +585,8 @@ impl Default for Settings {
             polardist: 0.0,
             auditctl: false,
             drawing_plane: cadcraft_geom::DrawingPlane::XY,
+            vscurrent: "2dWireframe".into(),
+            ucs_follow_view: false,
         }
     }
 }
@@ -595,6 +604,7 @@ pub struct Running {
 pub struct PendingWindow {
     pub corner: Vec2,
     pub during_command: bool,
+    pub force_crossing: bool,
 }
 
 /// Options and values the interactive commands remember for the rest of the session, offered as
@@ -723,14 +733,19 @@ pub struct Session {
     pub point_mods: Vec<pointmod::Frame>,
     /// Cursor position in world coordinates (from the UI; used for direct distance entry).
     pub cursor: Vec2,
+    /// Entity and point resolved from the current screen hover for TRIM preview.
+    pub cursor_entity_point: Option<(Handle, Vec2, Option<Vec3>)>,
     pub cursor3: Vec3,
     /// Explicit validity flag for cursor3: true only when actively resolved by the view/camera
     /// for the current command and segment base point.
     pub cursor3_valid: bool,
     /// Base point associated with the current cursor3 resolution.
     pub cursor3_base: Option<Vec3>,
+    pub cursor3_snapped: bool,
     /// Flag indicating whether the point currently being dispatched came from an object snap.
     pub input_is_snapped: bool,
+    /// An already-resolved spatial endpoint offered by a one-shot END override.
+    pub(crate) input_is_spatial_end_override: bool,
     /// Flag indicating whether the point currently being dispatched came from explicit typed coordinates.
     pub input_is_explicit: bool,
     /// Whether the session is actively attached to an interactive UI canvas.
@@ -742,6 +757,8 @@ pub struct Session {
     /// change behavior on Ctrl — currently only ARC's "hold Ctrl to switch direction" — read
     /// this instead of receiving modifiers through `Input`, which stays free of UI state.
     pub ctrl_down: bool,
+    /// Whether Shift is held right now (from the UI, overwritten every frame).
+    pub shift_down: bool,
     /// Origin of the point currently being fed by `input_snapped`; never reused by typed points.
     picked_viewport: Option<snap::ViewportPoint>,
     /// The last drawing comparison (COMPARE), drawn over the drawing it was made for.
@@ -752,7 +769,7 @@ pub struct Session {
     /// Viewport size in pixels (from the UI; used for zoom and pick apertures).
     pub viewport_px: (f64, f64),
     pub clipboard: Vec<Entity>,
-    pub clipboard_base: Vec2,
+    pub clipboard_base: Vec3,
     pub pending_window: Option<PendingWindow>,
     /// A selection mode typed at "Select objects" (W, C, F, WP, CP) collecting its points.
     pub select_mode: Option<select::SelectMode>,
@@ -777,6 +794,8 @@ pub struct Session {
     pub hatch_preview_params: Option<serde_json::Value>,
     /// Multiplier for 3D orbit angular sensitivity, frozen at the start of each orbit gesture.
     pub orbit_sensitivity: f64,
+    /// Monotonic start time of this session, for elapsed time measurements (e.g. MILLISECS).
+    pub started_at: std::time::Instant,
 }
 
 impl Default for Session {
@@ -788,13 +807,15 @@ impl Default for Session {
 impl Session {
     pub fn new() -> Self {
         let mut s = Session::empty();
-        s.new_drawing(false);
+        let metric = s.settings.measureinit;
+        s.new_drawing(metric);
         s
     }
     /// Invalidate spatial 3D cursor tracking and transient dispatch flags.
     pub fn invalidate_cursor3(&mut self) {
         self.cursor3_valid = false;
         self.cursor3_base = None;
+        self.cursor3_snapped = false;
         self.input_is_snapped = false;
         self.input_is_explicit = false;
     }
@@ -816,20 +837,24 @@ impl Session {
             last_polar: None,
             point_mods: Vec::new(),
             cursor: Vec2::ZERO,
+            cursor_entity_point: None,
             cursor3: Vec3::ZERO,
             cursor3_valid: false,
             cursor3_base: None,
+            cursor3_snapped: false,
             input_is_snapped: false,
+            input_is_spatial_end_override: false,
             input_is_explicit: false,
             is_interactive_ui: false,
             cursor_deferred: None,
             ctrl_down: false,
+            shift_down: false,
             picked_viewport: None,
             compare: None,
             tracking: snap::tracking::Tracker::default(),
             viewport_px: (1200.0, 800.0),
             clipboard: Vec::new(),
-            clipboard_base: Vec2::ZERO,
+            clipboard_base: Vec3::ZERO,
             pending_window: None,
             select_mode: None,
             select_single: false,
@@ -843,6 +868,7 @@ impl Session {
             hatch_picks: None,
             hatch_preview_params: None,
             orbit_sensitivity: 1.0,
+            started_at: std::time::Instant::now(),
         }
     }
     /// Synchronize session-level drafting settings (`gridmode`) from the currently active drawing's header.
@@ -986,6 +1012,67 @@ impl Session {
         } else {
             Ok(false)
         }
+    }
+    pub fn preview_ucs(&self) -> Option<cadcraft_geom::UcsFrame> {
+        self.running.as_ref()?.machine.preview_ucs(self)
+    }
+    pub fn preview_camera(&self) -> Option<cadcraft_geom::OrbitCamera> {
+        self.running.as_ref()?.machine.preview_camera(self)
+    }
+    pub fn save_named_ucs(&mut self, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(EngineError::Other("El nombre del SCP no puede estar vacío.".into()));
+        }
+        let cur = self.ucs();
+        let doc = self.doc_mut()?;
+        doc.ucss.retain(|u| !u.name.eq_ignore_ascii_case(name));
+        doc.ucss.push(cadcraft_doc::Ucs {
+            name: name.to_string(),
+            origin: cur.origin,
+            x_axis: cur.x_axis,
+            y_axis: cur.y_axis,
+        });
+        Ok(())
+    }
+    pub fn restore_named_ucs(&mut self, name: &str) -> Result<bool> {
+        let name = name.trim();
+        let found = self.doc()?.ucss.iter().find(|u| u.name.eq_ignore_ascii_case(name)).cloned();
+        if let Some(u) = found {
+            let z_axis = u.x_axis.cross(u.y_axis).normalized();
+            let y_axis = z_axis.cross(u.x_axis).normalized();
+            self.set_ucs(cadcraft_geom::UcsFrame::new(u.origin, u.x_axis, y_axis, z_axis))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+    pub fn delete_named_ucs(&mut self, name: &str) -> Result<bool> {
+        let name = name.trim();
+        let doc = self.doc_mut()?;
+        let before = doc.ucss.len();
+        doc.ucss.retain(|u| !u.name.eq_ignore_ascii_case(name));
+        Ok(doc.ucss.len() < before)
+    }
+    pub fn rename_named_ucs(&mut self, old_name: &str, new_name: &str) -> Result<bool> {
+        let old_name = old_name.trim();
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return Err(EngineError::Other("El nuevo nombre del SCP no puede estar vacío.".into()));
+        }
+        let doc = self.doc_mut()?;
+        if doc.ucss.iter().any(|u| u.name.eq_ignore_ascii_case(new_name)) {
+            return Err(EngineError::Other(format!("Ya existe un SCP llamado `{new_name}`.")));
+        }
+        if let Some(u) = doc.ucss.iter_mut().find(|u| u.name.eq_ignore_ascii_case(old_name)) {
+            u.name = new_name.to_string();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+    pub fn named_ucss(&self) -> Result<Vec<cadcraft_doc::Ucs>> {
+        Ok(self.doc()?.ucss.clone())
     }
     pub fn drawing_plane(&self) -> cadcraft_geom::DrawingPlane {
         if self.settings.drawing_plane_manual {
@@ -1158,6 +1245,92 @@ impl Session {
     pub fn add_entity_direct(&mut self, ent: cadcraft_doc::Entity) -> Result<Handle> {
         let space = self.space();
         let h = self.doc_mut()?.add(&space, ent.common, ent.kind)?;
+        Ok(h)
+    }
+
+    /// Check whether `layer_name` is valid for an annotation entity (dimension or hatch).
+    /// If the layer already exists, checks that it is not locked, off, or frozen.
+    pub fn check_annotation_layer(&self, layer_name: &str) -> Result<()> {
+        let d = self.doc()?;
+        if let Some(layer) = d.layer(layer_name) {
+            if layer.locked || !layer.on || layer.frozen {
+                return Err(EngineError::Other(format!("layer '{layer_name}' is locked, off or frozen")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Common properties for previewing an entity on an annotation layer (DIMCLAYER / HATCHCLAYER).
+    ///
+    /// Validates that the layer is not locked, off, or frozen.
+    /// Resolves ByLayer properties against the target layer if it exists, or against the default
+    /// creation properties (`default_color`, Continuous, Default lineweight) if the layer does not exist yet.
+    /// Does not modify the document, CLAYER, or CECOLOR.
+    pub fn annotation_preview_common(&self, layer_name: &str, default_color: Color) -> Result<Common> {
+        self.check_annotation_layer(layer_name)?;
+        let d = self.doc()?;
+        let mut common = self.current_common();
+        common.layer = layer_name.to_string();
+        common.extrusion = cadcraft_geom::Vec3::Z;
+
+        let (layer_color, ltype, lweight, trans) = if let Some(layer) = d.layer(layer_name) {
+            (layer.color, layer.linetype.clone(), layer.lineweight, cadcraft_doc::Transparency::Percent(layer.transparency))
+        } else {
+            (default_color, "Continuous".into(), cadcraft_doc::Lineweight::Default, cadcraft_doc::Transparency::Percent(0))
+        };
+
+        if let Some(rgb) = d.header.get("CECOLOR_RGB").and_then(|v| v.as_i64()) {
+            common.color = cadcraft_color::Color::True(cadcraft_color::Rgb::from_u32(rgb as u32));
+        } else {
+            common.color = layer_color;
+        }
+
+        if common.linetype.eq_ignore_ascii_case("bylayer") {
+            common.linetype = ltype;
+        }
+        if common.lineweight == cadcraft_doc::Lineweight::ByLayer {
+            common.lineweight = lweight;
+        }
+        if common.transparency == cadcraft_doc::Transparency::ByLayer {
+            common.transparency = trans;
+        }
+
+        Ok(common)
+    }
+
+    /// Add an entity on the annotation layer for dimensions or hatches.
+    ///
+    /// Resolves the target layer from `layer_name` (a `DIMCLAYER`/`HATCHCLAYER` sysvar value),
+    /// creating it with `default_color` if missing. Rejects if the layer is locked, off or
+    /// frozen. The entity is created with ByLayer color so it takes the layer's colour.
+    /// Does not touch CLAYER.
+    pub fn add_entity_on_layer(&mut self, kind: EntityKind, layer_name: &str, default_color: Color) -> Result<Handle> {
+        self.check_annotation_layer(layer_name)?;
+        let resolved = {
+            let d = self.doc_mut()?;
+            if d.layer(layer_name).is_none() {
+                d.ensure_layer(layer_name);
+                if let Some(layer) = d.layer_mut(layer_name) {
+                    layer.color = default_color;
+                }
+            }
+            layer_name.to_string()
+        };
+
+        let mut common = self.current_common();
+        common.layer = resolved;
+        common.color = Color::ByLayer;
+        let space = self.space();
+        let true_color = self.doc()?.header.get("CECOLOR_RGB").and_then(|v| v.as_i64());
+        if let Some(rgb) = true_color {
+            common.color = cadcraft_color::Color::True(cadcraft_color::Rgb::from_u32(rgb as u32));
+        }
+        common.extrusion = cadcraft_geom::Vec3::Z;
+        let d = self.doc()?;
+        if d.annotative_by_style(&kind) {
+            common.anno_scales = vec![d.current_anno_scale()];
+        }
+        let h = self.doc_mut()?.add(&space, common, kind)?;
         Ok(h)
     }
 
@@ -1350,12 +1523,15 @@ impl Session {
     /// Feed an object-snap pick, retaining its viewport origin for measurements. Point modifiers
     /// that combine or constrain coordinates produce ordinary drawing-space points.
     pub fn input_snapped(&mut self, hit: snap::SnapHit) -> Result<()> {
+        let endpoint_override = self.consume_resolved_spatial_override(&hit) && hit.mode == snap::mode::END;
+        let previous_override = std::mem::replace(&mut self.input_is_spatial_end_override, endpoint_override);
         let source = hit.viewport.filter(|_| self.point_mods.iter().all(|f| matches!(f, pointmod::Frame::Snap { mode } if *mode != 0)));
         let previous = std::mem::replace(&mut self.picked_viewport, source);
         self.input_is_snapped = true;
         let result = self.input(hit.input());
         self.input_is_snapped = false;
         self.picked_viewport = previous;
+        self.input_is_spatial_end_override = previous_override;
         result
     }
 
@@ -1448,14 +1624,14 @@ impl Session {
             Input::Point(p) => {
                 let ap = self.pixel_size() * self.settings.pickbox.max(1.0) * 1.5;
                 if let Some(pw) = self.pending_window.take() {
-                    let crossing = p.x < pw.corner.x;
+                    let crossing = pw.force_crossing || p.x < pw.corner.x;
                     let hs = select::select_window(self.doc()?, &space, Bounds2::new(pw.corner, p), crossing);
                     return Ok(Some(Input::Pick(cmd::groups::expand(self, hs))));
                 }
                 match select::pick(self.doc()?, &space, p, ap) {
                     Some(h) => Ok(Some(Input::Pick(cmd::groups::expand(self, vec![h])))),
                     None => {
-                        self.pending_window = Some(PendingWindow { corner: p, during_command: true });
+                        self.pending_window = Some(PendingWindow { corner: p, during_command: true, force_crossing: false });
                         Ok(None)
                     }
                 }
@@ -1464,14 +1640,14 @@ impl Session {
                 let p2 = p.xy();
                 let ap = self.pixel_size() * self.settings.pickbox.max(1.0) * 1.5;
                 if let Some(pw) = self.pending_window.take() {
-                    let crossing = p2.x < pw.corner.x;
+                    let crossing = pw.force_crossing || p2.x < pw.corner.x;
                     let hs = select::select_window(self.doc()?, &space, Bounds2::new(pw.corner, p2), crossing);
                     return Ok(Some(Input::Pick(cmd::groups::expand(self, hs))));
                 }
                 match select::pick(self.doc()?, &space, p2, ap) {
                     Some(h) => Ok(Some(Input::Pick(cmd::groups::expand(self, vec![h])))),
                     None => {
-                        self.pending_window = Some(PendingWindow { corner: p2, during_command: true });
+                        self.pending_window = Some(PendingWindow { corner: p2, during_command: true, force_crossing: false });
                         Ok(None)
                     }
                 }
@@ -1546,16 +1722,19 @@ impl Session {
     }
 
     fn feed(&mut self, input: Option<Input>) -> Result<()> {
-        let base = if matches!(input, Some(Input::Point(_) | Input::Point3(_))) { self.current_prompt().and_then(|p| p.base) } else { None };
+        let prompt = matches!(input, Some(Input::Point(_) | Input::Point3(_))).then(|| self.current_prompt()).flatten();
+        let base = prompt.as_ref().and_then(|p| p.base);
+        let spatial = prompt.is_some_and(|p| p.spatial_point);
         let Some(mut run) = self.running.take() else { return Ok(()) };
         let step = match input {
             Some(Input::Cancel) => Ok(Step::Cancel),
             Some(i) => {
                 let i = match i {
                     Input::Point3(p3)
-                        if !matches!(
+                        if !spatial && !matches!(
                             run.id.as_str(),
                             "line"
+                                | "3dpoly"
                                 | "3dface"
                                 | "cylinder"
                                 | "solid.cylinder"
@@ -1564,9 +1743,16 @@ impl Session {
                                 | "mtext"
                                 | "ucs"
                                 | "ucs.3point"
+                                | "ucs.2point"
                                 | "ucs.origin"
+                                | "ucs.xaxis"
+                                | "ucs.yaxis"
+                                | "ucs.zaxis"
                                 | "circle"
                                 | "rectang"
+                                | "text"
+                                | "copybase"
+                                | "pasteclip"
                         ) =>
                     {
                         Input::Point(p3.xy())
@@ -1583,7 +1769,7 @@ impl Session {
                     self.tracking.release_temporary();
                 } else if let Input::Point3(p) = &i {
                     self.last_point = p.xy();
-                    self.last_point3 = *p;
+                    self.last_point3 = if spatial && self.input_is_explicit { p.xy().to3(self.last_point3.z) } else { *p };
                     if let Some(b) = base.filter(|b| b.is_finite() && p.xy().is_finite() && b.dist(p.xy()) > 1e-12) {
                         self.last_segment = Some((b, p.xy()));
                     }
@@ -1759,7 +1945,8 @@ impl Session {
             return Some(p);
         }
         self.running.as_ref().map(|r| {
-            let p = r.machine.prompt(self);
+            let mut p = r.machine.prompt(self);
+            p.picks_entity_point &= self.point_mods.is_empty();
             match &self.select_mode {
                 Some(m) if p.accept.select => m.prompt(),
                 _ => p,
@@ -1781,6 +1968,9 @@ impl Session {
     /// objects ([`Self::picking_objects`]) and the bit for a command asking for them (2) or for
     /// no command (1) is on.
     pub fn previews_selection(&self) -> bool {
+        if self.current_prompt().is_some_and(|p| p.suppress_hover) {
+            return false;
+        }
         let bit = if self.current_prompt().is_some() { 2 } else { 1 };
         self.picking_objects() && self.settings.selectionpreview & bit != 0
     }
@@ -1802,6 +1992,22 @@ impl Session {
             Some(r) => format!("{} {}", r.id.to_ascii_uppercase(), r.machine.prompt(self).display()),
             None => "Command:".into(),
         }
+    }
+
+    /// WCS cursor for a spatial preview, with a deterministic fallback for headless previews.
+    pub(crate) fn preview_point3(&self, cursor: Vec2, base: Vec3) -> Vec3 {
+        if self.cursor3_valid && self.cursor == cursor && self.cursor3_base == Some(base) {
+            self.cursor3
+        } else {
+            cursor.to3(base.z)
+        }
+    }
+
+    pub(crate) fn preview_spatial_end_override(&self, cursor: Vec2, base: Vec3) -> Option<Vec3> {
+        (self.cursor3_snapped
+            && matches!(self.point_mods.as_slice(), [pointmod::Frame::Snap { mode: snap::mode::END }])
+            && self.cursor3_valid && self.cursor == cursor && self.cursor3_base == Some(base))
+            .then_some(self.cursor3)
     }
 
     /// Preview entities for the cursor: objects drawn with their own properties
@@ -1897,18 +2103,32 @@ impl Session {
             if self.running.is_some() || self.lisp_prompt().is_some() {
                 self.typed(tok)?;
             } else if tok.trim().is_empty() {
-                self.input(Input::Enter)?;
-            } else if lisp_expression(tok) {
-                if script {
-                    return Err(EngineError::BadParams {
-                        cmd: "script".into(),
-                        msg: "AutoLISP expressions are not allowed in scripts".into(),
-                    });
+                if !script || self.script_has_more_input() {
+                    self.input(Input::Enter)?;
                 }
+            } else if lisp_expression(tok) {
                 // `(expression)` or `!variable` at Command: evaluates LISP and shows the value.
                 let src = tok.trim().strip_prefix('!').unwrap_or(tok.trim()).to_string();
-                if let Err(e) = self.lisp_eval(&src, true, false, Vec::new()) {
-                    self.echo(e.to_string());
+                match self.lisp_eval(&src, !script, false, Vec::new()) {
+                    Ok(Some(Err(err))) => {
+                        if script {
+                            return Err(EngineError::BadParams {
+                                cmd: "script".into(),
+                                msg: format!("AutoLISP error: {err}"),
+                            });
+                        }
+                        self.echo(format!("; error: {err}"));
+                    }
+                    Err(e) => {
+                        if script {
+                            return Err(EngineError::BadParams {
+                                cmd: "script".into(),
+                                msg: e.to_string(),
+                            });
+                        }
+                        self.echo(e.to_string());
+                    }
+                    _ => {}
                 }
             } else {
                 if script && let Some(reason) = is_script_forbidden(tok) {
@@ -1954,17 +2174,17 @@ impl Session {
         // A LISP expression typed at a command's prompt: its value is the answer.
         // Not at a free-text prompt: there the text is the answer (CAL takes "(3+4)*2").
         if lisp_expression(tt) && !prompt.accept.text && self.lisp_prompt().is_none() && !self.lisp_groups_undo() {
-            if self.in_script {
-                return Err(EngineError::BadParams {
-                    cmd: "script".into(),
-                    msg: "AutoLISP expressions are not allowed in scripts".into(),
-                });
-            }
             let src = tt.strip_prefix('!').unwrap_or(tt).to_string();
             let v = match self.lisp_eval(&src, false, true, Vec::new()) {
                 Ok(Some(Ok(v))) => v,
                 Ok(_) => return Ok(()),
                 Err(e) => {
+                    if self.in_script {
+                        return Err(EngineError::BadParams {
+                            cmd: "script".into(),
+                            msg: e.to_string(),
+                        });
+                    }
                     self.echo(e.to_string());
                     return Ok(());
                 }
@@ -2129,6 +2349,17 @@ impl Session {
         self.in_script
     }
 
+    /// Whether there are remaining non-empty, non-comment lines in the running script.
+    pub fn script_has_more_input(&self) -> bool {
+        if let Some(runner) = &self.script_runner {
+            runner.lines[runner.index..]
+                .iter()
+                .any(|l| !l.trim().is_empty() && !l.trim_start().starts_with(';'))
+        } else {
+            false
+        }
+    }
+
     /// Prepare a script for execution.
     pub fn start_script(&mut self, name: &str, text: &str) -> Result<()> {
         self.start_script_opts(name, text, false)
@@ -2166,6 +2397,28 @@ impl Session {
             self.in_script = false;
             return ScriptStep::Done { total: 0 };
         };
+
+        if self.lisp_running() {
+            let line = runner.index.min(runner.lines.len());
+            let total = runner.lines.len();
+            self.script_runner = Some(runner);
+            return ScriptStep::Progress { line, total };
+        }
+
+        if let Some(Err(err)) = self.lisp_last.take() {
+            let line_num = runner.index.min(runner.lines.len());
+            let line_idx = line_num.saturating_sub(1);
+            let total = runner.lines.len();
+            let line_text = runner.lines.get(line_idx).cloned().unwrap_or_default();
+            self.cancel();
+            self.in_script = false;
+            return ScriptStep::Error {
+                line: line_num,
+                total,
+                line_text,
+                error: format!("AutoLISP error: {err}"),
+            };
+        }
 
         if runner.index >= runner.lines.len() {
             self.in_script = false;
@@ -2205,10 +2458,18 @@ impl Session {
             return ScriptStep::Progress { line: line_num, total };
         }
 
+        self.script_runner = Some(runner.clone());
         let res = self.input_line(&line_text, true);
+        if let Some(r) = self.script_runner.take() {
+            runner = r;
+        }
 
         match res {
             Ok(()) => {
+                if self.lisp_running() {
+                    self.script_runner = Some(runner);
+                    return ScriptStep::Progress { line: line_num, total };
+                }
                 if runner.index >= runner.lines.len() {
                     self.in_script = false;
                     if runner.check_eof_pending && let Some(r) = &self.running {
@@ -2241,6 +2502,9 @@ impl Session {
     /// Cancel the active script execution.
     pub fn cancel_script(&mut self) -> Option<ScriptStep> {
         if let Some(runner) = self.script_runner.take() {
+            if self.lisp_running() {
+                self.lisp_abort("Function cancelled");
+            }
             self.cancel();
             self.in_script = false;
             let line = runner.index.min(runner.lines.len());
@@ -2266,6 +2530,9 @@ impl Session {
     pub fn script_named(&mut self, name: &str, text: &str) -> Result<()> {
         self.start_script(name, text)?;
         while self.in_script {
+            if self.lisp_busy() {
+                self.lisp_tick();
+            }
             match self.step_script() {
                 ScriptStep::Progress { .. } => {}
                 ScriptStep::Done { .. } => return Ok(()),
@@ -2296,6 +2563,9 @@ impl Session {
     pub fn script_file(&mut self, name: &str, text: &str) -> Result<()> {
         self.start_script_file(name, text)?;
         while self.in_script {
+            if self.lisp_busy() {
+                self.lisp_tick();
+            }
             match self.step_script() {
                 ScriptStep::Progress { .. } => {}
                 ScriptStep::Done { .. } => return Ok(()),
@@ -2358,7 +2628,7 @@ impl Session {
         if !self.settings.pickdrag || !corner.is_finite() || (during_command && !self.current_prompt().is_some_and(|p| p.accept.select)) {
             return false;
         }
-        self.pending_window = Some(PendingWindow { corner, during_command });
+        self.pending_window = Some(PendingWindow { corner, during_command, force_crossing: false });
         true
     }
 
@@ -2370,7 +2640,7 @@ impl Session {
         let space = self.space();
         let pickadd = self.settings.pickadd;
         if let Some(pw) = self.pending_window.take() {
-            let crossing = p.x < pw.corner.x;
+            let crossing = pw.force_crossing || p.x < pw.corner.x;
             let hs = select::select_window(self.doc()?, &space, Bounds2::new(pw.corner, p), crossing);
             let hs = cmd::groups::expand(self, hs);
             let mut sel = if pickadd || shift { self.selection() } else { Vec::new() };
@@ -2385,7 +2655,7 @@ impl Session {
         let ap = self.pixel_size() * self.settings.pickbox.max(1.0) * 1.5;
         match select::pick(self.doc()?, &space, p, ap) {
             Some(h) => self.idle_pick(h, shift),
-            None => self.pending_window = Some(PendingWindow { corner: p, during_command: false }),
+            None => self.pending_window = Some(PendingWindow { corner: p, during_command: false, force_crossing: false }),
         }
         Ok(())
     }
@@ -2489,8 +2759,39 @@ impl Session {
 
     pub fn zoom_extents(&mut self) -> Result<()> {
         let space = self.space();
-        let ext = self.doc()?.extents(&space);
         let (w, h) = self.viewport_px;
+        let is_3d = self.state().map_or(false, |st| !st.camera.is_plan() && (!matches!(st.space, Space::Paper(_)) || st.mspace.is_some()));
+
+        if is_3d {
+            let ext3 = self.doc()?.extents3(&space);
+            if !ext3.is_empty() {
+                let center3 = ext3.center();
+                let st = self.state_mut()?;
+                st.camera.target = center3;
+                let aspect = st.zoom_aspect(w / h.max(1.0));
+
+                let mut u_min = f64::INFINITY;
+                let mut u_max = f64::NEG_INFINITY;
+                let mut v_min = f64::INFINITY;
+                let mut v_max = f64::NEG_INFINITY;
+                for corner in ext3.corners() {
+                    let q = st.camera.project_point(corner);
+                    u_min = u_min.min(q.x);
+                    u_max = u_max.max(q.x);
+                    v_min = v_min.min(q.y);
+                    v_max = v_max.max(q.y);
+                }
+                let span_u = (u_max - u_min).max(1e-6);
+                let span_v = (v_max - v_min).max(1e-6);
+                let height = span_v.max(span_u / aspect.max(1e-6)) * 1.10;
+                st.camera.height = height;
+                st.set_zoom_frame(View { center: center3.xy(), height });
+                st.set_ref_height(height);
+                return Ok(());
+            }
+        }
+
+        let ext = self.doc()?.extents(&space);
         let ext = if ext.is_empty() { self.zoom_limits()? } else { ext };
         let st = self.state_mut()?;
         let aspect = st.zoom_aspect(w / h.max(1.0));

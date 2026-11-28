@@ -1119,6 +1119,7 @@ mod tests {
     #[test]
     fn pagesetup_paper_table() {
         let mut s = Session::new();
+        let _ = s.new_drawing(false);
         let r = s.execute("pagesetup", &json!({"layout": "Layout1", "paper": "A3", "landscape": true, "margins": [5, 5, 5, 5]})).unwrap();
         assert_eq!(r["page"]["widthMm"], 297.0);
         let sheet = cadcraft_render::sheet(s.doc().unwrap(), "Layout1").unwrap();

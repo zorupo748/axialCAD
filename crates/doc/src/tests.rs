@@ -21,7 +21,9 @@ fn new_metric_drawing_has_metric_multileader_and_table_styles() {
     let m = Drawing::new_metric();
     let iso = m.dim_style("ISO-25").unwrap();
     let ml = m.mleader_styles.iter().find(|s| s.name == "Standard").unwrap();
-    assert_eq!((ml.text_height, ml.arrow_size), (iso.text_height, iso.arrow_size));
+    assert_eq!(ml.text_height, iso.text_height);
+    assert_eq!(ml.arrow_size, 2.0);
+    assert_eq!(iso.arrow_size, 2.5);
     assert_eq!(ml.dogleg, 5.0);
     let ts = m.table_styles.iter().find(|s| s.name == "Standard").unwrap();
     assert_eq!(ts.text_height, iso.text_height);
@@ -30,6 +32,8 @@ fn new_metric_drawing_has_metric_multileader_and_table_styles() {
     let i = Drawing::new_imperial();
     assert_eq!(i.mleader_styles, vec![MLeaderStyle::default()]);
     assert_eq!(i.table_styles, vec![TableStyle::default()]);
+    assert_eq!(i.mleader_styles[0].arrow_size, 0.18);
+    assert_eq!(i.dim_styles[0].arrow_size, 0.18);
     assert_eq!((i.mleader_styles[0].text_height, i.table_styles[0].text_height), (0.18, 0.18));
 }
 
@@ -628,4 +632,34 @@ fn test_solid3d_document_lifecycle() {
     let json = serde_json::to_string(&s_orig).expect("serialize solid");
     let back: Solid3d = serde_json::from_str(&json).expect("deserialize solid");
     assert_eq!(back, *s_orig);
+}
+
+#[test]
+fn test_high_aspect_ratio_cylinder_mesh_and_extents3() {
+    let mut d = Drawing::new_metric();
+    let center = Vec3::new(1060.0, 50.619, 139.0745);
+    let radius = 1.5;
+    let height = 212.33;
+    let axis = Vec3::new(-104.5, -141.0, 119.5);
+    let faces = crate::solid3d::cylinder_faces(center, radius, height, axis, 32);
+
+    // Bounded mesh size (exactly 96 faces: 32 lateral quads + 64 cap triangles)
+    assert_eq!(faces.len(), 96);
+    for (i, f) in faces.iter().enumerate() {
+        let v1 = f.corners[1] - f.corners[0];
+        let v2 = f.corners[2] - f.corners[0];
+        let n = v1.cross(v2);
+        assert!(n.len() > 1e-6, "Face {i} normal must be non-zero");
+        assert!(n.x.is_finite() && n.y.is_finite() && n.z.is_finite(), "Face {i} normal must be finite");
+    }
+
+    let recipe = Recipe::new();
+    let bbox = Bounds3::new(center, center + axis.normalized() * height);
+    let solid = Solid3d::with_faces(recipe, bbox, faces);
+    d.add(&Space::Model, Common::default(), EntityKind::Solid3d(solid)).expect("add solid");
+
+    let ext3 = d.extents3(&Space::Model);
+    assert!(!ext3.is_empty());
+    assert!(ext3.min.x <= 1060.0);
+    assert!(ext3.min.z <= 139.0745);
 }

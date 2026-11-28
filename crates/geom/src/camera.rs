@@ -539,6 +539,42 @@ impl OrbitCamera {
             "CUSTOM"
         }
     }
+
+    /// Update camera view direction and target to follow a UCS transformation from `initial_ucs`
+    /// to `cand_ucs`, preserving the relative view direction and pivoting stably around `pivot`.
+    pub fn apply_ucs_delta(
+        &mut self,
+        initial_cam: &OrbitCamera,
+        initial_ucs: &crate::UcsFrame,
+        cand_ucs: &crate::UcsFrame,
+        pivot: Vec3,
+    ) {
+        let v_init = initial_cam.view_dir();
+        // Relative view direction in initial UCS local coordinates:
+        let v_local = Vec3::new(
+            v_init.dot(initial_ucs.x_axis),
+            v_init.dot(initial_ucs.y_axis),
+            v_init.dot(initial_ucs.z_axis),
+        );
+        // Map local direction to candidate UCS world direction:
+        let v_cand = cand_ucs.x_axis * v_local.x
+            + cand_ucs.y_axis * v_local.y
+            + cand_ucs.z_axis * v_local.z;
+        self.set_view_dir(v_cand);
+
+        // Relative offset of target from pivot in initial UCS local coordinates:
+        let d_target = initial_cam.target - pivot;
+        let d_local = Vec3::new(
+            d_target.dot(initial_ucs.x_axis),
+            d_target.dot(initial_ucs.y_axis),
+            d_target.dot(initial_ucs.z_axis),
+        );
+        let d_cand = cand_ucs.x_axis * d_local.x
+            + cand_ucs.y_axis * d_local.y
+            + cand_ucs.z_axis * d_local.z;
+        self.target = cand_ucs.origin + d_cand;
+        self.height = initial_cam.height;
+    }
 }
 
 #[cfg(test)]
@@ -1057,5 +1093,22 @@ mod tests {
         cam.set_preset("front");
         let parallel_res = cam.unproject_to_plane_with_offset(q, DrawingPlane::XY, 50.0);
         assert!(parallel_res.is_none(), "Parallel view must return None rather than explosive coordinates");
+    }
+
+    #[test]
+    fn test_apply_ucs_delta() {
+        let mut cam = OrbitCamera::default();
+        cam.set_preset("top");
+        let initial_cam = cam;
+        let initial_ucs = crate::UcsFrame::WORLD;
+        // Rotated UCS by 90 degrees around X (so Z points in -Y)
+        let cand_ucs = initial_ucs.rotated_x(std::f64::consts::FRAC_PI_2);
+        let pivot = Vec3::ZERO;
+
+        cam.apply_ucs_delta(&initial_cam, &initial_ucs, &cand_ucs, pivot);
+        // In initial_cam (top view), view_dir was +Z of initial_ucs.
+        // In cand_ucs, camera view_dir must now follow +Z of cand_ucs (-Y of WCS).
+        assert!(cam.view_dir().near(cand_ucs.z_axis, 1e-6));
+        assert_eq!(cam.height, initial_cam.height);
     }
 }

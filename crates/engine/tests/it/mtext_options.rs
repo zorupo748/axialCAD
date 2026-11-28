@@ -55,6 +55,7 @@ fn height_justify_and_corners() {
 #[test]
 fn line_spacing_type_and_factor_or_distance() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     s.script("MTEXT 0,10 l e 1.5x 20,0\nA\nB\n\n").unwrap();
     let t = last_mtext(&s);
     assert!(t.line_spacing_exact);

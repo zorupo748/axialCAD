@@ -251,6 +251,7 @@ fn dimstyle_edit_invalidates_only_matching_cached_dimensions_everywhere() {
 #[test]
 fn linear_dimension_follows_line_endpoint() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let l = line(&mut s, [0.0, 0.0], [10.0, 0.0]);
     let d = h(&s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [10, 0], "at": [5, -2] })).unwrap());
     let dm = dim(&s, d);
@@ -289,6 +290,7 @@ fn moving_the_object_carries_the_dimension() {
 #[test]
 fn moving_the_object_keeps_the_ordinate_datum() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let l = line(&mut s, [5.0, 0.0], [5.0, 5.0]);
     let d = h(&s.execute("dimordinate", &json!({ "feature": [5, 5], "leader": [5, 8] })).unwrap());
     s.execute("move", &json!({ "handles": [l.hex()], "from": [5, 5], "to": [8, 5] })).unwrap();
@@ -302,6 +304,7 @@ fn moving_the_object_keeps_the_ordinate_datum() {
 #[test]
 fn moving_the_line_keeps_a_free_continued_origin() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let l = line(&mut s, [0.0, 0.0], [10.0, 0.0]);
     s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [10, 0], "at": [5, -2] })).unwrap();
     s.execute("dimcontinue", &json!({ "points": [[25, 0]] })).unwrap();
@@ -338,6 +341,7 @@ fn interactive_dimlinear_select_object_is_associative() {
 #[test]
 fn radius_and_diameter_follow_circle() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     s.execute("circle", &json!({ "center": [0, 0], "radius": 2 })).unwrap();
     let c = s.doc().unwrap().model.last().unwrap().handle;
     let r = h(&s.execute("dimradius", &json!({ "handle": c.hex(), "at": [5, 0] })).unwrap());
@@ -486,6 +490,7 @@ fn dimstyle_rename_updates_block_dimensions() {
 #[test]
 fn dimension_overrides() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let d = h(&s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [10, 0], "at": [5, 2] })).unwrap());
     s.execute("dimoverride", &json!({ "handles": [d.hex()], "DIMDEC": 1, "DIMPOST": "<> mm" })).unwrap();
     let dm = dim(&s, d);
@@ -528,6 +533,7 @@ fn dimension_override_text_with_variables() {
 #[test]
 fn dimtedit_and_dimspace() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let a = h(&s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [10, 0], "at": [5, 1] })).unwrap());
     let b = h(&s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [6, 0], "at": [3, 1.3] })).unwrap());
     s.execute("dimtedit.left", &json!({ "handles": [a.hex()] })).unwrap();
@@ -720,6 +726,7 @@ fn mtext_rejects_nonpositive_height() {
 fn setvar_dim_variables_apply_to_new_dimensions() {
     // Issue #66: a DIM* variable set with SETVAR is a style override that new dimensions take on.
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let linear = |s: &mut Session, y: f64| h(&s.execute("dimlinear", &json!({ "p1": [0, 0], "p2": [100, 0], "at": [50, y] })).unwrap());
     let text_height = |s: &Session, hd: Handle| {
         let d = s.doc().unwrap();
@@ -996,3 +1003,322 @@ fn directrizzr_preserves_remembered_mleader_options() {
     assert!(s.prompt_text().contains("Specify leader landing location"));
     s.cancel();
 }
+
+#[test]
+fn leader_default_arrowhead_sizes_follow_drawing_units_without_affecting_dimensions_or_custom_sizes() {
+    fn rendered_arrow_lengths(doc: &cadcraft_doc::Drawing, h: Handle) -> Vec<f64> {
+        let list = cadcraft_render::build(doc, &Space::Model, &cadcraft_render::Options::default());
+        let tris: Vec<Vec2> = list
+            .prims
+            .iter()
+            .filter(|p| p.handle == h && p.kind == cadcraft_render::Kind::Tris)
+            .flat_map(|p| list.points(p).to_vec())
+            .collect();
+        assert!(!tris.is_empty() && tris.len() % 3 == 0, "expected arrowhead tris for {h:?}, got {} pts", tris.len());
+        tris.chunks_exact(3).map(|t| t[0].dist((t[1] + t[2]) * 0.5)).collect()
+    }
+
+    fn preview_arrow_span(s: &Session, cursor: Vec2) -> (f64, f64) {
+        let ents = s.preview(cursor);
+        assert_eq!(ents.len(), 1);
+        let arrow_size = match &ents[0].kind {
+            EntityKind::MLeader(m) => m.arrow_size,
+            other => panic!("expected MLeader preview, got {other:?}"),
+        };
+        let list = cadcraft_render::build_entities(s.doc().unwrap(), ents.iter(), &cadcraft_render::Options::default());
+        let tris: Vec<Vec2> = list
+            .prims
+            .iter()
+            .filter(|p| p.kind == cadcraft_render::Kind::Tris)
+            .flat_map(|p| list.points(p).to_vec())
+            .collect();
+        assert_eq!(tris.len(), 3, "expected single preview arrowhead triangle");
+        (arrow_size, tris[0].dist((tris[1] + tris[2]) * 0.5))
+    }
+
+    // 1. Metric default drawing (Standard MLeaderStyle = 2.0 mm, ISO-25 DimStyle = 2.5 mm).
+    let mut s = Session::new();
+
+    // Existing entity with an explicit older/custom size must remain untouched.
+    let existing = s
+        .doc_mut()
+        .unwrap()
+        .add(
+            &Space::Model,
+            cadcraft_doc::Common::default(),
+            EntityKind::MLeader(cadcraft_doc::MLeader {
+                leaders: vec![vec![Vec3::new(0.0, 40.0, 0.0)]],
+                landing: Vec3::new(20.0, 40.0, 0.0),
+                dogleg: 0.0,
+                text: None,
+                style: "Standard".into(),
+                arrow_size: 1.25,
+                spline: false,
+                block: None,
+            }),
+        )
+        .unwrap();
+
+    // Interactive directrizzr: preview and confirmed entity both get arrow_size = 2.0.
+    s.start("directrizzr").unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 0.0))).unwrap();
+    let (prev_arrow, prev_span) = preview_arrow_span(&s, Vec2::new(50.0, 0.0));
+    assert!((prev_arrow - 2.0).abs() < 1e-9);
+    assert!((prev_span - 2.0).abs() < 1e-6, "preview arrow span: {prev_span}");
+    s.input(Input::Point(Vec2::new(50.0, 0.0))).unwrap();
+    s.input(Input::Enter).unwrap();
+    let dir_h = s.doc().unwrap().model.last().unwrap().handle;
+    let EntityKind::MLeader(dir_m) = &s.doc().unwrap().entity(dir_h).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!((dir_m.arrow_size - 2.0).abs() < 1e-9);
+    assert_eq!(dir_m.dogleg, 0.0);
+    let dir_arrows = rendered_arrow_lengths(s.doc().unwrap(), dir_h);
+    assert_eq!(dir_arrows.len(), 1);
+    assert!((dir_arrows[0] - 2.0).abs() < 1e-6);
+
+    // Interactive mleader: preview and confirmed entity keep text height 2.5, dogleg 5.0, arrow_size 2.0.
+    s.start("mleader").unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 10.0))).unwrap();
+    let (ml_prev_arrow, ml_prev_span) = preview_arrow_span(&s, Vec2::new(50.0, 10.0));
+    assert!((ml_prev_arrow - 2.0).abs() < 1e-9);
+    assert!((ml_prev_span - 2.0).abs() < 1e-6);
+    s.input(Input::Point(Vec2::new(50.0, 10.0))).unwrap();
+    s.input(Input::Text("NOTE".into())).unwrap();
+    let ml_h = s.doc().unwrap().model.last().unwrap().handle;
+    let EntityKind::MLeader(ml_m) = &s.doc().unwrap().entity(ml_h).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!((ml_m.arrow_size - 2.0).abs() < 1e-9);
+    assert!((ml_m.dogleg - 5.0).abs() < 1e-9);
+    assert!((ml_m.text.as_ref().unwrap().height - 2.5).abs() < 1e-9);
+    let ml_arrows = rendered_arrow_lengths(s.doc().unwrap(), ml_h);
+    assert_eq!(ml_arrows.len(), 1);
+    assert!((ml_arrows[0] - 2.0).abs() < 1e-6);
+
+    // Dimensions (cotas) keep ISO-25 arrow_size = 2.5 unchanged.
+    let dim_h = h(&s.execute("dimlinear", &json!({ "p1": [0, -20], "p2": [40, -20], "at": [20, -30] })).unwrap());
+    let dim_arrows = rendered_arrow_lengths(s.doc().unwrap(), dim_h);
+    assert_eq!(dim_arrows.len(), 2);
+    assert!(dim_arrows.iter().all(|len| (*len - 2.5).abs() < 1e-6), "dimension arrow lengths changed: {dim_arrows:?}");
+
+    // Existing custom-sized entity stayed untouched.
+    let EntityKind::MLeader(existing_after) = &s.doc().unwrap().entity(existing).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!((existing_after.arrow_size - 1.25).abs() < 1e-9);
+    assert_eq!(rendered_arrow_lengths(s.doc().unwrap(), existing).len(), 1);
+    assert!((rendered_arrow_lengths(s.doc().unwrap(), existing)[0] - 1.25).abs() < 1e-6);
+
+    // Custom explicit MLeaderStyle arrowSize is respected by preview and confirmed entity.
+    s.execute("mleaderstyle", &json!({ "name": "Custom", "arrowSize": 1.75, "current": true })).unwrap();
+    s.start("directrizzr").unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 50.0))).unwrap();
+    let (custom_prev, custom_prev_span) = preview_arrow_span(&s, Vec2::new(20.0, 50.0));
+    assert!((custom_prev - 1.75).abs() < 1e-9);
+    assert!((custom_prev_span - 1.75).abs() < 1e-6);
+    s.input(Input::Point(Vec2::new(20.0, 50.0))).unwrap();
+    s.input(Input::Enter).unwrap();
+    let custom_h = s.doc().unwrap().model.last().unwrap().handle;
+    let custom_arrows = rendered_arrow_lengths(s.doc().unwrap(), custom_h);
+    assert_eq!(custom_arrows.len(), 1);
+    assert!((custom_arrows[0] - 1.75).abs() < 1e-6);
+
+    // 2. Imperial default drawing (Standard MLeaderStyle = 0.18 in, Standard DimStyle = 0.18 in).
+    s.new_drawing(false);
+    let imp_dir = h(&s.execute("directrizzr", &json!({ "points": [[0, 0], [5, 0]] })).unwrap());
+    let EntityKind::MLeader(imp_m) = &s.doc().unwrap().entity(imp_dir).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!((imp_m.arrow_size - 0.18).abs() < 1e-9);
+    let imp_dir_arrows = rendered_arrow_lengths(s.doc().unwrap(), imp_dir);
+    assert_eq!(imp_dir_arrows.len(), 1);
+    assert!((imp_dir_arrows[0] - 0.18).abs() < 1e-6);
+
+    let imp_dim = h(&s.execute("dimlinear", &json!({ "p1": [0, -5], "p2": [10, -5], "at": [5, -8] })).unwrap());
+    let imp_dim_arrows = rendered_arrow_lengths(s.doc().unwrap(), imp_dim);
+    assert_eq!(imp_dim_arrows.len(), 2);
+    assert!(imp_dim_arrows.iter().all(|len| (*len - 0.18).abs() < 1e-6), "imperial dim arrows changed: {imp_dim_arrows:?}");
+}
+
+#[test]
+fn leader_empty_style_table_fallback_matches_properties_and_preview_for_metric_and_imperial() {
+    fn preview_mleader(s: &Session, cursor: Vec2) -> cadcraft_doc::MLeader {
+        let ents = s.preview(cursor);
+        assert_eq!(ents.len(), 1);
+        match &ents[0].kind {
+            EntityKind::MLeader(m) => m.clone(),
+            other => panic!("expected MLeader preview, got {other:?}"),
+        }
+    }
+
+    // 1. Metric drawing with no mleader_styles falls back to MLeaderStyle::metric() (arrow_size = 2.0).
+    let mut s = Session::new();
+    s.doc_mut().unwrap().mleader_styles.clear();
+    let props_metric = s.execute("properties", &json!({})).unwrap();
+    let eff_metric = s.doc().unwrap().effective_mleader_style();
+    assert!((props_metric["mleaderArrowSize"].as_f64().unwrap() - 2.0).abs() < 1e-9);
+    assert!((eff_metric.1.arrow_size - 2.0).abs() < 1e-9);
+
+    s.start("mleader").unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 0.0))).unwrap();
+    let prev = preview_mleader(&s, Vec2::new(20.0, 0.0));
+    assert!((prev.arrow_size - 2.0).abs() < 1e-9);
+    assert!((prev.dogleg - 5.0).abs() < 1e-9);
+    s.input(Input::Point(Vec2::new(20.0, 0.0))).unwrap();
+    s.input(Input::Text("M".into())).unwrap();
+    let h_metric = s.doc().unwrap().model.last().unwrap().handle;
+    let EntityKind::MLeader(ent_metric) = &s.doc().unwrap().entity(h_metric).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!((ent_metric.arrow_size - prev.arrow_size).abs() < 1e-9);
+    assert!((ent_metric.dogleg - prev.dogleg).abs() < 1e-9);
+    assert!((ent_metric.text.as_ref().unwrap().height - 2.5).abs() < 1e-9);
+
+    // 2. Imperial drawing with no mleader_styles falls back to MLeaderStyle::default() (arrow_size = 0.18).
+    s.new_drawing(false);
+    s.doc_mut().unwrap().mleader_styles.clear();
+    let props_imp = s.execute("properties", &json!({})).unwrap();
+    let eff_imp = s.doc().unwrap().effective_mleader_style();
+    assert!((props_imp["mleaderArrowSize"].as_f64().unwrap() - 0.18).abs() < 1e-9);
+    assert!((eff_imp.1.arrow_size - 0.18).abs() < 1e-9);
+
+    s.start("directrizzr").unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 0.0))).unwrap();
+    let prev_imp = preview_mleader(&s, Vec2::new(10.0, 0.0));
+    assert!((prev_imp.arrow_size - 0.18).abs() < 1e-9);
+    s.input(Input::Point(Vec2::new(10.0, 0.0))).unwrap();
+    s.input(Input::Enter).unwrap();
+    let h_imp = s.doc().unwrap().model.last().unwrap().handle;
+    let EntityKind::MLeader(ent_imp) = &s.doc().unwrap().entity(h_imp).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!((ent_imp.arrow_size - prev_imp.arrow_size).abs() < 1e-9);
+}
+
+#[test]
+fn leader_properties_no_selection_and_selected_entity_with_undo_redo_and_validation() {
+    fn arrow_span(d: &cadcraft_doc::Drawing, h: Handle) -> f64 {
+        let e = d.entity(h).unwrap();
+        let list = cadcraft_render::build_entities(d, std::iter::once(e.as_ref()), &cadcraft_render::Options::default());
+        let tris: Vec<Vec2> = list
+            .prims
+            .iter()
+            .filter(|p| p.kind == cadcraft_render::Kind::Tris)
+            .flat_map(|p| list.points(p).to_vec())
+            .collect();
+        assert_eq!(tris.len(), 3, "expected single arrowhead triangle");
+        tris[0].dist((tris[1] + tris[2]) * 0.5)
+    }
+
+    fn preview_span(s: &Session, cursor: Vec2) -> (f64, f64) {
+        let ents = s.preview(cursor);
+        assert_eq!(ents.len(), 1);
+        let arrow_size = match &ents[0].kind {
+            EntityKind::MLeader(m) => m.arrow_size,
+            other => panic!("expected MLeader preview, got {other:?}"),
+        };
+        let list = cadcraft_render::build_entities(s.doc().unwrap(), ents.iter(), &cadcraft_render::Options::default());
+        let tris: Vec<Vec2> = list
+            .prims
+            .iter()
+            .filter(|p| p.kind == cadcraft_render::Kind::Tris)
+            .flat_map(|p| list.points(p).to_vec())
+            .collect();
+        assert_eq!(tris.len(), 3);
+        (arrow_size, tris[0].dist((tris[1] + tris[2]) * 0.5))
+    }
+
+    let mut s = Session::new();
+    // Invalid arrowSize on a clean doc must fail before doc_mut (leaving is_dirty() false).
+    for bad in [json!(0.0), json!(-3.5), json!("abc")] {
+        assert!(s.execute("mleaderstyle", &json!({ "name": "Standard", "arrowSize": bad, "current": true })).is_err());
+        assert!(!s.state().unwrap().is_dirty(), "invalid mleaderstyle must not dirty drawing");
+    }
+
+    // Draw existing directrizzr + dimension with initial defaults.
+    let existing_dir = h(&s.execute("directrizzr", &json!({ "points": [[0, 0], [30, 0]] })).unwrap());
+    let dim_h = h(&s.execute("dimlinear", &json!({ "p1": [0, -20], "p2": [40, -20], "at": [20, -30] })).unwrap());
+
+    // 1. No-selection style update: wide positive range works cleanly for new leaders without mutating existing ones.
+    for size in [0.25, 12.75, 80.0] {
+        s.execute("mleaderstyle", &json!({ "name": "Standard", "arrowSize": size, "current": true })).unwrap();
+        let props = s.execute("properties", &json!({})).unwrap();
+        assert!((props["mleaderArrowSize"].as_f64().unwrap() - size).abs() < 1e-9);
+    }
+    let EntityKind::MLeader(existing_after) = &s.doc().unwrap().entity(existing_dir).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!((existing_after.arrow_size - 2.0).abs() < 1e-9, "existing drawn leader must stay 2.0");
+
+    // Set 12.75 for new leaders and verify both directrizzr & mleader preview and confirmed entities match.
+    s.execute("mleaderstyle", &json!({ "name": "Standard", "arrowSize": 12.75, "current": true })).unwrap();
+    s.start("directrizzr").unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 20.0))).unwrap();
+    let (p_val, p_span) = preview_span(&s, Vec2::new(40.0, 20.0));
+    assert!((p_val - 12.75).abs() < 1e-9);
+    assert!((p_span - 12.75).abs() < 1e-6);
+    s.input(Input::Point(Vec2::new(40.0, 20.0))).unwrap();
+    s.input(Input::Enter).unwrap();
+    let new_dir = s.doc().unwrap().model.last().unwrap().handle;
+    assert!((arrow_span(s.doc().unwrap(), new_dir) - 12.75).abs() < 1e-6);
+
+    s.start("mleader").unwrap();
+    s.input(Input::Point(Vec2::new(0.0, 40.0))).unwrap();
+    let (ml_p_val, ml_p_span) = preview_span(&s, Vec2::new(40.0, 40.0));
+    assert!((ml_p_val - 12.75).abs() < 1e-9);
+    assert!((ml_p_span - 12.75).abs() < 1e-6);
+    s.input(Input::Point(Vec2::new(40.0, 40.0))).unwrap();
+    s.input(Input::Text("TXT".into())).unwrap();
+    let new_ml = s.doc().unwrap().model.last().unwrap().handle;
+    let EntityKind::MLeader(ml_ent) = &s.doc().unwrap().entity(new_ml).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!((ml_ent.arrow_size - 12.75).abs() < 1e-9);
+    assert!((ml_ent.dogleg - 5.0).abs() < 1e-9);
+    assert!((ml_ent.text.as_ref().unwrap().height - 2.5).abs() < 1e-9);
+    assert!((arrow_span(s.doc().unwrap(), new_ml) - 12.75).abs() < 1e-6);
+
+    // 2. Selected leader edit: changes only that leader, leaves sibling & style untouched, supports undo/redo.
+    for bad in [json!(0.0), json!(-2.0), json!("bad")] {
+        assert!(s.execute("properties.set", &json!({ "handles": [new_dir.hex()], "arrowSize": bad })).is_err());
+    }
+    s.execute("properties.set", &json!({ "handles": [new_dir.hex()], "arrowSize": 42.5 })).unwrap();
+    let EntityKind::MLeader(dir_edited) = &s.doc().unwrap().entity(new_dir).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!((dir_edited.arrow_size - 42.5).abs() < 1e-9);
+    assert!((arrow_span(s.doc().unwrap(), new_dir) - 42.5).abs() < 1e-6);
+    // Sibling MLeader, older MLeader, Standard style, and Dimension arrows are untouched.
+    let EntityKind::MLeader(sibling_ml) = &s.doc().unwrap().entity(new_ml).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!((sibling_ml.arrow_size - 12.75).abs() < 1e-9);
+    assert!((s.doc().unwrap().mleader_styles[0].arrow_size - 12.75).abs() < 1e-9);
+    let dim_ent = s.doc().unwrap().entity(dim_h).unwrap();
+    let dim_list = cadcraft_render::build_entities(s.doc().unwrap(), std::iter::once(dim_ent.as_ref()), &cadcraft_render::Options::default());
+    let dim_tris: Vec<Vec2> = dim_list
+        .prims
+        .iter()
+        .filter(|p| p.kind == cadcraft_render::Kind::Tris)
+        .flat_map(|p| dim_list.points(p).to_vec())
+        .collect();
+    assert_eq!(dim_tris.len(), 6);
+    assert!(dim_tris.chunks_exact(3).all(|t| (t[0].dist((t[1] + t[2]) * 0.5) - 2.5).abs() < 1e-6));
+
+    // Undo / Redo on selected leader.
+    s.undo().unwrap();
+    let EntityKind::MLeader(dir_undone) = &s.doc().unwrap().entity(new_dir).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!((dir_undone.arrow_size - 12.75).abs() < 1e-9);
+    assert!((arrow_span(s.doc().unwrap(), new_dir) - 12.75).abs() < 1e-6);
+
+    s.redo().unwrap();
+    let EntityKind::MLeader(dir_redone) = &s.doc().unwrap().entity(new_dir).unwrap().kind else {
+        panic!("expected MLeader");
+    };
+    assert!((dir_redone.arrow_size - 42.5).abs() < 1e-9);
+    assert!((arrow_span(s.doc().unwrap(), new_dir) - 42.5).abs() < 1e-6);
+}
+

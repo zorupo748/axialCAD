@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — Installs, updates, or rolls back CADCraft for the current Linux user.
+# install.sh — Installs, updates, or rolls back axialCAD for the current Linux user.
 #
 # Default installation prefix: $HOME/.local (no root privileges needed)
 #
@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source directory containing the application files (bin/, share/, etc.)
 if [[ -d "$SCRIPT_DIR/bin" && -d "$SCRIPT_DIR/share" ]]; then
   SRC_DIR="$SCRIPT_DIR"
-elif [[ "$SCRIPT_DIR" == */share/cadcraft ]]; then
+elif [[ "$SCRIPT_DIR" == */share/axialcad || "$SCRIPT_DIR" == */share/cadcraft ]]; then
   SRC_DIR=""
 else
   SRC_DIR="$SCRIPT_DIR"
@@ -100,9 +100,11 @@ TARGET_ICONS="${TARGET_SHARE}/icons"
 TARGET_MIME="${TARGET_SHARE}/mime"
 TARGET_METAINFO="${TARGET_SHARE}/metainfo"
 TARGET_DOC="${TARGET_SHARE}/doc/cadcraft"
-TARGET_CADCRAFT="${TARGET_SHARE}/cadcraft"
-TARGET_VERSIONS="${TARGET_CADCRAFT}/versions"
-LOCK_FILE="${TARGET_CADCRAFT}/.install.lock"
+TARGET_AXIALCAD="${TARGET_SHARE}/axialcad"
+TARGET_VERSIONS="${TARGET_AXIALCAD}/versions"
+LOCK_FILE="${TARGET_AXIALCAD}/.install.lock"
+TARGET_LEGACY_CADCRAFT="${TARGET_SHARE}/cadcraft"
+LEGACY_LOCK_FILE="${TARGET_LEGACY_CADCRAFT}/.install.lock"
 
 # Prevent installing into package source directory
 if [[ -n "$SRC_DIR" ]]; then
@@ -156,29 +158,53 @@ verify_parent_boundaries() {
 
 verify_parent_boundaries "$TARGET_BIN"
 verify_parent_boundaries "$TARGET_SHARE"
-verify_parent_boundaries "$TARGET_CADCRAFT"
+verify_parent_boundaries "$TARGET_AXIALCAD"
 verify_parent_boundaries "$TARGET_VERSIONS"
+if [[ -e "$TARGET_LEGACY_CADCRAFT" || -L "$TARGET_LEGACY_CADCRAFT" ]]; then
+  verify_parent_boundaries "$TARGET_LEGACY_CADCRAFT"
+fi
 
 # -----------------------------------------------------------------------------
 # Locking: Prevent concurrent install / update / rollback operations
 # -----------------------------------------------------------------------------
 LOCK_FD=200
+LEGACY_LOCK_FD=201
 LOCK_ACQUIRED=0
+LEGACY_LOCK_ACQUIRED=0
 
 acquire_lock() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return 0
   fi
-  mkdir -p "$TARGET_CADCRAFT"
+  if [[ -d "$TARGET_AXIALCAD" ]]; then
+    TARGET_AXIALCAD_PREEXISTED=1
+  else
+    TARGET_AXIALCAD_PREEXISTED=0
+  fi
+  mkdir -p "$TARGET_AXIALCAD"
   eval "exec ${LOCK_FD}>\"\$LOCK_FILE\""
   if ! flock -n "$LOCK_FD"; then
-    echo "error: another CADCraft installation or rollback operation is currently running in $TARGET_ROOT." >&2
+    echo "error: another axialCAD installation or rollback operation is currently running in $TARGET_ROOT." >&2
     exit 1
   fi
   LOCK_ACQUIRED=1
+
+  if [[ -d "$TARGET_LEGACY_CADCRAFT" ]]; then
+    eval "exec ${LEGACY_LOCK_FD}>\"\$LEGACY_LOCK_FILE\""
+    if ! flock -n "$LEGACY_LOCK_FD"; then
+      echo "error: another operation is currently running in legacy $TARGET_LEGACY_CADCRAFT." >&2
+      exit 1
+    fi
+    LEGACY_LOCK_ACQUIRED=1
+  fi
 }
 
 release_lock() {
+  if [[ "$LEGACY_LOCK_ACQUIRED" -eq 1 ]]; then
+    flock -u "$LEGACY_LOCK_FD" 2>/dev/null || true
+    eval "exec ${LEGACY_LOCK_FD}>&-" 2>/dev/null || true
+    LEGACY_LOCK_ACQUIRED=0
+  fi
   if [[ "$LOCK_ACQUIRED" -eq 1 ]]; then
     flock -u "$LOCK_FD" 2>/dev/null || true
     eval "exec ${LOCK_FD}>&-" 2>/dev/null || true
@@ -187,35 +213,39 @@ release_lock() {
 }
 
 # -----------------------------------------------------------------------------
-# Process inspection: check both cadcraft and cadcraft-cli (NO --force bypass)
+# Process inspection: check axialcad, axialcad-cli, cadcraft and cadcraft-cli
 # -----------------------------------------------------------------------------
 check_cadcraft_running() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return 0
   fi
 
+  local pids_axial=""
+  local pids_axial_cli=""
   local pids_cadcraft=""
   local pids_cli=""
+  pids_axial="$(pgrep -x axialcad 2>/dev/null || true)"
+  pids_axial_cli="$(pgrep -x axialcad-cli 2>/dev/null || true)"
   pids_cadcraft="$(pgrep -x cadcraft 2>/dev/null || true)"
   pids_cli="$(pgrep -x cadcraft-cli 2>/dev/null || true)"
   local running_pids=""
-  running_pids="$(echo "$pids_cadcraft $pids_cli" | tr ' ' '\n' | grep -v '^$' | sort -u || true)"
+  running_pids="$(echo "$pids_axial $pids_axial_cli $pids_cadcraft $pids_cli" | tr ' ' '\n' | grep -v '^$' | sort -u || true)"
 
   [[ -z "$running_pids" ]] && return 0
 
+  local canon_axial_bin=""
+  [[ -e "${TARGET_BIN}/axialcad" ]] && canon_axial_bin="$(readlink -f "${TARGET_BIN}/axialcad" 2>/dev/null || true)"
+  local canon_axial_cli=""
+  [[ -e "${TARGET_BIN}/axialcad-cli" ]] && canon_axial_cli="$(readlink -f "${TARGET_BIN}/axialcad-cli" 2>/dev/null || true)"
   local canon_target_bin=""
-  if [[ -e "${TARGET_BIN}/cadcraft" ]]; then
-    canon_target_bin="$(readlink -f "${TARGET_BIN}/cadcraft" 2>/dev/null || true)"
-  fi
+  [[ -e "${TARGET_BIN}/cadcraft" ]] && canon_target_bin="$(readlink -f "${TARGET_BIN}/cadcraft" 2>/dev/null || true)"
   local canon_target_cli=""
-  if [[ -e "${TARGET_BIN}/cadcraft-cli" ]]; then
-    canon_target_cli="$(readlink -f "${TARGET_BIN}/cadcraft-cli" 2>/dev/null || true)"
-  fi
+  [[ -e "${TARGET_BIN}/cadcraft-cli" ]] && canon_target_cli="$(readlink -f "${TARGET_BIN}/cadcraft-cli" 2>/dev/null || true)"
 
+  local canon_axial_share=""
+  [[ -d "$TARGET_AXIALCAD" ]] && canon_axial_share="$(readlink -f "$TARGET_AXIALCAD" 2>/dev/null || true)"
   local canon_cadcraft_share=""
-  if [[ -d "$TARGET_CADCRAFT" ]]; then
-    canon_cadcraft_share="$(readlink -f "$TARGET_CADCRAFT" 2>/dev/null || true)"
-  fi
+  [[ -d "$TARGET_LEGACY_CADCRAFT" ]] && canon_cadcraft_share="$(readlink -f "$TARGET_LEGACY_CADCRAFT" 2>/dev/null || true)"
 
   local matched_pids=()
   for pid in $running_pids; do
@@ -224,13 +254,19 @@ check_cadcraft_running() {
       exe_path="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
       local is_match=0
 
-      if [[ -n "$canon_target_bin" && "$exe_path" == "$canon_target_bin" ]]; then
+      if [[ -n "$canon_axial_bin" && "$exe_path" == "$canon_axial_bin" ]]; then
+        is_match=1
+      elif [[ -n "$canon_axial_cli" && "$exe_path" == "$canon_axial_cli" ]]; then
+        is_match=1
+      elif [[ -n "$canon_target_bin" && "$exe_path" == "$canon_target_bin" ]]; then
         is_match=1
       elif [[ -n "$canon_target_cli" && "$exe_path" == "$canon_target_cli" ]]; then
         is_match=1
+      elif [[ -n "$canon_axial_share" && "$exe_path" == "${canon_axial_share}/"* ]]; then
+        is_match=1
       elif [[ -n "$canon_cadcraft_share" && "$exe_path" == "${canon_cadcraft_share}/"* ]]; then
         is_match=1
-      elif [[ "$exe_path" == "${TARGET_ROOT}/"* && ( "$exe_path" == */cadcraft || "$exe_path" == */cadcraft-cli ) ]]; then
+      elif [[ "$exe_path" == "${TARGET_ROOT}/"* && ( "$exe_path" == */axialcad || "$exe_path" == */axialcad-cli || "$exe_path" == */cadcraft || "$exe_path" == */cadcraft-cli ) ]]; then
         is_match=1
       fi
 
@@ -241,11 +277,11 @@ check_cadcraft_running() {
   done
 
   if [[ ${#matched_pids[@]} -gt 0 ]]; then
-    echo "error: CADCraft processes are currently running from target installation:" >&2
+    echo "error: axialCAD processes are currently running from target installation:" >&2
     for m in "${matched_pids[@]}"; do
       echo "  - PID $m" >&2
     done
-    echo "Please save your drawings and close CADCraft before installing, updating, or rolling back." >&2
+    echo "Please save your drawings and close axialCAD before installing, updating, or rolling back." >&2
     echo "For safety and data integrity, process bypass is not permitted." >&2
     exit 1
   fi
@@ -440,7 +476,7 @@ refresh_desktop_databases() {
 # -----------------------------------------------------------------------------
 # Transaction Recovery Manager: Captures state before mutations
 # -----------------------------------------------------------------------------
-RECOVERY_DIR="${TARGET_CADCRAFT}/.recovery.$$"
+RECOVERY_DIR="${TARGET_AXIALCAD}/.recovery.$$"
 TRANSACTION_COMMITTED=0
 NEW_BUILD_DIR_CREATED=0
 STAGE_DIR=""
@@ -492,8 +528,8 @@ recover_transaction() {
   fi
 
   # If versions directory is empty, remove it so flat installs don't retain an empty versions/ folder
-  if [[ -d "${TARGET_CADCRAFT}/versions" ]]; then
-    rmdir "${TARGET_CADCRAFT}/versions" 2>/dev/null || true
+  if [[ -d "${TARGET_AXIALCAD}/versions" ]]; then
+    rmdir "${TARGET_AXIALCAD}/versions" 2>/dev/null || true
   fi
 
   # Remove any newly created outside files that did not exist before operation
@@ -513,14 +549,14 @@ recover_transaction() {
     local orig_curr
     orig_curr="$(cat "$RECOVERY_DIR/current.target")"
     if [[ -n "$orig_curr" ]]; then
-      local curr_tmp="${TARGET_CADCRAFT}/current.tmp.$$"
-      if ! ln -s "$orig_curr" "$curr_tmp" || ! mv -Tf "$curr_tmp" "${TARGET_CADCRAFT}/current"; then
+      local curr_tmp="${TARGET_AXIALCAD}/current.tmp.$$"
+      if ! ln -s "$orig_curr" "$curr_tmp" || ! mv -Tf "$curr_tmp" "${TARGET_AXIALCAD}/current"; then
         rm -f "$curr_tmp" 2>/dev/null || true
         recovery_failed=1
       fi
     else
-      if [[ -e "${TARGET_CADCRAFT}/current" || -L "${TARGET_CADCRAFT}/current" ]]; then
-        if ! rm -f "${TARGET_CADCRAFT}/current"; then
+      if [[ -e "${TARGET_AXIALCAD}/current" || -L "${TARGET_AXIALCAD}/current" ]]; then
+        if ! rm -f "${TARGET_AXIALCAD}/current"; then
           recovery_failed=1
         fi
       fi
@@ -532,14 +568,14 @@ recover_transaction() {
     local orig_prev
     orig_prev="$(cat "$RECOVERY_DIR/previous.target")"
     if [[ -n "$orig_prev" ]]; then
-      local prev_tmp="${TARGET_CADCRAFT}/previous.tmp.$$"
-      if ! ln -s "$orig_prev" "$prev_tmp" || ! mv -Tf "$prev_tmp" "${TARGET_CADCRAFT}/previous"; then
+      local prev_tmp="${TARGET_AXIALCAD}/previous.tmp.$$"
+      if ! ln -s "$orig_prev" "$prev_tmp" || ! mv -Tf "$prev_tmp" "${TARGET_AXIALCAD}/previous"; then
         rm -f "$prev_tmp" 2>/dev/null || true
         recovery_failed=1
       fi
     else
-      if [[ -e "${TARGET_CADCRAFT}/previous" || -L "${TARGET_CADCRAFT}/previous" ]]; then
-        if ! rm -f "${TARGET_CADCRAFT}/previous"; then
+      if [[ -e "${TARGET_AXIALCAD}/previous" || -L "${TARGET_AXIALCAD}/previous" ]]; then
+        if ! rm -f "${TARGET_AXIALCAD}/previous"; then
           recovery_failed=1
         fi
       fi
@@ -593,6 +629,8 @@ recover_transaction() {
     esac
   }
 
+  restore_entry_binary "axialcad"
+  restore_entry_binary "axialcad-cli"
   restore_entry_binary "cadcraft"
   restore_entry_binary "cadcraft-cli"
 
@@ -620,11 +658,11 @@ recover_transaction() {
   if [[ -d "${TARGET_ROOT}/share/icons/hicolor" ]]; then
     find "${TARGET_ROOT}/share/icons/hicolor" -depth -type d -empty -delete 2>/dev/null || true
   fi
-  if [[ -d "${TARGET_CADCRAFT}/versions" ]]; then
-    rmdir "${TARGET_CADCRAFT}/versions" 2>/dev/null || true
+  if [[ -d "${TARGET_AXIALCAD}/versions" ]]; then
+    rmdir "${TARGET_AXIALCAD}/versions" 2>/dev/null || true
   fi
-  if [[ -d "$TARGET_CADCRAFT" ]]; then
-    rmdir "$TARGET_CADCRAFT" 2>/dev/null || true
+  if [[ -d "$TARGET_AXIALCAD" ]]; then
+    rmdir "$TARGET_AXIALCAD" 2>/dev/null || true
   fi
 
   if [[ "$recovery_failed" -eq 0 ]]; then
@@ -636,6 +674,12 @@ recover_transaction() {
   fi
 
   release_lock
+
+  if [[ "${TARGET_AXIALCAD_PREEXISTED:-1}" -eq 0 && "$recovery_failed" -eq 0 ]]; then
+    rm -f "$LOCK_FILE" 2>/dev/null || true
+    rmdir "${TARGET_AXIALCAD}/versions" 2>/dev/null || true
+    rmdir "$TARGET_AXIALCAD" 2>/dev/null || true
+  fi
 
   if [[ "$recovery_failed" -ne 0 ]]; then
     exit 1
@@ -651,22 +695,22 @@ snapshot_state_for_recovery() {
   touch "$RECOVERY_DIR/created_files.txt"
 
   # Record current/previous symlink targets
-  if [[ -L "${TARGET_CADCRAFT}/current" ]]; then
-    readlink "${TARGET_CADCRAFT}/current" > "$RECOVERY_DIR/current.target"
-    echo "share/cadcraft/current" >> "$RECOVERY_DIR/existed_files.txt"
+  if [[ -L "${TARGET_AXIALCAD}/current" ]]; then
+    readlink "${TARGET_AXIALCAD}/current" > "$RECOVERY_DIR/current.target"
+    echo "share/axialcad/current" >> "$RECOVERY_DIR/existed_files.txt"
   else
     touch "$RECOVERY_DIR/current.target"
   fi
 
-  if [[ -L "${TARGET_CADCRAFT}/previous" ]]; then
-    readlink "${TARGET_CADCRAFT}/previous" > "$RECOVERY_DIR/previous.target"
-    echo "share/cadcraft/previous" >> "$RECOVERY_DIR/existed_files.txt"
+  if [[ -L "${TARGET_AXIALCAD}/previous" ]]; then
+    readlink "${TARGET_AXIALCAD}/previous" > "$RECOVERY_DIR/previous.target"
+    echo "share/axialcad/previous" >> "$RECOVERY_DIR/existed_files.txt"
   else
     touch "$RECOVERY_DIR/previous.target"
   fi
 
   # Record TARGET_BIN entry points with explicit state: "absent", "symlink", or "regular"
-  for b_name in "cadcraft" "cadcraft-cli"; do
+  for b_name in "axialcad" "axialcad-cli" "cadcraft" "cadcraft-cli"; do
     local b_path="${TARGET_BIN}/${b_name}"
     if [[ -L "$b_path" ]]; then
       echo "symlink" > "$RECOVERY_DIR/bin_${b_name}.type"
@@ -686,6 +730,10 @@ snapshot_state_for_recovery() {
     "share/applications/ai.storyteller.cadcraft.desktop" \
     "share/mime/packages/ai.storyteller.cadcraft.xml" \
     "share/metainfo/ai.storyteller.cadcraft.metainfo.xml" \
+    "share/axialcad/version.env" \
+    "share/axialcad/install-manifest.txt" \
+    "share/axialcad/uninstall.sh" \
+    "share/axialcad/install.sh" \
     "share/cadcraft/version.env" \
     "share/cadcraft/install-manifest.txt" \
     "share/cadcraft/uninstall.sh" \
@@ -728,8 +776,19 @@ if [[ "$IS_ROLLBACK" -eq 1 ]]; then
   acquire_lock
   check_cadcraft_running
 
-  PREV_SYMLINK="${TARGET_CADCRAFT}/previous"
-  CURR_SYMLINK="${TARGET_CADCRAFT}/current"
+  if [[ -L "${TARGET_AXIALCAD}/previous" ]]; then
+    PREV_SYMLINK="${TARGET_AXIALCAD}/previous"
+    CURR_SYMLINK="${TARGET_AXIALCAD}/current"
+    MANAGED_BASE="${TARGET_AXIALCAD}"
+  elif [[ -L "${TARGET_LEGACY_CADCRAFT}/previous" ]]; then
+    PREV_SYMLINK="${TARGET_LEGACY_CADCRAFT}/previous"
+    CURR_SYMLINK="${TARGET_LEGACY_CADCRAFT}/current"
+    MANAGED_BASE="${TARGET_LEGACY_CADCRAFT}"
+  else
+    PREV_SYMLINK="${TARGET_AXIALCAD}/previous"
+    CURR_SYMLINK="${TARGET_AXIALCAD}/current"
+    MANAGED_BASE="${TARGET_AXIALCAD}"
+  fi
 
   if [[ ! -L "$PREV_SYMLINK" ]]; then
     echo "error: no previous version symlink found at $PREV_SYMLINK to roll back to." >&2
@@ -745,19 +804,19 @@ if [[ "$IS_ROLLBACK" -eq 1 ]]; then
   if [[ "$PREV_TARGET" == /* ]]; then
     PREV_DIR="$PREV_TARGET"
   else
-    PREV_DIR="${TARGET_CADCRAFT}/${PREV_TARGET}"
+    PREV_DIR="${MANAGED_BASE}/${PREV_TARGET}"
   fi
 
   # Strict containment check: previous must resolve strictly inside versions/
   CANON_PREV="$(readlink -f "$PREV_DIR" 2>/dev/null || true)"
-  CANON_VERSIONS="$(mkdir -p "$TARGET_VERSIONS" 2>/dev/null && cd "$TARGET_VERSIONS" && pwd)"
+  CANON_VERSIONS="$(mkdir -p "${MANAGED_BASE}/versions" 2>/dev/null && cd "${MANAGED_BASE}/versions" && pwd)"
   if [[ -z "$CANON_PREV" || "$(dirname "$CANON_PREV")" != "$CANON_VERSIONS" ]]; then
     echo "error: previous version symlink target '$PREV_TARGET' resolves outside versions directory: $CANON_PREV" >&2
     exit 1
   fi
 
-  if [[ ! -d "$PREV_DIR" || ! -f "$PREV_DIR/bin/cadcraft" ]]; then
-    echo "error: previous version directory '$PREV_DIR' is invalid or missing bin/cadcraft." >&2
+  if [[ ! -d "$PREV_DIR" || ( ! -f "$PREV_DIR/bin/axialcad" && ! -f "$PREV_DIR/bin/cadcraft" ) ]]; then
+    echo "error: previous version directory '$PREV_DIR' is invalid or missing binary." >&2
     exit 1
   fi
 
@@ -772,7 +831,7 @@ if [[ "$IS_ROLLBACK" -eq 1 ]]; then
   ROLLBACK_SHA="$PARSED_SHA"
 
   echo "=================================================================="
-  echo " CADCraft — Rolling Back Installation"
+  echo " axialCAD — Rolling Back Installation"
   echo "=================================================================="
   echo "Current Version:   ${CURR_TARGET:-unknown}"
   echo "Rollback Target:   $PREV_TARGET ($ROLLBACK_VERSION, ${ROLLBACK_SHA:0:10})"
@@ -793,7 +852,7 @@ if [[ "$IS_ROLLBACK" -eq 1 ]]; then
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[dry-run] Would point $PREV_SYMLINK to $CURR_TARGET"
     echo "[dry-run] Would point $CURR_SYMLINK to $PREV_TARGET"
-    echo "[dry-run] Would point $TARGET_BIN/cadcraft to ../share/cadcraft/current/bin/cadcraft"
+    echo "[dry-run] Would point $TARGET_BIN/axialcad and $TARGET_BIN/cadcraft to active version"
     echo "[dry-run] Would update manifest and refresh desktop databases"
     exit 0
   fi
@@ -802,7 +861,7 @@ if [[ "$IS_ROLLBACK" -eq 1 ]]; then
 
   # Step 1: Update 'previous' to point to old current
   if [[ -n "$CURR_TARGET" ]]; then
-    PREV_TMP="${TARGET_CADCRAFT}/previous.tmp.$$"
+    PREV_TMP="${MANAGED_BASE}/previous.tmp.$$"
     ln -s "$CURR_TARGET" "$PREV_TMP"
     mv -Tf "$PREV_TMP" "$PREV_SYMLINK"
   fi
@@ -813,26 +872,46 @@ if [[ "$IS_ROLLBACK" -eq 1 ]]; then
   fi
 
   # Step 2: Update 'current' to point to rollback target
-  CURR_TMP="${TARGET_CADCRAFT}/current.tmp.$$"
+  CURR_TMP="${MANAGED_BASE}/current.tmp.$$"
   ln -s "$PREV_TARGET" "$CURR_TMP"
   mv -Tf "$CURR_TMP" "$CURR_SYMLINK"
 
   # Step 3: Refresh entry binaries in TARGET_BIN
   mkdir -p "$TARGET_BIN"
-  BIN_TMP="${TARGET_BIN}/cadcraft.tmp.$$"
-  ln -s "../share/cadcraft/current/bin/cadcraft" "$BIN_TMP"
-  mv -Tf "$BIN_TMP" "${TARGET_BIN}/cadcraft"
+  target_axial_bin="../share/axialcad/current/bin/axialcad"
+  if [[ "$MANAGED_BASE" == "$TARGET_LEGACY_CADCRAFT" ]]; then
+    target_axial_bin="../share/cadcraft/current/bin/cadcraft"
+  elif [[ ! -f "$PREV_DIR/bin/axialcad" && -f "$PREV_DIR/bin/cadcraft" ]]; then
+    target_axial_bin="../share/axialcad/current/bin/cadcraft"
+  fi
+  BIN_AXIAL_TMP="${TARGET_BIN}/axialcad.tmp.$$"
+  ln -s "$target_axial_bin" "$BIN_AXIAL_TMP"
+  mv -Tf "$BIN_AXIAL_TMP" "${TARGET_BIN}/axialcad"
 
-  if [[ -f "$PREV_DIR/bin/cadcraft-cli" ]]; then
-    CLI_TMP="${TARGET_BIN}/cadcraft-cli.tmp.$$"
-    ln -s "../share/cadcraft/current/bin/cadcraft-cli" "$CLI_TMP"
-    mv -Tf "$CLI_TMP" "${TARGET_BIN}/cadcraft-cli"
+  BIN_CAD_TMP="${TARGET_BIN}/cadcraft.tmp.$$"
+  ln -s "axialcad" "$BIN_CAD_TMP"
+  mv -Tf "$BIN_CAD_TMP" "${TARGET_BIN}/cadcraft"
+
+  if [[ -f "$PREV_DIR/bin/axialcad-cli" || -f "$PREV_DIR/bin/cadcraft-cli" ]]; then
+    target_cli_bin="../share/axialcad/current/bin/axialcad-cli"
+    if [[ "$MANAGED_BASE" == "$TARGET_LEGACY_CADCRAFT" ]]; then
+      target_cli_bin="../share/cadcraft/current/bin/cadcraft-cli"
+    elif [[ ! -f "$PREV_DIR/bin/axialcad-cli" && -f "$PREV_DIR/bin/cadcraft-cli" ]]; then
+      target_cli_bin="../share/axialcad/current/bin/cadcraft-cli"
+    fi
+    CLI_AXIAL_TMP="${TARGET_BIN}/axialcad-cli.tmp.$$"
+    ln -s "$target_cli_bin" "$CLI_AXIAL_TMP"
+    mv -Tf "$CLI_AXIAL_TMP" "${TARGET_BIN}/axialcad-cli"
+
+    CLI_CAD_TMP="${TARGET_BIN}/cadcraft-cli.tmp.$$"
+    ln -s "axialcad-cli" "$CLI_CAD_TMP"
+    mv -Tf "$CLI_CAD_TMP" "${TARGET_BIN}/cadcraft-cli"
   else
-    rm -f "${TARGET_BIN}/cadcraft-cli" 2>/dev/null || true
+    rm -f "${TARGET_BIN}/axialcad-cli" "${TARGET_BIN}/cadcraft-cli" 2>/dev/null || true
   fi
 
   # Step 4: Update active version.env
-  cp -f "$PREV_DIR/version.env" "${TARGET_CADCRAFT}/version.env" 2>/dev/null || true
+  cp -f "$PREV_DIR/version.env" "${MANAGED_BASE}/version.env" 2>/dev/null || true
 
   # Step 5: Refresh desktop and mime databases
   refresh_desktop_databases
@@ -855,13 +934,27 @@ fi
 # Mode: Normal Installation / Local Update
 # -----------------------------------------------------------------------------
 if [[ -z "$SRC_DIR" ]]; then
-  echo "error: install.sh must be run from an extracted CADCraft package directory." >&2
+  echo "error: install.sh must be run from an extracted axialCAD package directory." >&2
   exit 1
 fi
 
-if [[ ! -f "$SRC_DIR/bin/cadcraft" ]]; then
-  echo "error: $SRC_DIR/bin/cadcraft not found. Invalid package directory." >&2
+if [[ ! -f "$SRC_DIR/bin/axialcad" && ! -f "$SRC_DIR/bin/cadcraft" ]]; then
+  echo "error: neither $SRC_DIR/bin/axialcad nor $SRC_DIR/bin/cadcraft found. Invalid package directory." >&2
   exit 1
+fi
+
+SRC_MAIN_BIN=""
+if [[ -f "$SRC_DIR/bin/axialcad" ]]; then
+  SRC_MAIN_BIN="$SRC_DIR/bin/axialcad"
+else
+  SRC_MAIN_BIN="$SRC_DIR/bin/cadcraft"
+fi
+
+SRC_CLI_BIN=""
+if [[ -f "$SRC_DIR/bin/axialcad-cli" ]]; then
+  SRC_CLI_BIN="$SRC_DIR/bin/axialcad-cli"
+elif [[ -f "$SRC_DIR/bin/cadcraft-cli" ]]; then
+  SRC_CLI_BIN="$SRC_DIR/bin/cadcraft-cli"
 fi
 
 acquire_lock
@@ -886,15 +979,23 @@ if [[ -d "$TARGET_BUILD_DIR" ]]; then
   SAME_BUILD_EXISTS=1
 
   # Compare main binary
-  SRC_BIN_SHA="$(compute_sha256 "$SRC_DIR/bin/cadcraft")"
+  SRC_BIN_SHA="$(compute_sha256 "$SRC_MAIN_BIN")"
   DEST_BIN_SHA=""
-  [[ -f "$TARGET_BUILD_DIR/bin/cadcraft" ]] && DEST_BIN_SHA="$(compute_sha256 "$TARGET_BUILD_DIR/bin/cadcraft")"
+  if [[ -f "$TARGET_BUILD_DIR/bin/axialcad" ]]; then
+    DEST_BIN_SHA="$(compute_sha256 "$TARGET_BUILD_DIR/bin/axialcad")"
+  elif [[ -f "$TARGET_BUILD_DIR/bin/cadcraft" ]]; then
+    DEST_BIN_SHA="$(compute_sha256 "$TARGET_BUILD_DIR/bin/cadcraft")"
+  fi
 
   # Compare CLI if present
   SRC_CLI_SHA=""
   DEST_CLI_SHA=""
-  [[ -f "$SRC_DIR/bin/cadcraft-cli" ]] && SRC_CLI_SHA="$(compute_sha256 "$SRC_DIR/bin/cadcraft-cli")"
-  [[ -f "$TARGET_BUILD_DIR/bin/cadcraft-cli" ]] && DEST_CLI_SHA="$(compute_sha256 "$TARGET_BUILD_DIR/bin/cadcraft-cli")"
+  [[ -n "$SRC_CLI_BIN" && -f "$SRC_CLI_BIN" ]] && SRC_CLI_SHA="$(compute_sha256 "$SRC_CLI_BIN")"
+  if [[ -f "$TARGET_BUILD_DIR/bin/axialcad-cli" ]]; then
+    DEST_CLI_SHA="$(compute_sha256 "$TARGET_BUILD_DIR/bin/axialcad-cli")"
+  elif [[ -f "$TARGET_BUILD_DIR/bin/cadcraft-cli" ]]; then
+    DEST_CLI_SHA="$(compute_sha256 "$TARGET_BUILD_DIR/bin/cadcraft-cli")"
+  fi
 
   CONTENT_MATCH=1
   [[ "$SRC_BIN_SHA" != "$DEST_BIN_SHA" ]] && CONTENT_MATCH=0
@@ -919,92 +1020,113 @@ if [[ -d "$TARGET_BUILD_DIR" ]]; then
 
   if [[ "$CONTENT_MATCH" -eq 0 ]]; then
     echo "error: version directory for '$BUILD_ID' already exists with DIFFERENT content!" >&2
-    echo "  cadcraft source SHA:      $SRC_BIN_SHA" >&2
-    echo "  cadcraft installed SHA:   $DEST_BIN_SHA" >&2
-    echo "  cadcraft-cli source SHA:    ${SRC_CLI_SHA:-none}" >&2
-    echo "  cadcraft-cli installed SHA: ${DEST_CLI_SHA:-none}" >&2
+    echo "  axialCAD source SHA:        $SRC_BIN_SHA" >&2
+    echo "  axialCAD installed SHA:     $DEST_BIN_SHA" >&2
+    echo "  axialCAD CLI source SHA:    ${SRC_CLI_SHA:-none}" >&2
+    echo "  axialCAD CLI installed SHA: ${DEST_CLI_SHA:-none}" >&2
     echo "Refusing to overwrite existing build with same identity but different content, even with --force." >&2
     exit 1
   else
-    if [[ -L "${TARGET_CADCRAFT}/current" && "$(readlink "${TARGET_CADCRAFT}/current")" == "versions/${BUILD_ID}" ]]; then
+    if [[ -L "${TARGET_AXIALCAD}/current" && "$(readlink "${TARGET_AXIALCAD}/current")" == "versions/${BUILD_ID}" ]]; then
       ALREADY_ACTIVE=1
     fi
   fi
 fi
 
-# -----------------------------------------------------------------------------
-# Collision Detection: Protect against overwriting unmanaged external files
-# -----------------------------------------------------------------------------
-EXISTING_MANIFEST="${TARGET_CADCRAFT}/install-manifest.txt"
-PREVIOUS_MANAGED_FILES=()
-if [[ -f "$EXISTING_MANIFEST" ]]; then
-  # Verify manifest itself does not escape prefix if it is a symlink
-  if [[ -L "$EXISTING_MANIFEST" ]]; then
-    manifest_canon="$(readlink -f "$EXISTING_MANIFEST" 2>/dev/null || true)"
-    if [[ -z "$manifest_canon" || ( "$manifest_canon" != "$CANON_ROOT" && "$manifest_canon" != "$CANON_ROOT/"* ) ]]; then
-      echo "error: install-manifest.txt is an unresolvable or escaping symlink: $manifest_canon" >&2
-      exit 1
-    fi
+# Check ambiguous coexistence between share/axialcad and share/cadcraft
+if [[ -d "$TARGET_AXIALCAD" && -d "$TARGET_LEGACY_CADCRAFT" ]]; then
+  has_axial_install=0
+  [[ -L "${TARGET_AXIALCAD}/current" || -f "${TARGET_AXIALCAD}/install-manifest.txt" ]] && has_axial_install=1
+  has_legacy_install=0
+  [[ -L "${TARGET_LEGACY_CADCRAFT}/current" || -f "${TARGET_LEGACY_CADCRAFT}/install-manifest.txt" ]] && has_legacy_install=1
+  if [[ "$has_axial_install" -eq 1 && "$has_legacy_install" -eq 1 ]]; then
+    echo "error: ambiguous installation state: both share/axialcad and share/cadcraft contain active installations." >&2
+    echo "Aborting to prevent data loss or conflicting version states." >&2
+    exit 1
   fi
-
-  IS_UPDATE=1
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    [[ -z "$line" || "$line" =~ ^# ]] && continue
-
-    # Validate path format: must be strictly relative without '..' traversal
-    if [[ "$line" == /* || "$line" == *".."* ]]; then
-      echo "error: install-manifest.txt contains uncontained or invalid entry: $line" >&2
-      exit 1
-    fi
-
-    target_entry="${TARGET_ROOT}/${line}"
-
-    if [[ ! -e "$target_entry" && ! -L "$target_entry" ]]; then
-      # Archivo gestionado que ya no existe: verificar que su directorio padre exista,
-      # sea canónicamente verificable y esté contenido dentro del prefijo
-      parent_dir="$(dirname "$target_entry")"
-      canon_parent=""
-      if [[ -d "$parent_dir" ]]; then
-        canon_parent="$(readlink -f "$parent_dir" 2>/dev/null || true)"
-      fi
-      if [[ -n "$canon_parent" && ( "$canon_parent" == "$CANON_ROOT" || "$canon_parent" == "$CANON_ROOT/"* ) ]]; then
-        PREVIOUS_MANAGED_FILES+=("$line")
-      else
-        echo "error: install-manifest.txt entry cannot be verified (parent directory missing, unresolvable or escaping): $line" >&2
-        exit 1
-      fi
-    elif [[ -L "$target_entry" ]]; then
-      # Enlace simbólico existente: debe poder resolverse dentro del prefijo (no roto ni en bucle)
-      canon_entry="$(readlink -e "$target_entry" 2>/dev/null || true)"
-      if [[ -z "$canon_entry" ]]; then
-        echo "error: install-manifest.txt entry is an unresolvable or broken symlink: $line" >&2
-        exit 1
-      elif [[ "$canon_entry" != "$CANON_ROOT" && "$canon_entry" != "$CANON_ROOT/"* ]]; then
-        echo "error: install-manifest.txt entry resolves outside installation prefix: $line (resolves to: $canon_entry)" >&2
-        exit 1
-      else
-        PREVIOUS_MANAGED_FILES+=("$line")
-      fi
-    else
-      # Archivo o directorio regular existente: verificar contención canónica
-      canon_entry="$(readlink -f "$target_entry" 2>/dev/null || true)"
-      if [[ -z "$canon_entry" ]]; then
-        echo "error: install-manifest.txt entry cannot be canonically verified: $line" >&2
-        exit 1
-      elif [[ "$canon_entry" != "$CANON_ROOT" && "$canon_entry" != "$CANON_ROOT/"* ]]; then
-        echo "error: install-manifest.txt entry resolves outside installation prefix: $line (resolves to: $canon_entry)" >&2
-        exit 1
-      else
-        PREVIOUS_MANAGED_FILES+=("$line")
-      fi
-    fi
-  done < "$EXISTING_MANIFEST"
 fi
 
-CANDIDATE_OUTSIDE_FILES=("bin/cadcraft")
-if [[ -f "$SRC_DIR/bin/cadcraft-cli" || -f "$TARGET_BIN/cadcraft-cli" ]]; then
-  CANDIDATE_OUTSIDE_FILES+=("bin/cadcraft-cli")
+PREVIOUS_MANAGED_FILES=()
+EXISTING_MANIFESTS=()
+[[ -f "${TARGET_AXIALCAD}/install-manifest.txt" ]] && EXISTING_MANIFESTS+=("${TARGET_AXIALCAD}/install-manifest.txt")
+[[ -f "${TARGET_LEGACY_CADCRAFT}/install-manifest.txt" ]] && EXISTING_MANIFESTS+=("${TARGET_LEGACY_CADCRAFT}/install-manifest.txt")
+
+if [[ ${#EXISTING_MANIFESTS[@]} -gt 0 ]]; then
+  IS_UPDATE=1
+  for man_file in "${EXISTING_MANIFESTS[@]}"; do
+    if [[ -L "$man_file" ]]; then
+      manifest_canon="$(readlink -f "$man_file" 2>/dev/null || true)"
+      if [[ -z "$manifest_canon" || ( "$manifest_canon" != "$CANON_ROOT" && "$manifest_canon" != "$CANON_ROOT/"* ) ]]; then
+        echo "error: $(basename "$man_file") is an unresolvable or escaping symlink: $manifest_canon" >&2
+        exit 1
+      fi
+    fi
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+      [[ -z "$line" || "$line" =~ ^# ]] && continue
+
+      if [[ "$line" == /* || "$line" == *".."* ]]; then
+        echo "error: $(basename "$man_file") contains uncontained or invalid entry: $line" >&2
+        exit 1
+      fi
+
+      target_entry="${TARGET_ROOT}/${line}"
+
+      if [[ ! -e "$target_entry" && ! -L "$target_entry" ]]; then
+        parent_dir="$(dirname "$target_entry")"
+        canon_parent=""
+        if [[ -d "$parent_dir" ]]; then
+          canon_parent="$(readlink -f "$parent_dir" 2>/dev/null || true)"
+        fi
+        if [[ -n "$canon_parent" && ( "$canon_parent" == "$CANON_ROOT" || "$canon_parent" == "$CANON_ROOT/"* ) ]]; then
+          PREVIOUS_MANAGED_FILES+=("$line")
+        else
+          echo "error: $(basename "$man_file") entry cannot be verified (parent directory missing, unresolvable or escaping): $line" >&2
+          exit 1
+        fi
+      elif [[ -L "$target_entry" ]]; then
+        canon_entry="$(readlink -e "$target_entry" 2>/dev/null || true)"
+        if [[ -z "$canon_entry" ]]; then
+          echo "error: $(basename "$man_file") entry is an unresolvable or broken symlink: $line" >&2
+          exit 1
+        elif [[ "$canon_entry" != "$CANON_ROOT" && "$canon_entry" != "$CANON_ROOT/"* ]]; then
+          echo "error: $(basename "$man_file") entry resolves outside installation prefix: $line (resolves to: $canon_entry)" >&2
+          exit 1
+        else
+          PREVIOUS_MANAGED_FILES+=("$line")
+        fi
+      else
+        canon_entry="$(readlink -f "$target_entry" 2>/dev/null || true)"
+        if [[ -z "$canon_entry" ]]; then
+          echo "error: $(basename "$man_file") entry cannot be canonically verified: $line" >&2
+          exit 1
+        elif [[ "$canon_entry" != "$CANON_ROOT" && "$canon_entry" != "$CANON_ROOT/"* ]]; then
+          echo "error: $(basename "$man_file") entry resolves outside installation prefix: $line (resolves to: $canon_entry)" >&2
+          exit 1
+        else
+          PREVIOUS_MANAGED_FILES+=("$line")
+        fi
+      fi
+    done < "$man_file"
+  done
+fi
+
+if [[ -d "$TARGET_LEGACY_CADCRAFT" && ( -f "$TARGET_LEGACY_CADCRAFT/install-manifest.txt" || -f "$TARGET_LEGACY_CADCRAFT/version.env" ) ]]; then
+  if [[ -L "$TARGET_LEGACY_CADCRAFT/current" ]]; then
+    PREVIOUS_MANAGED_FILES+=("share/cadcraft/current")
+  fi
+  if [[ -L "$TARGET_LEGACY_CADCRAFT/previous" ]]; then
+    PREVIOUS_MANAGED_FILES+=("share/cadcraft/previous")
+  fi
+fi
+
+CANDIDATE_OUTSIDE_FILES=(
+  "bin/axialcad"
+  "bin/cadcraft"
+)
+if [[ -n "$SRC_CLI_BIN" || -e "$TARGET_BIN/axialcad-cli" || -e "$TARGET_BIN/cadcraft-cli" || -L "$TARGET_BIN/axialcad-cli" || -L "$TARGET_BIN/cadcraft-cli" ]]; then
+  CANDIDATE_OUTSIDE_FILES+=("bin/axialcad-cli" "bin/cadcraft-cli")
 fi
 if [[ -f "$SRC_DIR/share/applications/ai.storyteller.cadcraft.desktop" ]]; then
   CANDIDATE_OUTSIDE_FILES+=("share/applications/ai.storyteller.cadcraft.desktop")
@@ -1025,11 +1147,18 @@ if [[ -d "$SRC_DIR/share/doc/cadcraft" ]]; then
     CANDIDATE_OUTSIDE_FILES+=("$doc_rel")
   done < <(cd "$SRC_DIR" && find share/doc/cadcraft -type f)
 fi
-CANDIDATE_OUTSIDE_FILES+=("share/cadcraft/uninstall.sh")
-CANDIDATE_OUTSIDE_FILES+=("share/cadcraft/install.sh")
-CANDIDATE_OUTSIDE_FILES+=("share/cadcraft/version.env")
-CANDIDATE_OUTSIDE_FILES+=("share/cadcraft/install-manifest.txt")
-CANDIDATE_OUTSIDE_FILES+=("share/cadcraft/current")
+CANDIDATE_OUTSIDE_FILES+=(
+  "share/axialcad/uninstall.sh"
+  "share/axialcad/install.sh"
+  "share/axialcad/version.env"
+  "share/axialcad/install-manifest.txt"
+  "share/axialcad/current"
+  "share/cadcraft/uninstall.sh"
+  "share/cadcraft/install.sh"
+  "share/cadcraft/version.env"
+  "share/cadcraft/install-manifest.txt"
+  "share/cadcraft/current"
+)
 
 # Unconditional containment check: ANY destination file/symlink resolving outside CANON_ROOT
 # or that cannot be resolved (broken link / loop) aborts immediately, EVEN WITH --force
@@ -1065,6 +1194,34 @@ if [[ ${#ESCAPING_COLLISIONS[@]} -gt 0 ]]; then
   exit 1
 fi
 
+# Public entry points in bin/ (axialcad, cadcraft, axialcad-cli, cadcraft-cli)
+# must NEVER be overwritten if they are unmanaged regular files or symlinks, even with --force.
+UNMANAGED_PUBLIC_BINS=()
+for pub_bin in "bin/axialcad" "bin/cadcraft" "bin/axialcad-cli" "bin/cadcraft-cli"; do
+  target_bin_path="${TARGET_ROOT}/${pub_bin}"
+  if [[ -e "$target_bin_path" || -L "$target_bin_path" ]]; then
+    is_pub_managed=0
+    for prev in "${PREVIOUS_MANAGED_FILES[@]}"; do
+      if [[ "$prev" == "$pub_bin" ]]; then
+        is_pub_managed=1
+        break
+      fi
+    done
+    if [[ "$is_pub_managed" -eq 0 ]]; then
+      UNMANAGED_PUBLIC_BINS+=("$pub_bin")
+    fi
+  fi
+done
+
+if [[ ${#UNMANAGED_PUBLIC_BINS[@]} -gt 0 ]]; then
+  echo "error: unmanaged file or symlink detected at public binary entry point:" >&2
+  for upb in "${UNMANAGED_PUBLIC_BINS[@]}"; do
+    echo "  - $TARGET_ROOT/$upb" >&2
+  done
+  echo "Refusing to overwrite unmanaged binary entry points, even with --force." >&2
+  exit 1
+fi
+
 if [[ "$FORCE" -eq 0 ]]; then
   COLLISIONS=()
   for cand in "${CANDIDATE_OUTSIDE_FILES[@]}"; do
@@ -1089,7 +1246,7 @@ if [[ "$FORCE" -eq 0 ]]; then
     for c in "${COLLISIONS[@]}"; do
       echo "  - $TARGET_ROOT/$c" >&2
     done
-    echo "These files already exist and are not accredited by any existing CADCraft manifest." >&2
+    echo "These files already exist and are not accredited by any existing axialCAD manifest." >&2
     echo "Refusing to overwrite unmanaged files. Use --force to override." >&2
     exit 1
   fi
@@ -1097,9 +1254,9 @@ fi
 
 echo "=================================================================="
 if [[ "$IS_UPDATE" -eq 1 ]]; then
-  echo " CADCraft — Updating Installation"
+  echo " axialCAD — Updating Installation"
 else
-  echo " CADCraft — User Installation"
+  echo " axialCAD — User Installation"
 fi
 echo "=================================================================="
 echo "Version:      $PKG_VERSION (${PKG_SHA:0:10})"
@@ -1149,10 +1306,12 @@ rm -rf "$STAGE_DIR"
 
 if [[ "$SAME_BUILD_EXISTS" -eq 0 ]]; then
   mkdir -p "$STAGE_DIR/bin"
-  install -m 755 "$SRC_DIR/bin/cadcraft" "$STAGE_DIR/bin/cadcraft"
+  install -m 755 "$SRC_MAIN_BIN" "$STAGE_DIR/bin/axialcad"
+  ln -s axialcad "$STAGE_DIR/bin/cadcraft"
 
-  if [[ -f "$SRC_DIR/bin/cadcraft-cli" ]]; then
-    install -m 755 "$SRC_DIR/bin/cadcraft-cli" "$STAGE_DIR/bin/cadcraft-cli"
+  if [[ -n "$SRC_CLI_BIN" && -f "$SRC_CLI_BIN" ]]; then
+    install -m 755 "$SRC_CLI_BIN" "$STAGE_DIR/bin/axialcad-cli"
+    ln -s axialcad-cli "$STAGE_DIR/bin/cadcraft-cli"
   fi
 
   if [[ -d "$SRC_DIR/share/doc/cadcraft" ]]; then
@@ -1173,21 +1332,21 @@ CADCRAFT_BUILD_ID="$BUILD_ID"
 EOF
 
   # Pre-activation validation
-  if [[ ! -s "$STAGE_DIR/bin/cadcraft" || ! -x "$STAGE_DIR/bin/cadcraft" ]]; then
-    echo "error: validation failed: $STAGE_DIR/bin/cadcraft is missing, empty, or not executable." >&2
+  if [[ ! -s "$STAGE_DIR/bin/axialcad" || ! -x "$STAGE_DIR/bin/axialcad" ]]; then
+    echo "error: validation failed: $STAGE_DIR/bin/axialcad is missing, empty, or not executable." >&2
     exit 1
   fi
 
   # Mandatory smoke tests with timeout before modifying installation
-  if ! run_with_timeout 10 "$STAGE_DIR/bin/cadcraft" --version >/dev/null 2>&1; then
-    echo "error: mandatory smoke test failed: '$STAGE_DIR/bin/cadcraft --version' failed or timed out." >&2
+  if ! run_with_timeout 10 "$STAGE_DIR/bin/axialcad" --version >/dev/null 2>&1; then
+    echo "error: mandatory smoke test failed: '$STAGE_DIR/bin/axialcad --version' failed or timed out." >&2
     echo "Aborting installation before modifying existing active installation." >&2
     exit 1
   fi
 
-  if [[ -f "$STAGE_DIR/bin/cadcraft-cli" ]]; then
-    if ! run_with_timeout 10 "$STAGE_DIR/bin/cadcraft-cli" --version >/dev/null 2>&1; then
-      echo "error: mandatory smoke test failed: '$STAGE_DIR/bin/cadcraft-cli --version' failed or timed out." >&2
+  if [[ -f "$STAGE_DIR/bin/axialcad-cli" ]]; then
+    if ! run_with_timeout 10 "$STAGE_DIR/bin/axialcad-cli" --version >/dev/null 2>&1; then
+      echo "error: mandatory smoke test failed: '$STAGE_DIR/bin/axialcad-cli --version' failed or timed out." >&2
       echo "Aborting installation before modifying existing active installation." >&2
       exit 1
     fi
@@ -1195,10 +1354,10 @@ EOF
 
   # Generate individual build manifest inventory
   {
-    echo "# CADCraft build inventory: $BUILD_ID"
-    echo "$(compute_sha256 "$STAGE_DIR/bin/cadcraft")  bin/cadcraft"
-    if [[ -f "$STAGE_DIR/bin/cadcraft-cli" ]]; then
-      echo "$(compute_sha256 "$STAGE_DIR/bin/cadcraft-cli")  bin/cadcraft-cli"
+    echo "# axialCAD build inventory: $BUILD_ID"
+    echo "$(compute_sha256 "$STAGE_DIR/bin/axialcad")  bin/axialcad"
+    if [[ -f "$STAGE_DIR/bin/axialcad-cli" ]]; then
+      echo "$(compute_sha256 "$STAGE_DIR/bin/axialcad-cli")  bin/axialcad-cli"
     fi
     echo "$(compute_sha256 "$STAGE_DIR/version.env")  version.env"
     if [[ -d "$STAGE_DIR/share/doc/cadcraft" ]]; then
@@ -1214,11 +1373,11 @@ EOF
 fi
 
 # -----------------------------------------------------------------------------
-# Migration from legacy flat manifest installation (executed AFTER prevalidation)
+# Migration from legacy cadcraft installation (executed AFTER prevalidation)
 # -----------------------------------------------------------------------------
-if [[ -f "$EXISTING_MANIFEST" && ! -L "${TARGET_CADCRAFT}/current" ]]; then
-  echo "Migrating accredited legacy files to versioned layout..."
-  parse_legacy_version_env "${TARGET_CADCRAFT}/version.env"
+if [[ -d "$TARGET_LEGACY_CADCRAFT" && ! -L "${TARGET_AXIALCAD}/current" ]]; then
+  echo "Migrating accredited legacy installation from share/cadcraft to share/axialcad..."
+  parse_legacy_version_env "${TARGET_LEGACY_CADCRAFT}/version.env"
   LEGACY_VER="${PARSED_VERSION:-legacy}"
   LEGACY_SHA="${PARSED_SHA:-unknown}"
   LEGACY_BUILD_ID="${LEGACY_VER}-${LEGACY_SHA}"
@@ -1232,17 +1391,27 @@ if [[ -f "$EXISTING_MANIFEST" && ! -L "${TARGET_CADCRAFT}/current" ]]; then
 
   mkdir -p "${LEGACY_DIR}/bin"
 
-  # Migrate ONLY accredited files recorded in previous manifest
+  if [[ -L "${TARGET_LEGACY_CADCRAFT}/current" ]]; then
+    # Versioned legacy install: copy active version content into TARGET_VERSIONS
+    legacy_curr_target="$(readlink "${TARGET_LEGACY_CADCRAFT}/current" 2>/dev/null || true)"
+    if [[ -n "$legacy_curr_target" && -d "${TARGET_LEGACY_CADCRAFT}/${legacy_curr_target}" ]]; then
+      cp -a "${TARGET_LEGACY_CADCRAFT}/${legacy_curr_target}/"* "${LEGACY_DIR}/" 2>/dev/null || true
+    fi
+  fi
+
+  # Also copy accredited legacy flat binaries/docs if present
   for mf in "${PREVIOUS_MANAGED_FILES[@]}"; do
     case "$mf" in
-      bin/cadcraft)
+      bin/cadcraft|bin/axialcad)
         if [[ -f "${TARGET_ROOT}/bin/cadcraft" && ! -L "${TARGET_ROOT}/bin/cadcraft" ]]; then
           cp -p "${TARGET_ROOT}/bin/cadcraft" "${LEGACY_DIR}/bin/cadcraft"
+          [[ ! -f "${LEGACY_DIR}/bin/axialcad" ]] && cp -p "${TARGET_ROOT}/bin/cadcraft" "${LEGACY_DIR}/bin/axialcad"
         fi
         ;;
-      bin/cadcraft-cli)
+      bin/cadcraft-cli|bin/axialcad-cli)
         if [[ -f "${TARGET_ROOT}/bin/cadcraft-cli" && ! -L "${TARGET_ROOT}/bin/cadcraft-cli" ]]; then
           cp -p "${TARGET_ROOT}/bin/cadcraft-cli" "${LEGACY_DIR}/bin/cadcraft-cli"
+          [[ ! -f "${LEGACY_DIR}/bin/axialcad-cli" ]] && cp -p "${TARGET_ROOT}/bin/cadcraft-cli" "${LEGACY_DIR}/bin/axialcad-cli"
         fi
         ;;
       share/doc/cadcraft/*)
@@ -1255,39 +1424,41 @@ if [[ -f "$EXISTING_MANIFEST" && ! -L "${TARGET_CADCRAFT}/current" ]]; then
     esac
   done
 
-  if [[ -f "${TARGET_CADCRAFT}/version.env" ]]; then
-    cp -p "${TARGET_CADCRAFT}/version.env" "${LEGACY_DIR}/version.env"
+  if [[ -f "${TARGET_LEGACY_CADCRAFT}/version.env" && ! -f "${LEGACY_DIR}/version.env" ]]; then
+    cp -p "${TARGET_LEGACY_CADCRAFT}/version.env" "${LEGACY_DIR}/version.env"
   fi
 
-  # Create legacy build inventory
+  # Create build inventory for legacy version
   {
-    echo "# CADCraft build inventory: $LEGACY_BUILD_ID"
+    echo "# axialCAD build inventory: $LEGACY_BUILD_ID"
+    [[ -f "${LEGACY_DIR}/bin/axialcad" ]] && echo "$(compute_sha256 "${LEGACY_DIR}/bin/axialcad")  bin/axialcad"
     [[ -f "${LEGACY_DIR}/bin/cadcraft" ]] && echo "$(compute_sha256 "${LEGACY_DIR}/bin/cadcraft")  bin/cadcraft"
+    [[ -f "${LEGACY_DIR}/bin/axialcad-cli" ]] && echo "$(compute_sha256 "${LEGACY_DIR}/bin/axialcad-cli")  bin/axialcad-cli"
     [[ -f "${LEGACY_DIR}/bin/cadcraft-cli" ]] && echo "$(compute_sha256 "${LEGACY_DIR}/bin/cadcraft-cli")  bin/cadcraft-cli"
     [[ -f "${LEGACY_DIR}/version.env" ]] && echo "$(compute_sha256 "${LEGACY_DIR}/version.env")  version.env"
   } > "${LEGACY_DIR}/build-manifest.txt"
 
-  # Set initial previous symlink to legacy
-  record_created_file "share/cadcraft/previous"
-  MIGRATE_PREV_TMP="${TARGET_CADCRAFT}/previous.tmp.$$"
+  # Set initial previous symlink in TARGET_AXIALCAD to legacy build
+  record_created_file "share/axialcad/previous"
+  MIGRATE_PREV_TMP="${TARGET_AXIALCAD}/previous.tmp.$$"
   ln -s "versions/${LEGACY_BUILD_ID}" "$MIGRATE_PREV_TMP"
-  mv -Tf "$MIGRATE_PREV_TMP" "${TARGET_CADCRAFT}/previous"
+  mv -Tf "$MIGRATE_PREV_TMP" "${TARGET_AXIALCAD}/previous"
 fi
 
 # -----------------------------------------------------------------------------
 # Atomic Activation: Update previous and current symlinks
 # -----------------------------------------------------------------------------
 OLD_CURRENT=""
-if [[ -L "${TARGET_CADCRAFT}/current" ]]; then
-  OLD_CURRENT="$(readlink "${TARGET_CADCRAFT}/current" 2>/dev/null || true)"
+if [[ -L "${TARGET_AXIALCAD}/current" ]]; then
+  OLD_CURRENT="$(readlink "${TARGET_AXIALCAD}/current" 2>/dev/null || true)"
 fi
 
 # Step 1: Update 'previous' symlink if different from target build
-if [[ -n "$OLD_CURRENT" && "$OLD_CURRENT" != "versions/${BUILD_ID}" && -d "${TARGET_CADCRAFT}/${OLD_CURRENT}" ]]; then
-  record_created_file "share/cadcraft/previous"
-  PREV_TMP="${TARGET_CADCRAFT}/previous.tmp.$$"
+if [[ -n "$OLD_CURRENT" && "$OLD_CURRENT" != "versions/${BUILD_ID}" && -d "${TARGET_AXIALCAD}/${OLD_CURRENT}" ]]; then
+  record_created_file "share/axialcad/previous"
+  PREV_TMP="${TARGET_AXIALCAD}/previous.tmp.$$"
   ln -s "$OLD_CURRENT" "$PREV_TMP"
-  mv -Tf "$PREV_TMP" "${TARGET_CADCRAFT}/previous"
+  mv -Tf "$PREV_TMP" "${TARGET_AXIALCAD}/previous"
 fi
 
 if [[ "${CADCRAFT_TEST_FAIL_AFTER_PREVIOUS:-0}" -eq 1 ]]; then
@@ -1296,24 +1467,34 @@ if [[ "${CADCRAFT_TEST_FAIL_AFTER_PREVIOUS:-0}" -eq 1 ]]; then
 fi
 
 # Step 2: Update 'current' symlink
-record_created_file "share/cadcraft/current"
-CURR_TMP="${TARGET_CADCRAFT}/current.tmp.$$"
+record_created_file "share/axialcad/current"
+CURR_TMP="${TARGET_AXIALCAD}/current.tmp.$$"
 ln -s "versions/${BUILD_ID}" "$CURR_TMP"
-mv -Tf "$CURR_TMP" "${TARGET_CADCRAFT}/current"
+mv -Tf "$CURR_TMP" "${TARGET_AXIALCAD}/current"
 
 # -----------------------------------------------------------------------------
 # Entry Symlinks: Stable pointers in TARGET_BIN
 # -----------------------------------------------------------------------------
-record_created_file "bin/cadcraft"
-BIN_TMP="${TARGET_BIN}/cadcraft.tmp.$$"
-ln -s "../share/cadcraft/current/bin/cadcraft" "$BIN_TMP"
-mv -Tf "$BIN_TMP" "${TARGET_BIN}/cadcraft"
+record_created_file "bin/axialcad"
+AXIAL_BIN_TMP="${TARGET_BIN}/axialcad.tmp.$$"
+ln -s "../share/axialcad/current/bin/axialcad" "$AXIAL_BIN_TMP"
+mv -Tf "$AXIAL_BIN_TMP" "${TARGET_BIN}/axialcad"
 
-if [[ -f "$TARGET_BUILD_DIR/bin/cadcraft-cli" || -f "$SRC_DIR/bin/cadcraft-cli" ]]; then
+record_created_file "bin/cadcraft"
+CAD_BIN_TMP="${TARGET_BIN}/cadcraft.tmp.$$"
+ln -s "axialcad" "$CAD_BIN_TMP"
+mv -Tf "$CAD_BIN_TMP" "${TARGET_BIN}/cadcraft"
+
+if [[ -f "$TARGET_BUILD_DIR/bin/axialcad-cli" || -f "$SRC_DIR/bin/axialcad-cli" || -f "$TARGET_BUILD_DIR/bin/cadcraft-cli" || -f "$SRC_DIR/bin/cadcraft-cli" ]]; then
+  record_created_file "bin/axialcad-cli"
+  CLI_AXIAL_TMP="${TARGET_BIN}/axialcad-cli.tmp.$$"
+  ln -s "../share/axialcad/current/bin/axialcad-cli" "$CLI_AXIAL_TMP"
+  mv -Tf "$CLI_AXIAL_TMP" "${TARGET_BIN}/axialcad-cli"
+
   record_created_file "bin/cadcraft-cli"
-  CLI_TMP="${TARGET_BIN}/cadcraft-cli.tmp.$$"
-  ln -s "../share/cadcraft/current/bin/cadcraft-cli" "$CLI_TMP"
-  mv -Tf "$CLI_TMP" "${TARGET_BIN}/cadcraft-cli"
+  CLI_CAD_TMP="${TARGET_BIN}/cadcraft-cli.tmp.$$"
+  ln -s "axialcad-cli" "$CLI_CAD_TMP"
+  mv -Tf "$CLI_CAD_TMP" "${TARGET_BIN}/cadcraft-cli"
 fi
 
 if [[ "${CADCRAFT_TEST_FAIL_AFTER_CURRENT:-0}" -eq 1 ]]; then
@@ -1325,23 +1506,27 @@ fi
 # Desktop Integration: Launcher, Icons, MIME, and Metainfo
 # -----------------------------------------------------------------------------
 INSTALLED_MANIFEST_FILES=(
+  "bin/axialcad"
   "bin/cadcraft"
-  "share/cadcraft/current"
+  "share/axialcad/current"
 )
-if [[ -L "${TARGET_CADCRAFT}/previous" ]]; then
-  INSTALLED_MANIFEST_FILES+=("share/cadcraft/previous")
+if [[ -L "${TARGET_AXIALCAD}/previous" ]]; then
+  INSTALLED_MANIFEST_FILES+=("share/axialcad/previous")
 fi
-if [[ -f "${TARGET_BIN}/cadcraft-cli" ]]; then
+if [[ -e "${TARGET_BIN}/axialcad-cli" || -L "${TARGET_BIN}/axialcad-cli" ]]; then
+  INSTALLED_MANIFEST_FILES+=("bin/axialcad-cli")
+fi
+if [[ -e "${TARGET_BIN}/cadcraft-cli" || -L "${TARGET_BIN}/cadcraft-cli" ]]; then
   INSTALLED_MANIFEST_FILES+=("bin/cadcraft-cli")
 fi
 
 DESKTOP_SRC="$SRC_DIR/share/applications/ai.storyteller.cadcraft.desktop"
 if [[ -f "$DESKTOP_SRC" ]]; then
-  DESKTOP_STAGE="${TARGET_CADCRAFT}/cadcraft.desktop.tmp.$$"
+  DESKTOP_STAGE="${TARGET_AXIALCAD}/cadcraft.desktop.tmp.$$"
   ESCAPED_PREFIX="${PREFIX//\"/\\\"}"
   sed \
-    -e "s|^Exec=.*|Exec=\"${ESCAPED_PREFIX}/bin/cadcraft\" %F|" \
-    -e "s|^TryExec=.*|TryExec=${ESCAPED_PREFIX}/bin/cadcraft|" \
+    -e "s|^Exec=.*|Exec=\"${ESCAPED_PREFIX}/bin/axialcad\" %F|" \
+    -e "s|^TryExec=.*|TryExec=${ESCAPED_PREFIX}/bin/axialcad|" \
     "$DESKTOP_SRC" > "$DESKTOP_STAGE"
 
   record_created_file "share/applications/ai.storyteller.cadcraft.desktop"
@@ -1385,18 +1570,18 @@ if [[ -d "$SRC_DIR/share/doc/cadcraft" ]]; then
 fi
 
 if [[ -f "$SRC_DIR/uninstall.sh" ]]; then
-  record_created_file "share/cadcraft/uninstall.sh"
-  install -m 755 "$SRC_DIR/uninstall.sh" "$TARGET_CADCRAFT/uninstall.sh"
-  INSTALLED_MANIFEST_FILES+=("share/cadcraft/uninstall.sh")
+  record_created_file "share/axialcad/uninstall.sh"
+  install -m 755 "$SRC_DIR/uninstall.sh" "$TARGET_AXIALCAD/uninstall.sh"
+  INSTALLED_MANIFEST_FILES+=("share/axialcad/uninstall.sh")
 fi
 if [[ -f "$SRC_DIR/install.sh" ]]; then
-  record_created_file "share/cadcraft/install.sh"
-  install -m 755 "$SRC_DIR/install.sh" "$TARGET_CADCRAFT/install.sh"
-  INSTALLED_MANIFEST_FILES+=("share/cadcraft/install.sh")
+  record_created_file "share/axialcad/install.sh"
+  install -m 755 "$SRC_DIR/install.sh" "$TARGET_AXIALCAD/install.sh"
+  INSTALLED_MANIFEST_FILES+=("share/axialcad/install.sh")
 fi
 
-record_created_file "share/cadcraft/version.env"
-cat > "$TARGET_CADCRAFT/version.env" <<EOF
+record_created_file "share/axialcad/version.env"
+cat > "$TARGET_AXIALCAD/version.env" <<EOF
 CADCRAFT_VERSION="$PKG_VERSION"
 CADCRAFT_BUILD_SHA="$PKG_SHA"
 CADCRAFT_BUILD_DATE="$PKG_DATE"
@@ -1405,7 +1590,7 @@ CADCRAFT_BUILD_ID="$BUILD_ID"
 CADCRAFT_INSTALL_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 CADCRAFT_PREFIX="$PREFIX"
 EOF
-INSTALLED_MANIFEST_FILES+=("share/cadcraft/version.env")
+INSTALLED_MANIFEST_FILES+=("share/axialcad/version.env")
 
 if [[ "${CADCRAFT_TEST_FAIL_AFTER_SHARED_RESOURCES:-0}" -eq 1 ]]; then
   echo "test injection: simulating failure after shared resources creation" >&2
@@ -1415,38 +1600,73 @@ fi
 # -----------------------------------------------------------------------------
 # Explicit build manifest entries (DO NOT sweep whole versions/ dir with find)
 # -----------------------------------------------------------------------------
-# 1. Retain accredited version files from prior manifest
 for prev_entry in "${PREVIOUS_MANAGED_FILES[@]}"; do
-  if [[ "$prev_entry" == share/cadcraft/versions/* ]]; then
-    INSTALLED_MANIFEST_FILES+=("$prev_entry")
+  if [[ "$prev_entry" == share/axialcad/versions/* || "$prev_entry" == share/cadcraft/versions/* ]]; then
+    trans_entry="${prev_entry/share\/cadcraft\/versions/share\/axialcad\/versions}"
+    INSTALLED_MANIFEST_FILES+=("$trans_entry")
   fi
 done
 
-# 2. Add files from this build manifest
 if [[ -f "$TARGET_BUILD_DIR/build-manifest.txt" ]]; then
   while read -r b_hash b_path; do
     [[ -z "$b_path" || "$b_hash" =~ ^# ]] && continue
-    INSTALLED_MANIFEST_FILES+=("share/cadcraft/versions/$BUILD_ID/$b_path")
+    INSTALLED_MANIFEST_FILES+=("share/axialcad/versions/$BUILD_ID/$b_path")
   done < "$TARGET_BUILD_DIR/build-manifest.txt"
-  INSTALLED_MANIFEST_FILES+=("share/cadcraft/versions/$BUILD_ID/build-manifest.txt")
+  [[ -L "$TARGET_BUILD_DIR/bin/cadcraft" ]] && INSTALLED_MANIFEST_FILES+=("share/axialcad/versions/$BUILD_ID/bin/cadcraft")
+  [[ -L "$TARGET_BUILD_DIR/bin/cadcraft-cli" ]] && INSTALLED_MANIFEST_FILES+=("share/axialcad/versions/$BUILD_ID/bin/cadcraft-cli")
+  INSTALLED_MANIFEST_FILES+=("share/axialcad/versions/$BUILD_ID/build-manifest.txt")
+fi
+
+if [[ -n "$MIGRATED_LEGACY_DIR" && -f "$MIGRATED_LEGACY_DIR/build-manifest.txt" ]]; then
+  while read -r b_hash b_path; do
+    [[ -z "$b_path" || "$b_hash" =~ ^# ]] && continue
+    INSTALLED_MANIFEST_FILES+=("share/axialcad/versions/${LEGACY_BUILD_ID}/$b_path")
+  done < "$MIGRATED_LEGACY_DIR/build-manifest.txt"
+  [[ -L "$MIGRATED_LEGACY_DIR/bin/cadcraft" ]] && INSTALLED_MANIFEST_FILES+=("share/axialcad/versions/${LEGACY_BUILD_ID}/bin/cadcraft")
+  [[ -L "$MIGRATED_LEGACY_DIR/bin/cadcraft-cli" ]] && INSTALLED_MANIFEST_FILES+=("share/axialcad/versions/${LEGACY_BUILD_ID}/bin/cadcraft-cli")
+  INSTALLED_MANIFEST_FILES+=("share/axialcad/versions/${LEGACY_BUILD_ID}/build-manifest.txt")
 fi
 
 # -----------------------------------------------------------------------------
 # Write Manifest
 # -----------------------------------------------------------------------------
-MANIFEST_TEMP="${TARGET_CADCRAFT}/manifest.tmp.$$"
+MANIFEST_TEMP="${TARGET_AXIALCAD}/manifest.tmp.$$"
 {
-  echo "# CADCraft installation manifest"
+  echo "# axialCAD installation manifest"
   echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "# Prefix: $PREFIX"
   echo "# Build ID: $BUILD_ID"
-  # Deduplicate manifest entries safely
   printf "%s\n" "${INSTALLED_MANIFEST_FILES[@]}" | sort -u
-  echo "share/cadcraft/install-manifest.txt"
+  echo "share/axialcad/install-manifest.txt"
 } > "$MANIFEST_TEMP"
-record_created_file "share/cadcraft/install-manifest.txt"
-install -m 644 "$MANIFEST_TEMP" "$TARGET_CADCRAFT/install-manifest.txt"
+record_created_file "share/axialcad/install-manifest.txt"
+install -m 644 "$MANIFEST_TEMP" "$TARGET_AXIALCAD/install-manifest.txt"
 rm -f "$MANIFEST_TEMP"
+
+# Clean up legacy cadcraft directory if migrated and empty
+if [[ -d "$TARGET_LEGACY_CADCRAFT" ]]; then
+  rm -f "${TARGET_LEGACY_CADCRAFT}/current" 2>/dev/null || true
+  rm -f "${TARGET_LEGACY_CADCRAFT}/previous" 2>/dev/null || true
+  rm -f "${TARGET_LEGACY_CADCRAFT}/install.sh" 2>/dev/null || true
+  rm -f "${TARGET_LEGACY_CADCRAFT}/uninstall.sh" 2>/dev/null || true
+  rm -f "${TARGET_LEGACY_CADCRAFT}/version.env" 2>/dev/null || true
+  rm -f "${TARGET_LEGACY_CADCRAFT}/install-manifest.txt" 2>/dev/null || true
+  rm -f "${TARGET_LEGACY_CADCRAFT}/.install.lock" 2>/dev/null || true
+  if [[ -d "${TARGET_LEGACY_CADCRAFT}/versions" ]]; then
+    (
+      cd "${TARGET_LEGACY_CADCRAFT}/versions" 2>/dev/null && \
+      find . -type f -o -type l | while IFS= read -r rel; do
+        rel="${rel#./}"
+        if [[ -e "${TARGET_VERSIONS}/${rel}" || -L "${TARGET_VERSIONS}/${rel}" ]]; then
+          rm -f "${TARGET_LEGACY_CADCRAFT}/versions/${rel}" 2>/dev/null || true
+        fi
+      done
+    )
+    find "${TARGET_LEGACY_CADCRAFT}/versions" -depth -type d -empty -delete 2>/dev/null || true
+    rmdir "${TARGET_LEGACY_CADCRAFT}/versions" 2>/dev/null || true
+  fi
+  rmdir "${TARGET_LEGACY_CADCRAFT}" 2>/dev/null || true
+fi
 
 refresh_desktop_databases
 
@@ -1454,7 +1674,7 @@ TRANSACTION_COMMITTED=1
 
 echo ""
 if [[ "$SAME_BUILD_EXISTS" -eq 1 && "$ALREADY_ACTIVE" -eq 1 ]]; then
-  echo "CADCraft build $BUILD_ID is already installed and active."
+  echo "axialCAD build $BUILD_ID is already installed and active."
   echo "Refreshed desktop integration, symlinks, and caches."
 else
   echo "Installation complete!"
@@ -1464,7 +1684,8 @@ echo "Files installed to: $PREFIX"
 echo ""
 echo "Desktop Integration:"
 echo "  - Application launcher: $TARGET_APPS/ai.storyteller.cadcraft.desktop"
-echo "  - Stable executable:    $PREFIX/bin/cadcraft"
+echo "  - Primary executable:   $PREFIX/bin/axialcad"
+echo "  - Compatibility link:   $PREFIX/bin/cadcraft"
 echo ""
 echo "Note on Desktop Menus:"
 echo "  Most modern desktop environments (GNOME, KDE, XFCE) update their application"
@@ -1477,17 +1698,17 @@ echo ""
 echo "Rollback:"
 echo "  To roll back to the previous version at any time:"
 if [[ "$PREFIX" == "${HOME}/.local" ]]; then
-  echo "  $PREFIX/share/cadcraft/install.sh --rollback"
+  echo "  $PREFIX/share/axialcad/install.sh --rollback"
 else
-  echo "  $PREFIX/share/cadcraft/install.sh --prefix \"$PREFIX\" --rollback"
+  echo "  $PREFIX/share/axialcad/install.sh --prefix \"$PREFIX\" --rollback"
 fi
 echo ""
 echo "Uninstallation:"
-echo "  To uninstall CADCraft cleanly (preserving personal drawings and configs):"
+echo "  To uninstall axialCAD cleanly (preserving personal drawings and configs):"
 if [[ "$PREFIX" == "${HOME}/.local" ]]; then
-  echo "  $PREFIX/share/cadcraft/uninstall.sh"
+  echo "  $PREFIX/share/axialcad/uninstall.sh"
 else
-  echo "  $PREFIX/share/cadcraft/uninstall.sh --prefix \"$PREFIX\""
+  echo "  $PREFIX/share/axialcad/uninstall.sh --prefix \"$PREFIX\""
 fi
 echo "=================================================================="
 

@@ -151,3 +151,133 @@ fn non_finite_query_inputs_return_no_hit() {
     assert!(hit(&d, Vec2::ZERO, f64::NAN, mode::INT).is_none());
     assert!(hit(&d, Vec2::new(f64::INFINITY, 0.0), 0.1, mode::INT).is_none());
 }
+
+fn add_wcs_line(d: &mut Drawing, a: Vec3, b: Vec3) {
+    d.add(&Space::Model, Common::default(), EntityKind::Line(Line { a, b })).unwrap();
+}
+
+#[test]
+fn projected_apparent_ray_uses_the_crossed_lines_depth_and_the_view_aperture() {
+    let mut d = Drawing::new_imperial();
+    let camera = cadcraft_geom::OrbitCamera { elevation: std::f64::consts::FRAC_PI_4, ..Default::default() };
+    let expected = Vec3::new(0.0, 4.0, 8.0);
+    add_wcs_line(&mut d, expected - Vec3::X * 5.0, expected + Vec3::X * 5.0);
+    let start = Vec3::new(0.0, 0.0, 30.0);
+    let toward = start - Vec3::Z;
+    let crossing = camera.project_point(expected);
+    let query = |offset, aperture, from, to| {
+        snap::projected_apparent_line_intersection(&d, &Space::Model, &camera, crossing + Vec2::new(offset, 0.0), aperture, from, to)
+    };
+    assert!(query(0.126, 0.125, start, toward).is_none());
+    let hit = query(0.124, 0.125, start, toward).unwrap();
+    assert_eq!(hit.mode, mode::APP);
+    let point = hit.point3.unwrap();
+    assert!(point.near(expected, 1e-9));
+    assert!(camera.project_point(point).near(camera.project_point(Vec3::new(0.0, 0.0, 12.0)), 1e-9));
+    assert_eq!(hit.input(), cadcraft_engine::Input::Point3(point));
+    let edge = crossing + Vec2::new(0.125, 0.0);
+    let aperture = edge.dist(camera.project_point(point));
+    assert!(query(0.125, aperture + 1e-12, start, toward).is_some());
+    assert!(query(0.0, 0.125, start, start + Vec3::Z).is_none(), "crossing is behind the ray");
+}
+
+#[test]
+fn projected_horizontal_ray_crosses_a_horizontal_target_in_an_oblique_view() {
+    use cadcraft_geom::OrbitCamera;
+
+    let camera = OrbitCamera { elevation: std::f64::consts::FRAC_PI_4, ..OrbitCamera::default() };
+    let mut d = Drawing::new_imperial();
+    let start = Vec3::new(-5.0, 0.0, 10.0);
+    let expected = Vec3::new(0.0, 2.0, 8.0);
+    add_wcs_line(&mut d, expected - Vec3::Y * 5.0, expected + Vec3::Y * 5.0);
+    let crossing = camera.project_point(expected);
+    let hit = snap::projected_apparent_line_intersection(&d, &Space::Model, &camera, crossing, 0.125, start, start + Vec3::X).unwrap();
+    let endpoint = hit.point3.unwrap();
+    assert!(endpoint.near(expected, 1e-9));
+    assert!(camera.project_point(endpoint).near(camera.project_point(Vec3::new(0.0, 0.0, 10.0)), 1e-9));
+}
+
+#[test]
+fn projected_horizontal_ray_crosses_a_perpendicular_target_in_plan() {
+    use cadcraft_geom::OrbitCamera;
+
+    let camera = OrbitCamera::default();
+    let mut d = Drawing::new_imperial();
+    let start = Vec3::new(-5.0, 0.0, 10.0);
+    let expected = Vec3::new(0.0, 0.0, 10.0);
+    add_wcs_line(&mut d, expected - Vec3::Y, expected + Vec3::Y);
+    let crossing = camera.project_point(expected);
+    let hit = snap::projected_apparent_line_intersection(&d, &Space::Model, &camera, crossing, 0.125, start, start + Vec3::X).unwrap();
+    assert!(hit.point3.unwrap().near(expected, 1e-9));
+}
+
+#[test]
+fn projected_ray_ignores_parallel_and_collinear_targets_and_crosses_no_pairs_of_existing_lines() {
+    use cadcraft_geom::OrbitCamera;
+
+    let camera = OrbitCamera::default();
+    let start = Vec3::new(-5.0, 0.0, 10.0);
+    let cursor = camera.project_point(Vec3::new(0.0, 0.0, 10.0));
+    for offset in [0.0, 0.05] {
+        let mut d = Drawing::new_imperial();
+        add_wcs_line(&mut d, Vec3::new(-1.0, offset, 10.0), Vec3::new(1.0, offset, 10.0));
+        assert!(snap::projected_apparent_line_intersection(&d, &Space::Model, &camera, cursor, 0.125, start, start + Vec3::X).is_none());
+    }
+
+    let mut d = Drawing::new_imperial();
+    add_wcs_line(&mut d, Vec3::new(-1.0, 0.0, 8.0), Vec3::new(1.0, 0.0, 8.0));
+    add_wcs_line(&mut d, Vec3::new(0.0, -1.0, 12.0), Vec3::new(0.0, 1.0, 12.0));
+    let away = start + Vec3::Y * 2.0;
+    assert!(snap::projected_apparent_line_intersection(&d, &Space::Model, &camera, cursor, 0.125, away, away + Vec3::X).is_none());
+}
+
+#[test]
+fn projected_apparent_ray_rejects_parallel_directions_and_crossings_beyond_the_target_segment() {
+    let mut d = Drawing::new_imperial();
+    let camera = cadcraft_geom::OrbitCamera { elevation: std::f64::consts::FRAC_PI_4, ..Default::default() };
+    let start = Vec3::new(0.0, 0.0, 30.0);
+    let crossing = camera.project_point(Vec3::new(0.0, 0.0, 12.0));
+    add_wcs_line(&mut d, Vec3::new(0.001, 4.0, 8.0), Vec3::new(5.0, 4.0, 8.0));
+    let query = |doc: &Drawing, direction: Vec3| {
+        snap::projected_apparent_line_intersection(doc, &Space::Model, &camera, crossing, 0.125, start, start + direction)
+    };
+    assert!(query(&d, -Vec3::Z).is_none(), "APP targets the existing segment");
+    add_wcs_line(&mut d, Vec3::new(-1.0, 4.0, 8.0), Vec3::new(1.0, 4.0, 8.0));
+    assert!(query(&d, camera.view_dir() + Vec3::X * 1e-6).is_none(), "ray nearly parallel to the view");
+    let mut d = Drawing::new_imperial();
+    add_wcs_line(&mut d, Vec3::new(-1e-6, 4.0, 5.0), Vec3::new(1e-6, 4.0, 11.0));
+    assert!(query(&d, -Vec3::Z).is_none(), "nearly parallel projected lines");
+}
+
+#[test]
+#[ignore = "manual timing in an optimized build"]
+fn projected_app_pointer_query_cost() {
+    use cadcraft_geom::OrbitCamera;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    let camera = OrbitCamera::default();
+    const MOVES: u32 = 256;
+    for count in [1_000, 10_000, 100_000] {
+        for dense in [false, true] {
+            let mut d = Drawing::new_imperial();
+            for n in 0..count {
+                let offset = if dense { f64::from(n) / f64::from(count) * 0.1 } else { f64::from(n / 2) };
+                let z = 10.0 + f64::from(n % 16);
+                let (a, b) = if n % 2 == 0 {
+                    (Vec3::new(-1.0, offset, z), Vec3::new(1.0, offset, z))
+                } else {
+                    (Vec3::new(offset, -1.0, z), Vec3::new(offset, 1.0, z))
+                };
+                add_wcs_line(&mut d, a, b);
+            }
+            let start = Instant::now();
+            for step in 0..MOVES {
+                let cursor = Vec2::new(f64::from(step) / f64::from(MOVES) * 0.1, 0.0);
+                let start = Vec3::new(cursor.x, -1.0, 0.0);
+                black_box(snap::projected_apparent_line_intersection(black_box(&d), &Space::Model, &camera, cursor, 0.125, start, start + Vec3::Y));
+            }
+            eprintln!("{count} lines, dense={dense}: {:?}/pointer query (mean)", start.elapsed() / MOVES);
+        }
+    }
+}

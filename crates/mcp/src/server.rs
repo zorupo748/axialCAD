@@ -15,7 +15,7 @@ const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
-const INSTRUCTIONS: &str = "CADCraft is a 2D/3D CAD drafting app (an AutoCAD clone). Coordinates are drawing units, \
+const INSTRUCTIONS: &str = "axialCAD is a 2D/3D CAD drafting app (an AutoCAD clone). Coordinates are drawing units, \
 y up. Fastest path: command_line with AutoCAD syntax, e.g. `line 0,0 10,0 10,5 c`, `circle 5,2.5 1`, \
 `rectang 0,0 4,3`, `offset 1` then pick, `zoom e`. Or execute with JSON (list_commands shows ids and params). \
 Verify with inspect_drawing / query_entities and look with render.";
@@ -23,6 +23,7 @@ Verify with inspect_drawing / query_entities and look with render.";
 pub struct Server {
     backend: Box<dyn Backend>,
     initialized: bool,
+    read_only: bool,
 }
 
 fn response(id: Value, result: Value) -> Value {
@@ -34,7 +35,14 @@ fn error(id: Value, code: i64, message: impl Into<String>) -> Value {
 
 impl Server {
     pub fn new(backend: Box<dyn Backend>) -> Self {
-        Self { backend, initialized: false }
+        Self { backend, initialized: false, read_only: false }
+    }
+    pub fn read_only(mut self, ro: bool) -> Self {
+        self.read_only = ro;
+        self
+    }
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
     pub fn backend(&mut self) -> &mut dyn Backend {
         self.backend.as_mut()
@@ -101,19 +109,20 @@ impl Server {
             "initialize" => {
                 let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION);
                 let version = if SUPPORTED.contains(&asked) { asked } else { PROTOCOL_VERSION };
+                let ro_desc = if self.read_only { " (read-only mode active)" } else { "" };
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}, "resources": {"listChanged": false}},
-                    "serverInfo": {"name": "cadcraft", "title": "CADCraft", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": format!("{INSTRUCTIONS} Backend: {}.", self.backend.describe()),
+                    "serverInfo": {"name": "cadcraft", "title": "axialCAD", "version": env!("CARGO_PKG_VERSION")},
+                    "instructions": format!("{INSTRUCTIONS} Backend: {}.{ro_desc}", self.backend.describe()),
                 }))
             }
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(tool_definitions(self.backend.has_ui())),
+            "tools/list" => Ok(tool_definitions(self.backend.has_ui(), self.read_only)),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing tool `name`".to_string()))?;
                 let args = params.get("arguments").unwrap_or(&Value::Null);
-                call_tool(self.backend.as_mut(), name, args).map_err(|m| (INVALID_PARAMS, m))
+                call_tool(self.backend.as_mut(), name, args, self.read_only).map_err(|m| (INVALID_PARAMS, m))
             }
             "resources/list" => Ok(json!({"resources": [
                 {"uri": "cadcraft://drawing", "name": "Active drawing", "mimeType": "application/json"},

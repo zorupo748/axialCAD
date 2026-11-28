@@ -28,8 +28,29 @@ pub use mtext::{MTextColor, MTextLayout, MTextParams, MTextPiece, layout_mtext, 
 mod craft_fonts;
 pub use craft_fonts::{CRAFT_FONTS, CraftFont};
 
-/// Name of the built-in font.
+/// Name of the built-in font (internal canonical identifier).
 pub const BUILTIN_FONT: &str = "CADCraft Stroke";
+
+/// User-facing display name of the built-in font.
+pub const DISPLAY_BUILTIN_FONT: &str = "axialCAD Stroke";
+
+/// Format a font name for user-facing display.
+pub fn display_font_name(name: &str) -> &str {
+    if name.eq_ignore_ascii_case(BUILTIN_FONT) || name.eq_ignore_ascii_case(DISPLAY_BUILTIN_FONT) {
+        DISPLAY_BUILTIN_FONT
+    } else {
+        name
+    }
+}
+
+/// Normalize any input font name or alias to its canonical internal name.
+pub fn canonical_font_name(name: &str) -> &str {
+    if name.eq_ignore_ascii_case(DISPLAY_BUILTIN_FONT) || name.eq_ignore_ascii_case(BUILTIN_FONT) {
+        BUILTIN_FONT
+    } else {
+        name
+    }
+}
 
 /// One laid-out run of text: strokes in local coordinates (baseline at y = 0, x from 0).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -289,7 +310,7 @@ impl TextFont {
             return TextFont::Outline(f);
         }
         let n = name.trim();
-        if n.is_empty() || n.eq_ignore_ascii_case(BUILTIN_FONT) {
+        if n.is_empty() || n.eq_ignore_ascii_case(BUILTIN_FONT) || n.eq_ignore_ascii_case(DISPLAY_BUILTIN_FONT) {
             return TextFont::Stroke;
         }
         ttf::find(&ttf::font_alt()).map(TextFont::Outline).unwrap_or(TextFont::Stroke)

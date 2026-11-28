@@ -32,6 +32,7 @@ fn covers(g: &DimGeometry, role: LineRole, y: f64, x: f64) -> bool {
 #[test]
 fn dimedit_modes() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let h = linear(&mut s);
     s.execute("dimedit", &json!({ "handles": [h], "mode": "new", "text": "<> TYP" })).unwrap();
     assert_eq!(dim_of(&s, &h).1.value, "10.0000 TYP");
@@ -92,6 +93,7 @@ fn dimedit_prompts() {
 #[test]
 fn jogged_radius() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     s.execute("circle", &json!({ "center": [0, 0], "radius": 50 })).unwrap();
     let c = s.doc().unwrap().model.last().unwrap().handle.hex();
     let r = s.execute("dimjogged", &json!({ "handle": c, "centerOverride": [20, -10], "at": [40, 40], "jog": [30, 15] })).unwrap();
@@ -132,6 +134,7 @@ fn jogged_radius() {
 #[test]
 fn jogged_linear() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let h = linear(&mut s);
     s.execute("dimjogline", &json!({ "handle": h, "at": [2, 3] })).unwrap();
     let (dm, g) = dim_of(&s, &h);
@@ -203,6 +206,7 @@ fn breaks() {
 #[test]
 fn inspection_dimensions() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let h = linear(&mut s);
     s.execute("diminspect", &json!({ "handles": [h], "label": "A", "rate": "50%" })).unwrap();
     let (dm, g) = dim_of(&s, &h);

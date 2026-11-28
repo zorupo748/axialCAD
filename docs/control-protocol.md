@@ -1,4 +1,4 @@
-# CADCraft control protocol
+# axialCAD control protocol
 
 Start the desktop app with `--control PORT` (or `CADCRAFT_CONTROL_PORT=PORT`). It listens on
 `127.0.0.1:PORT` for JSON lines: one request per line, one reply per line. A port given with

@@ -243,3 +243,212 @@ fn pasteclip_remaps_mleader_nested_in_a_copied_block() {
     assert_eq!(line_end_x(d.block(&nested).unwrap()), Some(1.0));
     assert_eq!(line_end_x(d.block("*U1").unwrap()), Some(100.0));
 }
+
+#[test]
+fn copybase_acceptance_a_same_drawing_rect_corner_exact_offset() {
+    let mut s = Session::new();
+    s.cmdline("RECTANG 10,20 50,40").unwrap();
+    let orig_h = s.doc().unwrap().model.iter().next().unwrap().handle;
+
+    // COPYBASE with base at corner (10, 20, 0)
+    s.execute("copybase", &json!({ "handles": [orig_h.hex()], "base": [10.0, 20.0, 0.0] })).unwrap();
+    assert_eq!(s.clipboard_base, Vec3::new(10.0, 20.0, 0.0));
+
+    // PASTECLIP at (100, 200, 0)
+    let res = s.execute("pasteclip", &json!({ "at": [100.0, 200.0, 0.0] })).unwrap();
+    let new_h_hex = res["handles"][0].as_str().unwrap();
+    let new_h = cadcraft_doc::Handle::parse_hex(new_h_hex).unwrap();
+
+    // Original must remain untouched at (10, 20) -> (50, 40)
+    let doc = s.doc().unwrap();
+    let orig_e = doc.entity(orig_h).unwrap();
+    let EntityKind::LwPolyline(orig_poly) = &orig_e.kind else { panic!("expected polyline") };
+    assert_eq!(orig_poly.vertices[0].p, cadcraft_geom::Vec2::new(10.0, 20.0));
+
+    // Pasted entity must be shifted exactly by (90, 180, 0)
+    let new_e = doc.entity(new_h).unwrap();
+    let EntityKind::LwPolyline(new_poly) = &new_e.kind else { panic!("expected polyline") };
+    assert_eq!(new_poly.vertices[0].p, cadcraft_geom::Vec2::new(100.0, 200.0));
+    assert_eq!(new_poly.vertices[2].p, cadcraft_geom::Vec2::new(140.0, 220.0));
+}
+
+#[test]
+fn copybase_acceptance_b_between_drawings_preserves_base() {
+    let mut s = Session::empty();
+    let d1 = s.new_drawing(false);
+    s.cmdline("LINE 0,0 20,10").unwrap();
+    let l_h = s.doc().unwrap().model.iter().next().unwrap().handle;
+
+    s.execute("copybase", &json!({ "handles": [l_h.hex()], "base": [5.0, 2.5, 0.0] })).unwrap();
+    assert_eq!(s.clipboard_base, Vec3::new(5.0, 2.5, 0.0));
+
+    // Open second drawing
+    let _d2 = s.new_drawing(false);
+    assert_ne!(s.active, d1);
+    assert_eq!(s.doc().unwrap().model.len(), 0);
+
+    // Paste into second drawing at (50, 50, 0)
+    let res = s.execute("pasteclip", &json!({ "at": [50.0, 50.0, 0.0] })).unwrap();
+    let pasted_h = cadcraft_doc::Handle::parse_hex(res["handles"][0].as_str().unwrap()).unwrap();
+
+    let doc = s.doc().unwrap();
+    let e = doc.entity(pasted_h).unwrap();
+    let EntityKind::Line(l) = &e.kind else { panic!("expected line") };
+    // Displacement is (50, 50) - (5, 2.5) = (45, 47.5)
+    // l.a was (0, 0) -> (45, 47.5)
+    // l.b was (20, 10) -> (65, 57.5)
+    assert_eq!(l.a, Vec3::new(45.0, 47.5, 0.0));
+    assert_eq!(l.b, Vec3::new(65.0, 57.5, 0.0));
+}
+
+#[test]
+fn copybase_acceptance_c_preselection_and_postselection() {
+    let mut s = Session::new();
+    s.cmdline("LINE 0,0 10,0").unwrap();
+    s.cmdline("LINE 10,0 10,10").unwrap();
+    let handles: Vec<_> = s.doc().unwrap().model.iter().map(|e| e.handle).collect();
+
+    // 1. Pickfirst preselection workflow
+    s.set_selection(vec![handles[0]]);
+    s.start("copybase").unwrap();
+    assert!(s.prompt_text().contains("Specify base point"));
+    s.input(crate::Input::Point(cadcraft_geom::Vec2::new(0.0, 0.0))).unwrap();
+    assert!(s.running.is_none(), "preselection ends prompt immediately on base point input");
+    assert_eq!(s.clipboard.len(), 1);
+    assert_eq!(s.clipboard[0].handle, handles[0]);
+
+    // 2. Post-selection workflow (no preselection)
+    s.set_selection(Vec::new());
+    s.start("copybase").unwrap();
+    assert!(s.prompt_text().contains("Specify base point"));
+    s.input(crate::Input::Point(cadcraft_geom::Vec2::new(10.0, 0.0))).unwrap();
+    assert!(s.prompt_text().contains("Select objects"));
+    s.input(crate::Input::Pick(vec![handles[1]])).unwrap();
+    s.input(crate::Input::Enter).unwrap();
+    assert!(s.running.is_none());
+    assert_eq!(s.clipboard.len(), 1);
+    assert_eq!(s.clipboard[0].handle, handles[1]);
+    assert_eq!(s.clipboard_base, Vec3::new(10.0, 0.0, 0.0));
+}
+
+#[test]
+fn copybase_acceptance_d_cancel_and_empty_selection_safeguard() {
+    let mut s = Session::new();
+    s.cmdline("LINE 0,0 10,0").unwrap();
+    let l_h = s.doc().unwrap().model.iter().next().unwrap().handle;
+    s.execute("copybase", &json!({ "handles": [l_h.hex()], "base": [1.0, 2.0, 3.0] })).unwrap();
+    assert_eq!(s.clipboard_base, Vec3::new(1.0, 2.0, 3.0));
+    assert_eq!(s.clipboard.len(), 1);
+
+    // Cancel on base point prompt: clipboard remains untouched
+    s.start("copybase").unwrap();
+    s.input(crate::Input::Cancel).unwrap();
+    assert!(s.running.is_none());
+    assert_eq!(s.clipboard_base, Vec3::new(1.0, 2.0, 3.0));
+    assert_eq!(s.clipboard.len(), 1);
+
+    // Empty selection on post-selection prompt: clipboard remains untouched
+    s.start("copybase").unwrap();
+    s.input(crate::Input::Point(cadcraft_geom::Vec2::new(99.0, 99.0))).unwrap();
+    s.input(crate::Input::Enter).unwrap(); // empty selection
+    assert!(s.running.is_none());
+    assert_eq!(s.clipboard_base, Vec3::new(1.0, 2.0, 3.0), "clipboard base preserved on empty selection");
+    assert_eq!(s.clipboard.len(), 1, "clipboard objects preserved on empty selection");
+}
+
+#[test]
+fn copybase_acceptance_e_repeated_pasting_to_multiple_destinations() {
+    let mut s = Session::new();
+    s.cmdline("CIRCLE 0,0 5").unwrap();
+    let c_h = s.doc().unwrap().model.iter().next().unwrap().handle;
+
+    s.execute("copybase", &json!({ "handles": [c_h.hex()], "base": [0.0, 0.0, 0.0] })).unwrap();
+
+    // Paste 1
+    let r1 = s.execute("pasteclip", &json!({ "at": [10.0, 20.0, 0.0] })).unwrap();
+    // Paste 2
+    let r2 = s.execute("pasteclip", &json!({ "at": [30.0, 40.0, 0.0] })).unwrap();
+
+    let h1 = cadcraft_doc::Handle::parse_hex(r1["handles"][0].as_str().unwrap()).unwrap();
+    let h2 = cadcraft_doc::Handle::parse_hex(r2["handles"][0].as_str().unwrap()).unwrap();
+
+    let doc = s.doc().unwrap();
+    let EntityKind::Circle(c1) = &doc.entity(h1).unwrap().kind else { panic!() };
+    let EntityKind::Circle(c2) = &doc.entity(h2).unwrap().kind else { panic!() };
+
+    assert_eq!(c1.center, Vec3::new(10.0, 20.0, 0.0));
+    assert_eq!(c2.center, Vec3::new(30.0, 40.0, 0.0));
+    assert_eq!(c1.radius, 5.0);
+    assert_eq!(c2.radius, 5.0);
+}
+
+#[test]
+fn copybase_acceptance_f_spatial_nonzero_z_and_inclined_ucs() {
+    let mut s = Session::new();
+    // 3DPOLY line in space
+    s.execute("3dpoly", &json!({ "points": [[0.0, 0.0, 10.0], [10.0, 20.0, 30.0]] })).unwrap();
+    let h3d = s.doc().unwrap().model.iter().next().unwrap().handle;
+    let orig = s.doc().unwrap().entity(h3d).unwrap();
+    let EntityKind::Polyline3d(orig_p) = &orig.kind else { panic!("expected polyline3d") };
+    assert_eq!(orig_p.points[0], Vec3::new(0.0, 0.0, 10.0));
+    assert_eq!(orig_p.points[1], Vec3::new(10.0, 20.0, 30.0));
+
+    // COPYBASE with 3D base point with non-zero Z: (0, 0, 10)
+    s.execute("copybase", &json!({ "handles": [h3d.hex()], "base": [0.0, 0.0, 10.0] })).unwrap();
+    assert_eq!(s.clipboard_base, Vec3::new(0.0, 0.0, 10.0));
+
+    // Set an inclined UCS: origin at (100, 100, 50), tilted
+    s.cmdline("ucs 3 100,100,50 101,100,50 100,100,51").unwrap();
+
+    // In this UCS, point (0, 0, 0) corresponds to WCS (100, 100, 50)
+    // Run interactive pasteclip providing Point3 in WCS
+    s.start("pasteclip").unwrap();
+    s.input(crate::Input::Point3(Vec3::new(100.0, 100.0, 50.0))).unwrap();
+
+    let doc = s.doc().unwrap();
+    let pasted_e = doc.model.iter().last().unwrap();
+    let EntityKind::Polyline3d(p) = &pasted_e.kind else { panic!("expected polyline3d") };
+
+    // Delta is (100, 100, 50) - (0, 0, 10) = (100, 100, 40)
+    // Original pt0: (0, 0, 10) -> (100, 100, 50)
+    // Original pt1: (10, 20, 30) -> (110, 120, 70)
+    assert_eq!(p.points[0], Vec3::new(100.0, 100.0, 50.0));
+    assert_eq!(p.points[1], Vec3::new(110.0, 120.0, 70.0));
+}
+
+#[test]
+fn copybase_acceptance_h_solid3d_retains_solid3d_recipe_and_volume() {
+    let mut s = Session::new();
+    s.cmdline("RECTANG 0,0 40,30").unwrap();
+    s.cmdline("EXTRUDE ALL  5").unwrap();
+
+    let solid_h = s.doc().unwrap().model.iter().last().unwrap().handle;
+    let orig_e = s.doc().unwrap().entity(solid_h).unwrap();
+    let EntityKind::Solid3d(orig_solid) = &orig_e.kind else { panic!("expected solid3d") };
+    let orig_eval = cadcraft_brep::BrepSolid::evaluate_solid(orig_solid).unwrap();
+    let orig_vol = orig_eval.volume().unwrap();
+    assert!((orig_vol - 6000.0).abs() < 1e-2);
+
+    // COPYBASE with base at corner (0, 0, 0)
+    s.execute("copybase", &json!({ "handles": [solid_h.hex()], "base": [0.0, 0.0, 0.0] })).unwrap();
+    assert_eq!(s.clipboard_base, Vec3::new(0.0, 0.0, 0.0));
+
+    // PASTECLIP shifted in X, Y, Z: at (100, 50, 25)
+    let res = s.execute("pasteclip", &json!({ "at": [100.0, 50.0, 25.0] })).unwrap();
+    let pasted_h = cadcraft_doc::Handle::parse_hex(res["handles"][0].as_str().unwrap()).unwrap();
+
+    let doc = s.doc().unwrap();
+    let pasted_e = doc.entity(pasted_h).unwrap();
+    let EntityKind::Solid3d(pasted_solid) = &pasted_e.kind else {
+        panic!("pasted solid must remain Solid3d and not degrade to loose faces");
+    };
+
+    // Evaluated B-Rep volume must be identical
+    let pasted_eval = cadcraft_brep::BrepSolid::evaluate_solid(pasted_solid).unwrap();
+    let pasted_vol = pasted_eval.volume().unwrap();
+    assert!((pasted_vol - 6000.0).abs() < 1e-2);
+
+    // Bounding box must be exactly translated
+    assert_eq!(pasted_solid.bbox.min, Vec3::new(100.0, 50.0, 25.0));
+    assert_eq!(pasted_solid.bbox.max, Vec3::new(140.0, 80.0, 30.0));
+}

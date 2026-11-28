@@ -287,6 +287,7 @@ fn setvar_rejects_an_oversized_shared_structure() {
 #[test]
 fn printing() {
     let mut s = session();
+    let _ = s.new_drawing(false);
     let before = s.log.len();
     ok(&mut s, "(princ \"Hello\") (princ \" world\\n\") (prin1 \"q\") (terpri) (print 3) (princ)");
     let out: Vec<_> = s.log[before..].to_vec();

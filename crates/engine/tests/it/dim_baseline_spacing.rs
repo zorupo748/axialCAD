@@ -17,6 +17,7 @@ fn dim_line_y(s: &Session, h: &Value) -> f64 {
 /// Spacing between a horizontal dimension with its line at y = 5 and the baseline one after it.
 fn baseline_spacing(setup: &[(&str, Value)]) -> f64 {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     for (cmd, p) in setup {
         s.execute(cmd, p).unwrap();
     }
@@ -39,6 +40,7 @@ fn baseline_spacing_follows_overrides_and_dimscale() {
 
     // DIMSPACE's default spacing (twice DIMDLI) uses the same scale.
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     s.execute("dimstyle", &json!({"name": "Standard", "DIMSCALE": 0})).unwrap();
     let a = s.execute("dimlinear", &json!({"p1": [0, 0], "p2": [30, 0], "at": [15, 5]})).unwrap();
     let b = s.execute("dimlinear", &json!({"p1": [0, 0], "p2": [50, 0], "at": [25, 6]})).unwrap();

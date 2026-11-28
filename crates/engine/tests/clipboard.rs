@@ -85,7 +85,7 @@ fn paste_into_another_drawing_brings_layers_and_blocks() {
     s.execute("copyclip", &json!({ "handles": handles(&s) })).unwrap();
     assert_eq!(s.clipboard.len(), 2);
     // The base point is the lower-left corner of the copied objects (the wall starts at 10,20).
-    assert_eq!(s.clipboard_base, Vec2::new(10.0, 20.0));
+    assert_eq!(s.clipboard_base, Vec3::new(10.0, 20.0, 0.0));
 
     s.active = b;
     let before: Vec<Handle> = s.doc().unwrap().model.iter().map(|e| e.handle).collect();
@@ -206,7 +206,7 @@ fn clipboard_travels_as_text() {
     assert!(t.clipboard.is_empty());
     assert!(clipboard::load_system_text(&mut t, &text));
     assert_eq!(t.clipboard.len(), 2);
-    assert_eq!(t.clipboard_base, Vec2::new(10.0, 0.0));
+    assert_eq!(t.clipboard_base, Vec3::new(10.0, 0.0, 0.0));
     t.execute("pasteorig", &json!({})).unwrap();
     assert_eq!(t.doc().unwrap().model.len(), 2);
     assert!(t.doc().unwrap().block("DOOR").is_some() && t.doc().unwrap().layer("HINGE").is_some());

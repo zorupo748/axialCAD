@@ -644,6 +644,7 @@ fn arraypath_json_and_command_line() {
 #[test]
 fn textedit_json_and_command_line() {
     let mut s = Session::new();
+    let _ = s.new_drawing(false);
     let t = h(&s.execute("text", &json!({"at": [0, 0], "text": "old"})).unwrap());
     s.execute("textedit", &json!({"handle": t, "text": "new"})).unwrap();
     assert!(matches!(kind(&s, &t), EntityKind::Text(x) if x.value == "new"));

@@ -114,6 +114,7 @@ impl GetRequest {
                 (GetKind::EntSel, Some(h)) => Ok(Value::list(vec![Value::Ename(*h), Value::point(&[s.last_point.x, s.last_point.y, 0.0])])),
                 _ => Err("Invalid point.".into()),
             },
+            Input::EntityPoint { .. } => Err("Invalid point.".into()),
             Input::Text(t) => self.text(s, &t),
             Input::Cancel => Err("*Cancel*".into()),
         }
