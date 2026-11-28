@@ -1,6 +1,6 @@
 # Geometry parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-22 · **Change:** minor (bounded constraint expression and parameter depth) · **Target:** Autodesk AutoCAD 2027
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-28 · **Change:** minor (TRIM endpoint contacts) · **Target:** Autodesk AutoCAD 2027
 
 CAD users trust numbers: a trimmed endpoint, an offset, an intersection or an area is either right
 to the last displayed digit or the tool is unusable for production drawings. This document
@@ -84,7 +84,8 @@ to direct EXTEND of lines, including JSON handle-and-pick calls. A vertical line
 three-coordinate JSON pick. In None, lines, circles, arcs, rays, construction lines,
 polyline segments, horizontal ellipses and planar splines can supply WCS cutting edges.
 Contact allows 2e-5 of the local operand size, bounded between 1e-8 and 1e-2 drawing
-units. Window, Crossing, Fence and arc EXTEND
+units. A line or arc bounded by cutting edges at both endpoints can be removed as a
+whole when it has no interior cut. Window, Crossing, Fence and arc EXTEND
 still use WCS XY, even in None. Direct edits of other target types retain their planar
 algorithms. Direct circle and arc targets still require world-Z extrusion.
 
@@ -167,6 +168,7 @@ Total ≈ 90–140 h; items 1–6 parallelise across two or three agents.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-28 | minor | Successive TRIM cuts can remove lines and arcs bounded at both endpoints in None projection. Very short arcs require distinct contacts at their endpoints. |
 | 2026-10-22 | minor | Constraint expressions count operator chains toward the syntax-tree depth limit; evaluation shares one depth limit across operators and parameter references, with a 1 MiB-stack regression (#1936) |
 | 2026-10-14 | trivial | JOIN Close: a single arc becomes its circle, a single elliptical arc its full ellipse (#1175) |
 | 2026-10-12 | trivial | TRIM on a closed polyline keeps only the complementary run when the pick lies past the last cut (#726) |
