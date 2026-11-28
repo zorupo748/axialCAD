@@ -1114,3 +1114,286 @@ fn explicit_crossing_keyword_forces_crossing_regardless_of_drag_direction() {
         "explicit Crossing keyword forces crossing trim even when dragging to the right");
 }
 
+#[test]
+fn extend_preview_shows_added_segment_without_mutating_drawing() {
+    let mut s = Session::new();
+    s.cmdline("LINE 0,0 5,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 10,-5 10,5").unwrap();
+    s.cmdline("").unwrap();
+
+    let doc_before = s.doc().unwrap().clone();
+    s.cmdline("EXTEND").unwrap();
+
+    // Hover near the right end of the line (e.g. at (4, 0))
+    let p = s.preview(cadcraft_geom::Vec2::new(4.0, 0.0));
+    assert_eq!(p.len(), 1, "preview must produce exactly the added segment");
+    assert_eq!(p[0].common.linetype, "DASHED");
+
+    if let EntityKind::Line(l) = &p[0].kind {
+        assert!((l.a.x - 5.0).abs() < 1e-4 && (l.a.y - 0.0).abs() < 1e-4);
+        assert!((l.b.x - 10.0).abs() < 1e-4 && (l.b.y - 0.0).abs() < 1e-4);
+    } else {
+        panic!("expected Line kind in extend preview, got {:?}", p[0].kind);
+    }
+
+    // Ensure document and model remain unchanged during preview
+    assert_eq!(s.doc().unwrap().model.len(), doc_before.model.len());
+}
+
+#[test]
+fn extend_and_trim_shift_toggle_at_pick() {
+    let mut s = Session::new();
+    // Horizontal line 0,0 to 5,0; boundary line at x=10
+    s.cmdline("LINE 0,0 5,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 10,-5 10,5").unwrap();
+    s.cmdline("").unwrap();
+
+    // 1. EXTEND without shift: pick extends to x=10
+    s.cmdline("EXTEND").unwrap();
+    s.shift_down = false;
+    s.cmdline("4,0").unwrap();
+    s.cmdline("").unwrap();
+    let l_ext = lines(&s);
+    assert!(l_ext.contains(&((0.0, 0.0), (10.0, 0.0))), "extended to 10");
+
+    // 2. EXTEND with shift_down = true: pick TRIMS back!
+    s.cmdline("EXTEND").unwrap();
+    s.shift_down = true;
+    s.cmdline("8,0").unwrap();
+    s.cmdline("").unwrap();
+    assert_eq!(lines(&s).len(), 1, "shifting to trim in EXTEND cut the line");
+}
+
+#[test]
+fn trim_history_undo_semantics_single_session_vs_internal_u() {
+    // Test A: Single interactive TRIM session with 2 cuts -> ONE global undo step
+    let mut s = Session::new();
+    s.cmdline("LINE 0,0 100,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 25,-10 25,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 50,-10 50,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 75,-10 75,10").unwrap();
+    s.cmdline("").unwrap();
+    let initial_count = s.doc().unwrap().model.len();
+
+    // Run interactive TRIM with 2 picks in ONE session:
+    // pick 1 at (30,0) (cuts between 25 and 50)
+    // pick 2 at (60,0) (cuts between 50 and 75)
+    s.script("TRIM 30,0 60,0\n\n").unwrap();
+    assert!(s.running.is_none(), "command finished");
+
+    // A single global undo must revert BOTH cuts in one step!
+    s.undo().unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), initial_count, "global undo reverts the whole interactive session");
+
+    // REDO must reapply both cuts
+    s.redo().unwrap();
+    assert_ne!(s.doc().unwrap().model.len(), initial_count, "global redo re-applies the interactive session");
+
+    // Test B: Internal 'U' revierte paso a paso y si hay balance neto cero, no hay nada que rehacer
+    let mut s2 = Session::new();
+    s2.cmdline("LINE 0,0 100,0").unwrap();
+    s2.cmdline("").unwrap();
+    s2.cmdline("LINE 50,-10 50,10").unwrap();
+    s2.cmdline("").unwrap();
+    let s2_initial = s2.doc().unwrap().clone();
+
+    // Realizar 1 corte y deshacerlo dentro del comando con 'U', luego salir con Enter
+    s2.script("TRIM 25,0 U\n\n").unwrap();
+    // Estado del documento es idéntico al inicial
+    assert_eq!(s2.doc().unwrap().model.len(), s2_initial.model.len());
+    // Dado que no hubo cambio neto respecto al inicio del comando, REDO no tiene nada que rehacer
+    assert!(s2.redo().is_err() || s2.doc().unwrap().model.len() == s2_initial.model.len());
+}
+
+#[test]
+fn extend_preview_open_polyline_shows_dashed_added_segment_and_matches_on_execute() {
+    // Open polyline: PLINE 0,0 5,0 (single segment from 0,0 to 5,0)
+    // Boundary: LINE 10,-5 10,5 (vertical line at x=10)
+    let mut s = Session::new();
+    s.cmdline("PLINE 0,0 5,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 10,-5 10,5").unwrap();
+    s.cmdline("").unwrap();
+
+    let doc_before = s.doc().unwrap().clone();
+    s.cmdline("EXTEND").unwrap();
+
+    // Hover near the right end of the polyline (e.g., at 4, 0)
+    let p = s.preview(cadcraft_geom::Vec2::new(4.0, 0.0));
+    assert_eq!(p.len(), 1, "preview must produce exactly the added segment");
+    assert_eq!(p[0].common.linetype, "DASHED", "preview must use DASHED linetype");
+
+    if let EntityKind::Line(l) = &p[0].kind {
+        // Preview should show the segment from the current end (5,0) to the boundary (10,0)
+        assert!((l.a.x - 5.0).abs() < 1e-4 && (l.a.y - 0.0).abs() < 1e-4, "preview start at polyline end");
+        assert!((l.b.x - 10.0).abs() < 1e-4 && (l.b.y - 0.0).abs() < 1e-4, "preview end at boundary");
+    } else {
+        panic!("expected Line kind in extend preview, got {:?}", p[0].kind);
+    }
+
+    // Ensure document and model remain unchanged during preview
+    assert_eq!(s.doc().unwrap().model.len(), doc_before.model.len(), "preview must not mutate document");
+
+    // Now execute the extend by picking at 4,0 (near the end to extend)
+    s.cmdline("4,0").unwrap();
+    s.cmdline("").unwrap();
+
+    // The polyline should now extend from 0,0 to 10,0
+    let polylines: Vec<_> = s.doc().unwrap().model.iter().filter_map(|e| {
+        if let EntityKind::LwPolyline(pl) = &e.kind { Some(pl.clone()) } else { None }
+    }).collect();
+    assert_eq!(polylines.len(), 1, "exactly one polyline should remain");
+    let pl = &polylines[0];
+    assert_eq!(pl.vertices.len(), 2, "polyline should have 2 vertices");
+    assert!((pl.vertices[0].p.x - 0.0).abs() < 1e-4 && (pl.vertices[0].p.y - 0.0).abs() < 1e-4);
+    assert!((pl.vertices[1].p.x - 10.0).abs() < 1e-4 && (pl.vertices[1].p.y - 0.0).abs() < 1e-4);
+
+    // The resulting geometry should exactly match the preview projection
+    // (preview showed Line from 5,0 to 10,0; polyline now goes from 0,0 to 10,0)
+}
+
+#[test]
+fn trim_history_undo_single_session_is_one_block_preserves_prior_ops() {
+    // Test A: Prior operations exist (LINE, LINE, CIRCLE). TRIM session makes cuts.
+    // Global undo must revert the entire TRIM session as ONE block without losing prior ops.
+    let mut s = Session::new();
+    // Prior operations - placed away from the trim target to avoid cutting edge interference
+    s.cmdline("LINE 0,20 10,20").unwrap();  // Horizontal line at y=20 (away from trim at y=0)
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 0,25 10,25").unwrap();  // Horizontal line at y=25
+    s.cmdline("").unwrap();
+    s.cmdline("CIRCLE 5,22.5 2").unwrap();  // Circle finishes on radius, no empty cmdline needed
+
+    let prior_count = s.doc().unwrap().model.len();
+    assert_eq!(prior_count, 3, "three prior entities");
+
+    // Add trim target and its cutters (same as trim_history_undo_semantics_single_session_vs_internal_u)
+    s.cmdline("LINE 0,0 100,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 25,-10 25,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 50,-10 50,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 75,-10 75,10").unwrap();
+    s.cmdline("").unwrap();
+
+    let before_trim_count = s.doc().unwrap().model.len();
+
+    // Use script with each input on a separate line (like other working tests)
+    s.script("TRIM\n30,0\n60,0\n\n\n").unwrap();
+    assert!(s.running.is_none(), "command finished");
+
+    // TRIM session made cuts - document changed
+    let after_trim_count = s.doc().unwrap().model.len();
+    assert!(after_trim_count > before_trim_count, "TRIM session modified the drawing");
+
+    // Single global undo must revert the WHOLE TRIM session as one block
+    s.undo().unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), before_trim_count, "global undo reverts entire TRIM session in one step");
+
+    // Prior operations (the two lines and circle) must still exist unchanged
+    let lines: Vec<_> = s.doc().unwrap().model.iter().filter_map(|e| {
+        if let EntityKind::Line(l) = &e.kind { Some(((l.a.x, l.a.y), (l.b.x, l.b.y))) } else { None }
+    }).collect();
+    assert!(lines.contains(&((0.0, 20.0), (10.0, 20.0))), "prior LINE 1 preserved");
+    assert!(lines.contains(&((0.0, 25.0), (10.0, 25.0))), "prior LINE 2 preserved");
+
+    let circles: Vec<_> = s.doc().unwrap().model.iter().filter_map(|e| {
+        if let EntityKind::Circle(c) = &e.kind { Some((c.center.x, c.center.y, c.radius)) } else { None }
+    }).collect();
+    assert_eq!(circles.len(), 1, "prior CIRCLE preserved");
+    assert!((circles[0].0 - 5.0).abs() < 1e-4);
+    assert!((circles[0].1 - 22.5).abs() < 1e-4);
+    assert!((circles[0].2 - 2.0).abs() < 1e-4);
+
+    // REDO must reapply the whole TRIM session
+    s.redo().unwrap();
+    assert_ne!(s.doc().unwrap().model.len(), before_trim_count, "global redo re-applies the TRIM session");
+}
+
+#[test]
+fn trim_empty_session_no_dirty_undo_redo_stack() {
+    // Test B: REDO after starting and ending TRIM without modification (empty session).
+    // s.script('TRIM\n\n') should NOT dirty the undo/redo stack or affect previous REDO.
+    let mut s = Session::new();
+    s.cmdline("LINE 0,0 100,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 25,-10 25,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 50,-10 50,10").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 75,-10 75,10").unwrap();
+    s.cmdline("").unwrap();
+
+    let initial_count = s.doc().unwrap().model.len();
+
+    // Perform a real TRIM first to establish a baseline undo/redo
+    s.script("TRIM 30,0 60,0\n\n").unwrap();
+    assert!(s.running.is_none());
+
+    // Now undo that TRIM
+    s.undo().unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), initial_count);
+
+    // Redo to re-establish the trim
+    s.redo().unwrap();
+    let after_redo_count = s.doc().unwrap().model.len();
+    assert_ne!(after_redo_count, initial_count);
+
+    // NOW: Start and immediately exit TRIM (empty session - no picks, just Enter Enter)
+    // This should NOT push anything onto the undo stack
+    s.script("TRIM\n\n").unwrap();
+    assert!(s.running.is_none(), "empty TRIM session finished");
+
+    // Document should be unchanged
+    assert_eq!(s.doc().unwrap().model.len(), after_redo_count, "empty TRIM session must not modify drawing");
+
+    // Undo stack should still only have the original TRIM (not the empty session)
+    // Undo should revert the original TRIM, not the empty session
+    s.undo().unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), initial_count, "undo reverts the real TRIM, not the empty session");
+
+    // Redo should reapply the real TRIM
+    s.redo().unwrap();
+    assert_eq!(s.doc().unwrap().model.len(), after_redo_count, "redo reapplies the real TRIM");
+}
+
+#[test]
+fn trim_redo_after_internal_undo_u_behavior() {
+    // Test C: REDO after performing a cut and reverting it with internal 'U'.
+    // Verify exact behavior of s.undo() and s.redo().
+    let mut s = Session::new();
+    s.cmdline("LINE 0,0 100,0").unwrap();
+    s.cmdline("").unwrap();
+    s.cmdline("LINE 50,-10 50,10").unwrap();
+    s.cmdline("").unwrap();
+
+    let initial_count = s.doc().unwrap().model.len();
+    let initial_doc = s.doc().unwrap().clone();
+
+    // Run TRIM: pick at 25,0 (cuts), then internal 'U' to undo that cut, then Enter to exit
+    s.script("TRIM 25,0 U\n\n").unwrap();
+    assert!(s.running.is_none(), "TRIM command finished");
+
+    // Document should be back to initial state (internal U reverted the cut)
+    assert_eq!(s.doc().unwrap().model.len(), initial_count);
+    // The drawing should be identical to initial
+    assert_eq!(s.doc().unwrap().model.len(), initial_doc.model.len());
+
+    // Global UNDO: since net change in the TRIM session was zero (cut then internal U),
+    // there should be nothing to undo at the session level
+    let undo_result = s.undo();
+    // Either undo fails (nothing to undo) or it succeeds but document unchanged
+    assert!(undo_result.is_err() || s.doc().unwrap().model.len() == initial_count);
+
+    // Global REDO: similarly, nothing to redo
+    let redo_result = s.redo();
+    assert!(redo_result.is_err() || s.doc().unwrap().model.len() == initial_count);
+}
+
+

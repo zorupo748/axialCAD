@@ -3368,7 +3368,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 // Releasing Ctrl mid-gesture seamlessly drops back to panning without jumps.
                 app.canvas.orbit_gesture_active = false;
                 if let Some(hp) = hover_pos {
-                    let factor = (f64::from(trackpad_delta.y) * 0.005).exp();
+                    let factor = (-f64::from(trackpad_delta.y) * 0.005).exp();
                     let c = rect.center();
                     let q = Vec2::new(f64::from(hp.x - c.x) / scale, -f64::from(hp.y - c.y) / scale);
                     let _ = app.session.zoom_about_camera(factor, q);
@@ -4199,7 +4199,9 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             let ucs = app.session.ucs();
             for k in &ents {
                 match &k.kind {
-                    cadcraft_doc::EntityKind::Line(l) if l.a.z != 0.0 || l.b.z != 0.0 => {
+                    cadcraft_doc::EntityKind::Line(l)
+                        if !app.session.camera().is_plan() || l.a.z != 0.0 || l.b.z != 0.0 =>
+                    {
                         let p1 = xf.to_screen3(l.a);
                         let p2 = xf.to_screen3(l.b);
                         painter.line_segment([p1, p2], Stroke::new(1.0, t.canvas_ink));

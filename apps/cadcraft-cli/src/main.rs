@@ -61,7 +61,7 @@ const USAGE: &str = "usage:
   axialcad-cli run [FILE | --sample | --metric] [--script TEXT] [--script-file F.scr] [--cmd 'id {json}']... [--save OUT.dxf] [--export OUT.(png|svg|pdf)] [FRAMING]
   axialcad-cli commands [FILTER]
   axialcad-cli mcp [--read-only] [--connect HOST:PORT [--lazy] [--launch]]
-  axialcad-cli mcp-gateway [--port PORT] --connect HOST:PORT [--token-env VAR | --token-file PATH]
+  axialcad-cli mcp-gateway [--port PORT] --connect HOST:PORT [--token-env VAR | --token-file PATH] [--allowed-origin ORIGIN] [--session-timeout SECS]
   axialcad-cli perf [N | FILE]
   axialcad-cli sample (bracket|floorplan) OUT.(dxf|dwg|svg|png)
   axialcad-cli --version
@@ -787,7 +787,7 @@ fn mcp(args: &[String]) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-fn mcp_gateway(args: &[String]) -> Result<(), String> {
+fn parse_mcp_gateway_args(args: &[String]) -> Result<cadcraft_mcp::gateway::GatewayConfig, String> {
     let mut port = None;
     let mut connect = None;
     let raw_env_token = std::env::var("CADCRAFT_GATEWAY_TOKEN")
@@ -801,6 +801,7 @@ fn mcp_gateway(args: &[String]) -> Result<(), String> {
         None => None,
     };
     let mut allowed_origins = Vec::new();
+    let mut session_timeout = None;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -833,6 +834,15 @@ fn mcp_gateway(args: &[String]) -> Result<(), String> {
                 let o = it.next().ok_or("--allowed-origin needs an origin string")?;
                 allowed_origins.push(o.clone());
             }
+            "--session-timeout" => {
+                let s = it
+                    .next()
+                    .filter(|val| !val.starts_with("--"))
+                    .ok_or("--session-timeout needs a number of seconds")?;
+                let dur = cadcraft_mcp::gateway::parse_session_timeout(s)
+                    .map_err(|e| format!("invalid --session-timeout: {e}"))?;
+                session_timeout = Some(dur);
+            }
             other => return Err(format!("unknown option `{other}` for mcp-gateway")),
         }
     }
@@ -841,15 +851,20 @@ fn mcp_gateway(args: &[String]) -> Result<(), String> {
     let target_app_addr = connect.ok_or("mcp-gateway requires --connect HOST:PORT to connect to axialCAD")?;
     let auth_token = token.ok_or("mcp-gateway requires authentication token: use `--token-env <VAR>`, `--token-file <PATH>`, or set CADCRAFT_GATEWAY_TOKEN")?;
     let cli_binary_path = std::env::current_exe().map_err(|e| format!("cannot determine current exe path: {e}"))?;
+    let session_timeout = session_timeout.unwrap_or(cadcraft_mcp::gateway::DEFAULT_SESSION_TIMEOUT);
 
-    let config = cadcraft_mcp::gateway::GatewayConfig {
+    Ok(cadcraft_mcp::gateway::GatewayConfig {
         gateway_port,
         target_app_addr,
         auth_token,
         cli_binary_path,
         allowed_origins,
-    };
+        session_timeout,
+    })
+}
 
+fn mcp_gateway(args: &[String]) -> Result<(), String> {
+    let config = parse_mcp_gateway_args(args)?;
     let gateway = cadcraft_mcp::gateway::Gateway::start(config)?;
     let actual_port = gateway.port();
     eprintln!("cadcraft-cli mcp-gateway: listening on 127.0.0.1:{actual_port}");
@@ -869,12 +884,12 @@ mod mcp_args_tests {
 
     #[test]
     fn mcp_without_connect_is_headless() {
-        assert_eq!(parse_mcp_args(&args(&[])), Ok(McpTarget::Headless));
+        assert_eq!(parse_mcp_args(&args(&[])), Ok((McpTarget::Headless, false)));
     }
 
     #[test]
     fn mcp_connect_with_address_selects_remote() {
-        let to = |addr: &str, lazy, launch| Ok(McpTarget::Connect { addr: addr.into(), lazy, launch });
+        let to = |addr: &str, lazy, launch| Ok((McpTarget::Connect { addr: addr.into(), lazy, launch }, false));
         assert_eq!(parse_mcp_args(&args(&["--connect", "127.0.0.1:7979"])), to("127.0.0.1:7979", false, false));
         assert_eq!(parse_mcp_args(&args(&["--connect", "localhost:7979"])), to("localhost:7979", false, false));
         assert_eq!(parse_mcp_args(&args(&["--lazy", "--connect", "localhost:7979"])), to("localhost:7979", true, false));
@@ -898,6 +913,90 @@ mod mcp_args_tests {
         assert!(parse_mcp_args(&args(&["--conect", "127.0.0.1:7979"])).is_err());
         assert!(parse_mcp_args(&args(&["127.0.0.1:7979"])).is_err());
         assert!(parse_mcp_args(&args(&["--connect", "127.0.0.1:1", "--connect", "127.0.0.1:2"])).is_err());
+    }
+
+    #[test]
+    fn gateway_cli_args_session_timeout_omitted_uses_default() {
+        let cfg = parse_mcp_gateway_args(&args(&["--connect", "127.0.0.1:45695", "--token-env", "PATH"]))
+            .expect("gateway args parsing should succeed");
+        assert_eq!(cfg.session_timeout, cadcraft_mcp::gateway::DEFAULT_SESSION_TIMEOUT);
+        assert_eq!(cfg.session_timeout.as_secs(), 300);
+    }
+
+    #[test]
+    fn gateway_cli_args_session_timeout_valid_boundaries() {
+        let cfg60 = parse_mcp_gateway_args(&args(&[
+            "--connect", "127.0.0.1:45695",
+            "--token-env", "PATH",
+            "--session-timeout", "60",
+        ]))
+        .expect("60s timeout should be accepted");
+        assert_eq!(cfg60.session_timeout, std::time::Duration::from_secs(60));
+
+        let cfg86400 = parse_mcp_gateway_args(&args(&[
+            "--connect", "127.0.0.1:45695",
+            "--token-env", "PATH",
+            "--session-timeout", "86400",
+        ]))
+        .expect("86400s timeout should be accepted");
+        assert_eq!(cfg86400.session_timeout, std::time::Duration::from_secs(86400));
+    }
+
+    #[test]
+    fn gateway_cli_args_session_timeout_invalid_values_rejected() {
+        // Zero
+        let err_zero = parse_mcp_gateway_args(&args(&[
+            "--connect", "127.0.0.1:45695",
+            "--token-env", "PATH",
+            "--session-timeout", "0",
+        ]))
+        .unwrap_err();
+        assert!(err_zero.contains("below minimum allowed"), "unexpected err: {err_zero}");
+
+        // Below minimum (59)
+        let err_low = parse_mcp_gateway_args(&args(&[
+            "--connect", "127.0.0.1:45695",
+            "--token-env", "PATH",
+            "--session-timeout", "59",
+        ]))
+        .unwrap_err();
+        assert!(err_low.contains("below minimum allowed (60s)"), "unexpected err: {err_low}");
+
+        // Above maximum (86401)
+        let err_high = parse_mcp_gateway_args(&args(&[
+            "--connect", "127.0.0.1:45695",
+            "--token-env", "PATH",
+            "--session-timeout", "86401",
+        ]))
+        .unwrap_err();
+        assert!(err_high.contains("exceeds maximum allowed (86400s)"), "unexpected err: {err_high}");
+
+        // Non-numeric
+        let err_nan = parse_mcp_gateway_args(&args(&[
+            "--connect", "127.0.0.1:45695",
+            "--token-env", "PATH",
+            "--session-timeout", "abc",
+        ]))
+        .unwrap_err();
+        assert!(err_nan.contains("must be an integer"), "unexpected err: {err_nan}");
+
+        // Missing value (flag at end)
+        let err_missing = parse_mcp_gateway_args(&args(&[
+            "--connect", "127.0.0.1:45695",
+            "--token-env", "PATH",
+            "--session-timeout",
+        ]))
+        .unwrap_err();
+        assert!(err_missing.contains("--session-timeout needs a number of seconds"), "unexpected err: {err_missing}");
+
+        // Missing value (flag followed by another option)
+        let err_flag_after = parse_mcp_gateway_args(&args(&[
+            "--session-timeout",
+            "--connect", "127.0.0.1:45695",
+            "--token-env", "PATH",
+        ]))
+        .unwrap_err();
+        assert!(err_flag_after.contains("--session-timeout needs a number of seconds"), "unexpected err: {err_flag_after}");
     }
 }
 

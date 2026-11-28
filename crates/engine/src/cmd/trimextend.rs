@@ -408,9 +408,7 @@ impl Interactive for TrimM {
                 }
                 kw.push("Undo");
                 let mut p = Prompt::new(msg, Accept::POINT).kw(&kw);
-                if !self.extend {
-                    p.suppress_hover = true;
-                }
+                p.suppress_hover = true;
                 p
             }
             Stage::Edges(_) => Prompt::new("Select objects or", Accept::SELECT).default("select all"),
@@ -564,8 +562,9 @@ impl Interactive for TrimM {
                         s.pending_window = Some(crate::PendingWindow { corner: p, during_command: true, force_crossing: false });
                         return Ok(Step::Continue);
                     };
+                    let effective_extending = self.extend ^ s.shift_down;
                     let r = self.step(s, |m, s| {
-                        let new_hs = apply(s, h, p, extending, m.edges(quick, implied), quick)?;
+                        let new_hs = apply(s, h, p, effective_extending, m.edges(quick, implied), quick)?;
                         m.update_edge_handles(h, &new_hs);
                         Ok(())
                     });
@@ -619,7 +618,7 @@ impl Interactive for TrimM {
         }
     }
     fn preview_objects(&self, s: &Session, c: Vec2) -> Vec<Entity> {
-        if matches!(self.stage, Stage::Pick) && !self.extend {
+        if matches!(self.stage, Stage::Pick) {
             let ap = s.pixel_size() * s.settings.pickbox.max(1.0) * 1.5;
             let space = s.space();
             let Ok(d) = s.doc() else { return Vec::new() };
@@ -627,13 +626,19 @@ impl Interactive for TrimM {
                 let quick = quick_mode(s);
                 let implied = edge_mode(s);
                 let edges = self.edges(quick, implied);
-                if let Ok(removed) = super::modify::trim_preview(s, h, c, edges) {
+                let extending = self.extend ^ s.shift_down;
+                let pieces = if extending {
+                    super::modify::extend_preview(s, h, c, edges)
+                } else {
+                    super::modify::trim_preview(s, h, c, edges)
+                };
+                if let Ok(shown) = pieces {
                     let mut common = d.entity(h).map(|e| e.common.clone()).unwrap_or_else(|| s.current_common());
                     common.visible = true;
                     common.linetype = "DASHED".into();
                     common.color = cadcraft_color::Color::True(cadcraft_color::Rgb(0xe8, 0xe8, 0xe8));
                     common.lineweight = cadcraft_doc::Lineweight::Mm100(35);
-                    return removed.into_iter().map(|k| Entity { handle: Handle(0), common: common.clone(), kind: k }).collect();
+                    return shown.into_iter().map(|k| Entity { handle: Handle(0), common: common.clone(), kind: k }).collect();
                 }
             }
         }

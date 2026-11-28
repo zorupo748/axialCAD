@@ -6,15 +6,24 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cadcraft_mcp::gateway::{read_token_file, validate_token, Gateway, GatewayConfig};
+use cadcraft_mcp::gateway::{read_token_file, validate_token, Gateway, GatewayConfig, DEFAULT_SESSION_TIMEOUT};
 use serde_json::json;
 
 fn cli_path() -> PathBuf {
+    if let Ok(p) = std::env::var("CARGO_BIN_EXE_cadcraft-cli") {
+        let pb = PathBuf::from(p);
+        if pb.is_file() {
+            return pb;
+        }
+    }
     let mut p = std::env::current_exe().unwrap();
-    p.pop(); // deps
-    p.pop(); // debug
-    p.push("cadcraft-cli");
-    p
+    while p.pop() {
+        let candidate = p.join("cadcraft-cli");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/cadcraft-cli")
 }
 
 fn http_exchange(
@@ -85,6 +94,7 @@ fn gateway_unauthorized_requests_rejected_with_401() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -118,6 +128,7 @@ fn gateway_unauthorized_host_and_origin_rejected_with_403() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -155,6 +166,7 @@ fn gateway_get_returns_405_method_not_allowed() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -181,6 +193,7 @@ fn gateway_payload_exceeding_1mib_rejected_with_413() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -206,6 +219,7 @@ fn gateway_unknown_and_missing_session_rejected() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -247,6 +261,7 @@ fn gateway_unsupported_methods_return_405() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -279,6 +294,7 @@ fn gateway_malformed_json_and_empty_body_return_400() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -320,6 +336,7 @@ fn gateway_invalid_content_length_returns_400() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -379,6 +396,7 @@ fn gateway_start_fails_for_empty_or_whitespace_token() {
             auth_token: bad.into(),
             cli_binary_path: cli_path(),
             allowed_origins: vec![],
+            session_timeout: DEFAULT_SESSION_TIMEOUT,
         };
         let err = match Gateway::start(config) {
             Ok(_) => panic!("expected Gateway::start to fail for invalid token"),
@@ -535,6 +553,7 @@ fn gateway_protocol_negotiation_accepts_2025_03_26() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -574,6 +593,7 @@ fn gateway_protocol_negotiation_negotiates_down_from_2025_11_25() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -612,6 +632,7 @@ fn gateway_protocol_negotiation_rejects_legacy_or_invalid_version() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -675,6 +696,7 @@ fn gateway_uninitialized_session_cleanup_without_leak() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -719,6 +741,7 @@ fn gateway_tools_list_preserves_read_only_annotations() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -798,6 +821,7 @@ fn gateway_explicit_delete_frees_session_slot() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -851,6 +875,7 @@ fn gateway_dead_child_reaped_automatically() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -894,6 +919,7 @@ fn gateway_max_sessions_limit_and_recovery() {
         auth_token: "secret-token-12345".into(),
         cli_binary_path: cli_path(),
         allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
     };
     let mut gateway = Gateway::start(config).unwrap();
     let port = gateway.port();
@@ -970,6 +996,171 @@ fn gateway_max_sessions_limit_and_recovery() {
     assert_eq!(s3_retry, 200);
     assert!(header_val(&h3_retry, "mcp-session-id").is_some());
     assert_eq!(gateway.session_count(), 2);
+
+    gateway.stop();
+}
+
+#[test]
+fn gateway_start_rejects_out_of_range_timeouts() {
+    let cfg_low = GatewayConfig {
+        gateway_port: 0,
+        target_app_addr: "127.0.0.1:45695".into(),
+        auth_token: "secret-token-12345".into(),
+        cli_binary_path: cli_path(),
+        allowed_origins: vec![],
+        session_timeout: Duration::from_secs(59),
+    };
+    let err_low = match Gateway::start(cfg_low) {
+        Ok(_) => panic!("expected Gateway::start to fail for 59s timeout"),
+        Err(e) => e,
+    };
+    assert!(err_low.contains("below minimum allowed (60s)"));
+
+    let cfg_high = GatewayConfig {
+        gateway_port: 0,
+        target_app_addr: "127.0.0.1:45695".into(),
+        auth_token: "secret-token-12345".into(),
+        cli_binary_path: cli_path(),
+        allowed_origins: vec![],
+        session_timeout: Duration::from_secs(86401),
+    };
+    let err_high = match Gateway::start(cfg_high) {
+        Ok(_) => panic!("expected Gateway::start to fail for 86401s timeout"),
+        Err(e) => e,
+    };
+    assert!(err_high.contains("exceeds maximum allowed (86400s)"));
+}
+
+#[test]
+fn gateway_concurrent_initializations_respect_max_sessions_limit() {
+    let (target_addr, _stop_target) = spawn_dummy_app();
+    let config = GatewayConfig {
+        gateway_port: 0,
+        target_app_addr: target_addr,
+        auth_token: "secret-token-12345".into(),
+        cli_binary_path: cli_path(),
+        allowed_origins: vec![],
+        session_timeout: DEFAULT_SESSION_TIMEOUT,
+    };
+    let mut gateway = Gateway::start(config).unwrap();
+    let port = gateway.port();
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+    let mut handles = Vec::new();
+
+    for i in 0..4 {
+        let b = std::sync::Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            b.wait();
+            let req = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": i + 100,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test-client", "version": "1.0.0"}
+                }
+            })
+            .to_string();
+            let (status, headers, body) = http_exchange(
+                port,
+                "POST",
+                "/mcp",
+                &[("Authorization", "Bearer secret-token-12345")],
+                req.as_bytes(),
+            );
+            let session_id = header_val(&headers, "mcp-session-id").map(|s| s.to_string());
+            (status, session_id, body)
+        }));
+    }
+
+    let mut success_count = 0;
+    let mut rejected_count = 0;
+    let mut session_ids = std::collections::HashSet::new();
+
+    for h in handles {
+        let (status, session_id, body) = h.join().expect("thread join");
+        if status == 200 {
+            success_count += 1;
+            if let Some(id) = session_id {
+                session_ids.insert(id);
+            }
+        } else if status == 429 {
+            rejected_count += 1;
+            let body_str = String::from_utf8_lossy(&body);
+            assert!(body_str.contains("maximum concurrent sessions reached"));
+        } else {
+            panic!("unexpected status code: {status}");
+        }
+    }
+
+    assert_eq!(success_count, 2, "exactly MAX_SESSIONS=2 should succeed");
+    assert_eq!(rejected_count, 2, "exceeding sessions must receive 429");
+    assert_eq!(session_ids.len(), 2, "successful sessions must have distinct IDs");
+    assert_eq!(gateway.session_count(), 2);
+
+    gateway.stop();
+}
+
+#[test]
+fn gateway_cleanup_concurrent_with_active_session() {
+    let (target_addr, _stop_target) = spawn_dummy_app();
+    let config = GatewayConfig {
+        gateway_port: 0,
+        target_app_addr: target_addr,
+        auth_token: "secret-token-12345".into(),
+        cli_binary_path: cli_path(),
+        allowed_origins: vec![],
+        session_timeout: Duration::from_secs(60),
+    };
+    let mut gateway = Gateway::start(config).unwrap();
+    let port = gateway.port();
+
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "test-client", "version": "1.0.0"}
+        }
+    })
+    .to_string();
+
+    let (status, headers, _) = http_exchange(
+        port,
+        "POST",
+        "/mcp",
+        &[("Authorization", "Bearer secret-token-12345")],
+        init_req.as_bytes(),
+    );
+    assert_eq!(status, 200);
+    let session_id = header_val(&headers, "mcp-session-id").unwrap().to_string();
+
+    // Concurrent cleanup thread while ping request is in-flight or being handled
+    gateway.clean_expired_sessions();
+    assert_eq!(gateway.session_count(), 1, "session within timeout must survive cleanup");
+
+    let ping_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "ping"
+    })
+    .to_string();
+
+    let (ping_status, _, _) = http_exchange(
+        port,
+        "POST",
+        "/mcp",
+        &[
+            ("Authorization", "Bearer secret-token-12345"),
+            ("Mcp-Session-Id", &session_id),
+        ],
+        ping_req.as_bytes(),
+    );
+    assert_eq!(ping_status, 200);
 
     gateway.stop();
 }

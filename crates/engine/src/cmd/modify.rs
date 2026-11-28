@@ -1450,14 +1450,14 @@ pub(crate) fn trim_window_entity(s: &Session, h: Handle, a: Vec2, bx: Bounds2, e
 }
 
 
-/// Extend the end of `h` nearest `pick` to the nearest boundary edge.
-pub(crate) fn extend(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Result<()> {
+/// Calculate the extended geometry of `h` nearest `pick`, returning `(new_entity_kind, added_segment_kind)`
+pub(crate) fn extend_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges) -> Result<(EntityKind, Option<EntityKind>)> {
     if super::curves::is_locked(s, h) {
         return Err(EngineError::Other("The object is on a locked layer.".into()));
     }
     let e = s.doc()?.entity(h).map(|e| (**e).clone()).ok_or_else(|| EngineError::Other("no such object".into()))?;
     let cut = edge_segments(s, edges, h)?;
-    let new_kind = match &e.kind {
+    let res = match &e.kind {
         EntityKind::Line(l) => {
             let (a, b) = (l.a.xy(), l.b.xy());
             let from_b = pick.dist(b) < pick.dist(a);
@@ -1470,7 +1470,9 @@ pub(crate) fn extend(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Re
                 .filter(|x| (*x - end).dot(dir) > 1e-9)
                 .min_by(|x, y| x.dist(end).total_cmp(&y.dist(end)));
             let np = best.ok_or_else(|| EngineError::Other("Object does not intersect an edge.".into()))?;
-            if from_b { line(a, np) } else { line(np, b) }
+            let new_kind = if from_b { line(a, np) } else { line(np, b) };
+            let added = Some(line(end, np));
+            (new_kind, added)
         }
         EntityKind::Arc(a) => {
             let ga = Arc::new(a.center.xy(), a.radius, a.start, a.end);
@@ -1484,7 +1486,11 @@ pub(crate) fn extend(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Re
                 hits.iter().copied().min_by(|x, y| ccw_sweep(*x, ga.start).total_cmp(&ccw_sweep(*y, ga.start)))
             };
             let t = pick_ang.ok_or_else(|| EngineError::Other("Object does not intersect an edge.".into()))?;
-            if from_end { arc(&Arc::new(ga.center, ga.radius, ga.start, t)) } else { arc(&Arc::new(ga.center, ga.radius, t, ga.end)) }
+            if from_end {
+                (arc(&Arc::new(ga.center, ga.radius, ga.start, t)), Some(arc(&Arc::new(ga.center, ga.radius, ga.end, t))))
+            } else {
+                (arc(&Arc::new(ga.center, ga.radius, t, ga.end)), Some(arc(&Arc::new(ga.center, ga.radius, t, ga.start))))
+            }
         }
         EntityKind::LwPolyline(p) if !p.closed && p.vertices.len() >= 2 => {
             let mut vs = p.vertices.clone();
@@ -1504,10 +1510,22 @@ pub(crate) fn extend(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Re
             if let Some(v) = vs.get_mut(i_end) {
                 v.p = np;
             }
-            lwpoly(vs, false)
+            (lwpoly(vs, false), Some(line(end, np)))
         }
-        k => super::modify2::extend_other(k, &cut, pick)?,
+        k => (super::modify2::extend_other(k, &cut, pick)?, None),
     };
+    Ok(res)
+}
+
+/// The piece that would be added by extending `h` at `pick`.
+pub(crate) fn extend_preview(s: &Session, h: Handle, pick: Vec2, edges: Edges) -> Result<Vec<EntityKind>> {
+    let (_, added) = extend_geometry(s, h, pick, edges)?;
+    Ok(added.into_iter().collect())
+}
+
+/// Extend the end of `h` nearest `pick` to the nearest boundary edge.
+pub(crate) fn extend(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Result<()> {
+    let (new_kind, _) = extend_geometry(s, h, pick, edges)?;
     s.doc_mut()?.modify_entity(h, |e| e.kind = new_kind)?;
     Ok(())
 }

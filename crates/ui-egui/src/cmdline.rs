@@ -544,15 +544,40 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui, canvas: Rect) {
                 x += gw;
                 let kws = pr.keywords.clone();
                 for (i, k) in kws.iter().enumerate() {
-                    let g = p.layout_no_wrap(crate::i18n::prompt_keyword_label(k), font.clone(), t.cmd_keyword);
-                    let r = Rect::from_min_size(pos2(x, bar.top() + 3.0), vec2(g.size().x, h - 6.0));
+                    let label = crate::i18n::prompt_keyword_label(k);
+                    let has_explicit_shortcut = k.chars().any(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+                    // Layout individual characters or segments to measure total width and position them
+                    let mut galleys: Vec<(std::sync::Arc<egui::Galley>, egui::Color32)> = Vec::new();
+                    let mut total_w = 0.0_f32;
+                    let mut max_h = 0.0_f32;
+                    let mut saw_first = false;
+                    for (_ch_idx, ch) in label.chars().enumerate() {
+                        let is_shortcut = if has_explicit_shortcut {
+                            ch.is_ascii_uppercase() || ch.is_ascii_digit()
+                        } else if !saw_first && ch.is_alphanumeric() {
+                            saw_first = true;
+                            true
+                        } else {
+                            false
+                        };
+                        let col = if is_shortcut { t.cmd_keyword } else { t.text };
+                        let g = p.layout_no_wrap(ch.to_string(), font.clone(), col);
+                        total_w += g.size().x;
+                        max_h = max_h.max(g.size().y);
+                        galleys.push((g, col));
+                    }
+                    let r = Rect::from_min_size(pos2(x, bar.top() + 3.0), vec2(total_w, h - 6.0));
                     let resp = ui.interact(r, ui.id().with(("kw", i)), Sense::click());
                     if resp.hovered() {
                         p.rect_filled(r, 2.0, t.cmd_keyword_hover);
                     }
-                    let gw = g.size().x;
-                    p.galley(pos2(x, bar.center().y - g.size().y / 2.0), g, t.cmd_keyword);
-                    x += gw;
+                    let mut cur_x = x;
+                    for (g, col) in galleys {
+                        let w = g.size().x;
+                        p.galley(pos2(cur_x, bar.center().y - g.size().y / 2.0), g, col);
+                        cur_x += w;
+                    }
+                    x += total_w;
                     if resp.clicked() {
                         let _ = app.session.input(Input::Keyword(k.clone()));
                     }
