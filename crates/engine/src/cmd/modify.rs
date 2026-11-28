@@ -971,10 +971,10 @@ pub(crate) struct TrimPieces {
 
 /// Planar TRIM route for Window, Crossing and Fence. It deliberately ignores PROJMODE.
 pub(crate) fn trim_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges) -> Result<TrimPieces> {
-    trim_geometry_impl(s, h, pick, edges, None)
+    trim_geometry_impl(s, h, pick, edges, None, false)
 }
 
-fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: Option<CurvePick>) -> Result<TrimPieces> {
+fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: Option<CurvePick>, quick: bool) -> Result<TrimPieces> {
     if super::curves::is_locked(s, h) {
         return Err(EngineError::Other("The object is on a locked layer.".into()));
     }
@@ -1009,7 +1009,7 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
-                if has_start_cut && has_end_cut {
+                if (has_start_cut && has_end_cut) || (quick && (has_start_cut || has_end_cut)) {
                     return Ok(TrimPieces { kept: vec![], removed: vec![line3(l.a, l.b)] });
                 }
                 return Err(no_intersection("Object does not intersect a cutting edge."));
@@ -1057,7 +1057,8 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
             let tol = trim_projection::contact_tolerance(ga.radius, ga.radius);
             // Keep the two endpoint neighborhoods disjoint across the angular seam as well.
             let endpoint_spacing = sweep.min(TAU - sweep);
-            let ang_tol = (tol / ga.radius.max(1e-9)).clamp(1e-9, 1e-2).min(endpoint_spacing / 4.0);
+            let contact_angle = (tol / ga.radius.max(1e-9)).clamp(1e-9, 1e-2);
+            let ang_tol = contact_angle.min(endpoint_spacing / 4.0);
             let has_start_cut = hits.iter().any(|&angle| {
                 let d = norm_angle(angle - ga.start);
                 d <= ang_tol || d >= TAU - ang_tol
@@ -1076,7 +1077,15 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
-                if has_start_cut && has_end_cut {
+                let free_end = quick
+                    && hits.iter().any(|&angle| {
+                        let d = norm_angle(angle - ga.start);
+                        let to_start = d.min(TAU - d);
+                        let to_end = (d - sweep).abs();
+                        let to_end = to_end.min(TAU - to_end);
+                        (to_start <= ang_tol && to_end > contact_angle) || (to_end <= ang_tol && to_start > contact_angle)
+                    });
+                if (has_start_cut && has_end_cut) || free_end {
                     return Ok(TrimPieces { kept: vec![], removed: vec![arc_at_height(center, ga.radius, ga.start, ga.end)] });
                 }
                 return Err(no_intersection("Object does not intersect a cutting edge."));
@@ -1153,19 +1162,23 @@ pub(crate) fn trim(s: &mut Session, h: Handle, pick: Vec2, edges: Edges) -> Resu
     replace_trimmed(s, h, pieces)
 }
 
-pub(crate) fn trim_at_pick(s: &mut Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool) -> Result<Vec<Handle>> {
-    let pieces = direct_trim(s, h, pick, edges, quick)?;
+pub(crate) fn trim_at_pick(s: &mut Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool, known_line_endpoint: bool) -> Result<Vec<Handle>> {
+    let pieces = direct_trim(s, h, pick, edges, quick, known_line_endpoint)?;
     if pieces.removed.is_empty() {
         return Ok(vec![h]);
     }
     replace_trimmed(s, h, pieces)
 }
 
-fn direct_trim(s: &Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool) -> Result<TrimPieces> {
-    match trim_geometry_impl(s, h, pick.xy, edges, Some(pick)) {
+fn direct_trim(s: &Session, h: Handle, pick: CurvePick, edges: Edges, quick: bool, known_line_endpoint: bool) -> Result<TrimPieces> {
+    match trim_geometry_impl(s, h, pick.xy, edges, Some(pick), quick) {
         Err(e) if misses_edges(&e) => {
             let Some(entity) = s.doc()?.entity(h) else { return Err(e) };
-            if quick && proj_mode(s) == 0 && matches!(entity.kind, EntityKind::Line(_) | EntityKind::Arc(_) | EntityKind::Circle(_)) {
+            if quick
+                && proj_mode(s) == 0
+                && !known_line_endpoint
+                && matches!(entity.kind, EntityKind::Line(_) | EntityKind::Arc(_) | EntityKind::Circle(_))
+            {
                 return Ok(TrimPieces { kept: vec![], removed: vec![] });
             }
             if quick {
@@ -1195,8 +1208,8 @@ fn replace_trimmed(s: &mut Session, h: Handle, pieces: TrimPieces) -> Result<Vec
 }
 
 /// The piece of `h` that would be removed by a trim at `pick`.
-pub(crate) fn trim_preview(s: &Session, h: Handle, pick: CurvePick, edges: Edges) -> Result<Vec<EntityKind>> {
-    direct_trim(s, h, pick, edges, quick_mode(s)).map(|pieces| pieces.removed)
+pub(crate) fn trim_preview(s: &Session, h: Handle, pick: CurvePick, edges: Edges, known_line_endpoint: bool) -> Result<Vec<EntityKind>> {
+    direct_trim(s, h, pick, edges, quick_mode(s), known_line_endpoint).map(|pieces| pieces.removed)
 }
 
 /// Sub-polyline between length parameters `a` and `b` (open polylines).

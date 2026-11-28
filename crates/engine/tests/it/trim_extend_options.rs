@@ -1648,3 +1648,67 @@ fn trim_none_requires_two_distinct_contacts_to_erase_a_short_arc() {
     s.execute("trim", &params).unwrap();
     assert!(s.doc().unwrap().entity(arc).is_none());
 }
+
+#[test]
+fn trim_endpoint_contact_removes_all_four_arms_of_an_x() {
+    use cadcraft_engine::Input;
+    use cadcraft_engine::doc::Line;
+    use cadcraft_geom::Vec3;
+
+    for mode in [0, 1, 2] {
+        let mut s = Session::new();
+        s.doc_mut().unwrap().header.set_i64("PROJMODE", mode);
+        let rising = Vec3::new(4.0, 4.0, 0.0);
+        let falling = Vec3::new(4.0, -4.0, 0.0);
+        for b in [rising, falling] {
+            s.add_entity(EntityKind::Line(Line { a: -b, b })).unwrap();
+        }
+        s.start("trim").unwrap();
+        s.is_interactive_ui = true;
+        for (end, remaining) in [(-rising, 2), (-falling, 2), (rising, 1), (falling, 0)] {
+            let h = s
+                .doc()
+                .unwrap()
+                .model
+                .iter()
+                .find(|e| matches!(&e.kind, EntityKind::Line(l) if l.a.near(end, 1e-8) || l.b.near(end, 1e-8)))
+                .unwrap()
+                .handle;
+            let pick = end * 0.5;
+            s.cursor_entity_point = Some((h, pick.xy(), Some(pick)));
+            let preview = s.preview(pick.xy());
+            assert_eq!(preview.len(), 1, "mode {mode}, endpoint {end:?}");
+            assert!(matches!(&preview[0].kind, EntityKind::Line(l)
+                if (l.a.near(end, 1e-8) && l.b.near(Vec3::ZERO, 1e-8))
+                    || (l.b.near(end, 1e-8) && l.a.near(Vec3::ZERO, 1e-8))));
+            s.input(Input::EntityPoint { handle: Some(h), point: pick.xy(), point3: Some(pick) }).unwrap();
+            assert!(s.doc().unwrap().entity(h).is_none(), "mode {mode}, endpoint {end:?}");
+            assert_eq!(s.doc().unwrap().model.len(), remaining, "mode {mode}, endpoint {end:?}");
+        }
+    }
+}
+
+#[test]
+fn trim_endpoint_contact_removes_arc_with_one_free_end() {
+    use cadcraft_engine::Input;
+    use cadcraft_engine::doc::{Arc, Line};
+    use cadcraft_geom::{PI, Vec3};
+
+    for mode in [0, 1, 2] {
+        let mut s = Session::new();
+        s.doc_mut().unwrap().header.set_i64("PROJMODE", mode);
+        let arc = Arc { center: Vec3::ZERO, radius: 4.0, start: 0.0, end: PI / 2.0 };
+        let h = s.add_entity(EntityKind::Arc(arc.clone())).unwrap();
+        let cutter = s.add_entity(EntityKind::Line(Line { a: Vec3::new(3.0, 0.0, 0.0), b: Vec3::new(5.0, 0.0, 0.0) })).unwrap();
+        s.start("trim").unwrap();
+        s.is_interactive_ui = true;
+        let pick = Vec3::new(2.0_f64.sqrt(), 2.0_f64.sqrt(), 0.0) * 2.0;
+        s.cursor_entity_point = Some((h, pick.xy(), Some(pick)));
+        let preview = s.preview(pick.xy());
+        assert_eq!(preview.len(), 1, "mode {mode}");
+        assert_eq!(preview[0].kind, EntityKind::Arc(arc));
+        s.input(Input::EntityPoint { handle: Some(h), point: pick.xy(), point3: Some(pick) }).unwrap();
+        assert!(s.doc().unwrap().entity(h).is_none(), "mode {mode}");
+        assert!(s.doc().unwrap().entity(cutter).is_some());
+    }
+}

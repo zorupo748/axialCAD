@@ -84,13 +84,17 @@ to direct EXTEND of lines, including JSON handle-and-pick calls. A vertical line
 three-coordinate JSON pick. In None, lines, circles, arcs, rays, construction lines,
 polyline segments, horizontal ellipses and planar splines can supply WCS cutting edges.
 Contact allows 2e-5 of the local operand size, bounded between 1e-8 and 1e-2 drawing
-units. A line or arc bounded by cutting edges at both endpoints can be removed as a
-whole when it has no interior cut. Window, Crossing, Fence and arc EXTEND
+units. With no interior cut, direct Quick TRIM can remove a line or arc with a
+contact at one endpoint. A lone hit that is within contact tolerance of both arc
+ends is ambiguous. Line fragments keep their cut endpoint for the duration of
+the same Quick TRIM command, even after a later pick removes the cutter.
+Window, Crossing, Fence and arc EXTEND
 still use WCS XY, even in None. Direct edits of other target types retain their planar
 algorithms. Direct circle and arc targets still require world-Z extrusion.
 
 | Command | AutoCAD supports | axialCAD supports |
 |---|---|---|
+| 2026-11-28 | minor | Direct Quick TRIM in None accepts a single unambiguous endpoint contact and can finish trimming a pair of crossing lines within one command. |
 | TRIM | every curve type, quick and standard modes | line, arc, circle, polyline; ellipse and spline via sampled cutting (`modify.rs:485-656`, `modify2.rs` `trim_other`); a closed spline leaves one open spline On a closed polyline a pick before the first or after the last cut keeps the run between the cuts and nothing more (#726). |
 | EXTEND | every open curve | line, arc, polyline, elliptical arc, open spline (runs on along its end tangent, `modify2/curve_edits.rs`) |
 | FILLET | lines, arcs, circles, polylines, ellipses, splines, xlines, rays; Trim/No trim | lines, arcs, circles (TTR circle), polyline mode, Trim/No trim, Multiple; elliptical arcs and splines with any of these (tangent circle from sampled offsets refined by Newton's method, `geom/src/fillet.rs`; arcs trimmed or extended round the ellipse, splines split at the touch point); two straight segments of one polyline (adjacent, or with one between that the corner replaces), a polyline's straight end segment with a line (the line joins it); not polyline arc segments, xlines or rays |

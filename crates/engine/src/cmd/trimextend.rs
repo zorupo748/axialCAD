@@ -9,8 +9,10 @@ use cadcraft_geom::{Bounds2, Line, Vec2, line_line};
 use serde_json::{Value, json};
 
 use super::helpers::line;
-use super::modify::{CurvePick, Edges, extend, extend_at_pick, trim, trim_at_pick, quick_mode, misses_edges, edge_mode, proj_mode, trim_window_entity};
-use super::{bad, point3_param, point_param, points_param};
+use super::modify::{
+    CurvePick, Edges, edge_mode, extend, extend_at_pick, misses_edges, proj_mode, quick_mode, trim, trim_at_pick, trim_window_entity,
+};
+use super::{bad, point_param, point3_param, points_param};
 use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Session, Step};
 
 /// Most fence points the JSON form takes.
@@ -69,7 +71,15 @@ fn fence(s: &mut Session, pts: &[Vec2], extending: bool, edges: Edges, quick: bo
 
 /// Trim (or extend) every object a window from `a` to `b` touches (or contains if `crossing_mode` is false),
 /// picked at its point in the window nearest the first corner `a`.
-fn crossing(s: &mut Session, a: Vec2, b: Vec2, extending: bool, edges: Edges, quick: bool, crossing_mode: bool) -> Result<(usize, Vec<(Handle, Vec<Handle>)>)> {
+fn crossing(
+    s: &mut Session,
+    a: Vec2,
+    b: Vec2,
+    extending: bool,
+    edges: Edges,
+    quick: bool,
+    crossing_mode: bool,
+) -> Result<(usize, Vec<(Handle, Vec<Handle>)>)> {
     let space = s.space();
     let d = s.doc()?;
     let bx = Bounds2::new(a, b);
@@ -137,7 +147,14 @@ fn crossing(s: &mut Session, a: Vec2, b: Vec2, extending: bool, edges: Edges, qu
 
 /// Trim (or extend) each object at its pick points. A trim replaces the object with pieces, so
 /// later picks go to the piece within `tol` of the point (none: that part is already gone).
-fn run_picks(s: &mut Session, work: Vec<(Handle, Vec<Vec2>)>, extending: bool, edges: Edges, quick: bool, tol: f64) -> Result<(usize, Vec<(Handle, Vec<Handle>)>)> {
+fn run_picks(
+    s: &mut Session,
+    work: Vec<(Handle, Vec<Vec2>)>,
+    extending: bool,
+    edges: Edges,
+    quick: bool,
+    tol: f64,
+) -> Result<(usize, Vec<(Handle, Vec<Handle>)>)> {
     let mut n = 0;
     let mut last_err = None;
     let mut replacements: Vec<(Handle, Vec<Handle>)> = Vec::new();
@@ -208,9 +225,7 @@ fn parse_edges_param(cmd: &str, s: &Session, p: &Value) -> Result<Option<Vec<Han
         let Some(s) = item.as_str() else {
             return Err(bad(cmd, format!("`edges`: {item} is not a string handle")));
         };
-        let h = Handle::parse_hex(s).ok_or_else(|| {
-            bad(cmd, format!("`edges`: \"{s}\" is not a valid hex object handle"))
-        })?;
+        let h = Handle::parse_hex(s).ok_or_else(|| bad(cmd, format!("`edges`: \"{s}\" is not a valid hex object handle")))?;
         if doc.entity(h).is_none() {
             return Err(bad(cmd, format!("`edges`: no object with handle {}", h.hex())));
         }
@@ -257,21 +272,16 @@ fn run(s: &mut Session, p: &Value, extending: bool) -> Result<Value> {
     if z.is_some_and(|z| z.as_f64().is_none()) {
         return Err(bad(cmd, "`pick` Z must be numeric"));
     }
-    let has_z = z.is_some()
-        || value.as_str().is_some_and(|text| text.matches(',').count() >= 2);
-    let world = if has_z {
-        Some(point3_param(p, "pick").ok_or_else(|| bad(cmd, "`pick` must be a finite WCS point"))?)
-    } else {
-        None
-    };
-    let xy = world.map(cadcraft_geom::Vec3::xy).or_else(|| point_param(p, "pick"))
-        .ok_or_else(|| bad(cmd, "`pick` ([x,y] or [x,y,z]) is required"))?;
+    let has_z = z.is_some() || value.as_str().is_some_and(|text| text.matches(',').count() >= 2);
+    let world = if has_z { Some(point3_param(p, "pick").ok_or_else(|| bad(cmd, "`pick` must be a finite WCS point"))?) } else { None };
+    let xy =
+        world.map(cadcraft_geom::Vec3::xy).or_else(|| point_param(p, "pick")).ok_or_else(|| bad(cmd, "`pick` ([x,y] or [x,y,z]) is required"))?;
     let pick = CurvePick { xy, world };
     let r = if extending {
         extend_at_pick(s, h, pick, edges)?;
         vec![h]
     } else {
-        trim_at_pick(s, h, pick, edges, quick)?
+        trim_at_pick(s, h, pick, edges, quick, false)?
     };
     if extending { Ok(Value::Null) } else { Ok(json!({ "handles": r.iter().map(|h| h.hex()).collect::<Vec<_>>() })) }
 }
@@ -303,18 +313,25 @@ enum Stage {
     Erase(Vec<Handle>),
 }
 
+struct TrimUndo {
+    doc: Arc<Drawing>,
+    edges: Option<Vec<Handle>>,
+    line_fragments: usize,
+}
+
 pub(crate) struct TrimM {
     extend: bool,
     /// Cutting/boundary edges; `None`: all objects.
     edges: Option<Vec<Handle>>,
     stage: Stage,
-    /// The drawing and active cutting edges before each trim, extend or erase, for Undo.
-    undo: Vec<(Arc<Drawing>, Option<Vec<Handle>>)>,
+    undo: Vec<TrimUndo>,
+    /// Lines produced by physical Quick TRIM have a real cut endpoint, even after its cutter is trimmed away.
+    line_fragments: Vec<Handle>,
 }
 
 impl TrimM {
     pub(crate) fn new(extend: bool) -> Self {
-        TrimM { extend, edges: None, stage: Stage::Pick, undo: Vec::new() }
+        TrimM { extend, edges: None, stage: Stage::Pick, undo: Vec::new(), line_fragments: Vec::new() }
     }
     fn edges(&self, quick: bool, implied: bool) -> Edges<'_> {
         Edges { only: self.edges.as_deref(), implied: !quick && implied }
@@ -336,9 +353,10 @@ impl TrimM {
     fn step(&mut self, s: &mut Session, f: impl FnOnce(&mut Self, &mut Session) -> Result<()>) -> Result<()> {
         let before_doc = s.state()?.doc.clone();
         let before_edges = self.edges.clone();
+        let line_fragments = self.line_fragments.len();
         let r = f(self, s);
         if !Arc::ptr_eq(&before_doc, &s.state()?.doc) {
-            self.undo.push((before_doc, before_edges));
+            self.undo.push(TrimUndo { doc: before_doc, edges: before_edges, line_fragments });
         }
         r
     }
@@ -455,7 +473,8 @@ impl Interactive for TrimM {
                     _ => "Ucs",
                 };
                 Prompt::new("Enter a projection option (direct picks; Window, Crossing, Fence and arc EXTEND use XY)", Accept::TEXT)
-                    .kw(&["None", "Ucs", "View"]).default(cur)
+                    .kw(&["None", "Ucs", "View"])
+                    .default(cur)
             }
             Stage::Edge => Prompt::new("Enter an implied edge extension mode", Accept::TEXT).kw(&["Extend", "No extend"]).default(if edge_mode(s) {
                 "Extend"
@@ -607,8 +626,13 @@ impl Interactive for TrimM {
                         if extending {
                             return extend_at_pick(s, h, pick, edges);
                         }
-                        let new_hs = trim_at_pick(s, h, pick, edges, quick)?;
+                        let physical_line =
+                            quick && proj_mode(s) == 0 && s.doc()?.entity(h).is_some_and(|entity| matches!(entity.kind, EntityKind::Line(_)));
+                        let new_hs = trim_at_pick(s, h, pick, edges, quick, m.line_fragments.contains(&h))?;
                         if new_hs.as_slice() != [h] {
+                            if physical_line {
+                                m.line_fragments.extend(new_hs.iter().copied());
+                            }
                             m.update_edge_handles(h, &new_hs);
                         }
                         Ok(())
@@ -632,12 +656,13 @@ impl Interactive for TrimM {
                             self.stage = Stage::Erase(Vec::new());
                         }
                         "Undo" => match self.undo.pop() {
-                            Some((doc, edges)) => {
+                            Some(undo) => {
                                 // Settings changed meanwhile stay.
                                 let header = s.doc()?.header.clone();
-                                s.state_mut()?.doc = doc;
+                                s.state_mut()?.doc = undo.doc;
                                 s.doc_mut()?.header = header;
-                                self.edges = edges;
+                                self.edges = undo.edges;
+                                self.line_fragments.truncate(undo.line_fragments);
                             }
                             None => s.echo("Nothing to undo."),
                         },
@@ -676,7 +701,7 @@ impl Interactive for TrimM {
                 let pieces = if self.extend {
                     super::modify::extend_preview(s, h, pick, edges).map(|piece| piece.into_iter().collect::<Vec<_>>())
                 } else {
-                    super::modify::trim_preview(s, h, pick, edges)
+                    super::modify::trim_preview(s, h, pick, edges, self.line_fragments.contains(&h))
                 };
                 if let Ok(removed) = pieces {
                     let mut common = d.entity(h).map(|e| e.common.clone()).unwrap_or_else(|| s.current_common());
