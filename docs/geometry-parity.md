@@ -83,6 +83,7 @@ and View as explicit alternatives. This applies to direct TRIM of lines, circles
 to direct EXTEND of lines, including JSON handle-and-pick calls. A vertical line needs a
 three-coordinate JSON pick. In None, lines, circles, arcs, rays, construction lines,
 polyline segments, horizontal ellipses and planar splines can supply WCS cutting edges.
+UCS and View project lightweight and 3D polyline cutters from their WCS geometry.
 Contact allows 2e-5 of the local operand size, bounded between 1e-8 and 1e-2 drawing
 units. With no interior cut, direct Quick TRIM can remove a line or arc with a
 contact at one endpoint. A lone hit that is within contact tolerance of both arc
@@ -94,6 +95,7 @@ algorithms. Direct circle and arc targets still require world-Z extrusion.
 
 | Command | AutoCAD supports | axialCAD supports |
 |---|---|---|
+| 2026-11-28 | minor | Direct TRIM preserves elevation when projecting polyline cutters into UCS and View. |
 | 2026-11-28 | minor | Direct Quick TRIM in None accepts a single unambiguous endpoint contact and can finish trimming a pair of crossing lines within one command. |
 | TRIM | every curve type, quick and standard modes | line, arc, circle, polyline; ellipse and spline via sampled cutting (`modify.rs:485-656`, `modify2.rs` `trim_other`); a closed spline leaves one open spline On a closed polyline a pick before the first or after the last cut keeps the run between the cuts and nothing more (#726). |
 | EXTEND | every open curve | line, arc, polyline, elliptical arc, open spline (runs on along its end tangent, `modify2/curve_edits.rs`) |

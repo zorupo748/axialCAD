@@ -1712,3 +1712,49 @@ fn trim_endpoint_contact_removes_arc_with_one_free_end() {
         assert!(s.doc().unwrap().entity(cutter).is_some());
     }
 }
+
+#[test]
+fn projected_trim_uses_the_elevation_of_polyline_cutters() {
+    use cadcraft_engine::Input;
+    use cadcraft_engine::doc::{Circle, LwPolyline, Polyline3d};
+    use cadcraft_geom::{PI, PolyVertex, UcsFrame, Vec3};
+
+    for mode in [1, 2] {
+        for lightweight in [true, false] {
+            let mut s = Session::new();
+            s.doc_mut().unwrap().header.set_i64("PROJMODE", mode);
+            s.set_ucs(UcsFrame::from_3_points(Vec3::ZERO, Vec3::X, Vec3::Y + Vec3::Z).unwrap()).unwrap();
+            s.execute("view.swiso", &json!({})).unwrap();
+            let center = Vec3::new(0.0, 0.0, 30.0);
+            let a = center - Vec3::X * 15.0;
+            let b = center + Vec3::X * 15.0;
+            let cutter = if lightweight {
+                EntityKind::LwPolyline(LwPolyline {
+                    vertices: vec![PolyVertex::new(a.xy()), PolyVertex::new(b.xy())],
+                    closed: false,
+                    const_width: 0.0,
+                    elevation: center.z,
+                    plinegen: false,
+                })
+            } else {
+                EntityKind::Polyline3d(Polyline3d { points: vec![a, b], closed: false })
+            };
+            let cutter = s.add_entity(cutter).unwrap();
+            let h = s.add_entity(EntityKind::Circle(Circle { center, radius: 5.0 })).unwrap();
+            let pick = center + Vec3::Y * 5.0;
+            s.start("trim").unwrap();
+            s.is_interactive_ui = true;
+            s.cursor_entity_point = Some((h, pick.xy(), Some(pick)));
+            let preview = s.preview(pick.xy());
+            let EntityKind::Arc(removed) = &preview.first().expect("cut preview").kind else {
+                panic!("expected semicircle in mode {mode}, lightweight={lightweight}");
+            };
+            assert!((removed.start - 0.0).abs().min((removed.start - 2.0 * PI).abs()) < 1e-8);
+            assert!((removed.end - PI).abs() < 1e-8);
+            s.input(Input::EntityPoint { handle: Some(h), point: pick.xy(), point3: Some(pick) }).unwrap();
+            assert!(s.doc().unwrap().entity(h).is_none());
+            assert!(s.doc().unwrap().entity(cutter).is_some());
+            assert!(s.doc().unwrap().model.iter().any(|e| matches!(&e.kind, EntityKind::Arc(a) if (a.start - PI).abs() < 1e-8)));
+        }
+    }
+}

@@ -294,8 +294,11 @@ enum Cut2 {
 }
 
 fn projected_cutters(
-    s: &Session, edges: Edges, target: &Entity,
-    project: &impl Fn(Vec3) -> Vec2, vector: &impl Fn(Vec3) -> Vec2,
+    s: &Session,
+    edges: Edges,
+    target: &Entity,
+    project: &impl Fn(Vec3) -> Vec2,
+    vector: &impl Fn(Vec3) -> Vec2,
 ) -> Result<Vec<Cut2>> {
     let mut out = Vec::new();
     for e in cutting_entities(s, edges, target.handle)? {
@@ -303,6 +306,14 @@ fn projected_cutters(
             let (a, b) = (project(l.a), project(l.b));
             if a.is_finite() && b.is_finite() && a.dist(b) > 1e-12 {
                 out.push(Cut2::Line(Line::new(a, b), edges.implied, edges.implied));
+            }
+        } else if let EntityKind::Polyline3d(p) = &e.kind {
+            for pair in p.path_3d().windows(2) {
+                let [a, b] = pair else { continue };
+                let (a, b) = (project(*a), project(*b));
+                if a.is_finite() && b.is_finite() && a.dist(b) > 1e-12 {
+                    out.push(Cut2::Line(Line::new(a, b), false, false));
+                }
             }
         } else if let Some(round) = round_cutter(e, edges.implied) {
             let center = project(round.center);
@@ -328,14 +339,20 @@ fn projected_cutters(
                 }
             }
         } else {
-            // Other cutter types retain their legacy planar representation in projected modes.
+            // Lightweight polyline segments are stored in OCS. Other cutter types
+            // retain their legacy planar representation in projected modes.
+            let transform = match &e.kind {
+                EntityKind::LwPolyline(p) => Some((Mat4::ocs(e.common.extrusion), p.elevation)),
+                _ => None,
+            };
+            let project_point = |p: Vec2| project(transform.map_or_else(|| p.to3(0.0), |(ocs, z)| ocs.apply(p.to3(z))));
             let segments = if edges.implied { implied_edge(&e.kind) } else { None }
                 .unwrap_or_else(|| e.kind.prims().iter().flat_map(prim_to_segments).collect());
             for segment in segments {
                 let count = if matches!(segment, Segment::Line(_)) { 1 } else { 128 };
                 for i in 0..count {
-                    let a = project(segment.at(f64::from(i) / f64::from(count)).to3(0.0));
-                    let b = project(segment.at(f64::from(i + 1) / f64::from(count)).to3(0.0));
+                    let a = project_point(segment.at(f64::from(i) / f64::from(count)));
+                    let b = project_point(segment.at(f64::from(i + 1) / f64::from(count)));
                     if a.is_finite() && b.is_finite() && a.dist(b) > 1e-12 {
                         out.push(Cut2::Line(Line::new(a, b), false, false));
                     }
