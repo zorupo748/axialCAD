@@ -1712,7 +1712,7 @@ fn extend_geometry(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: Opti
             if let Some(v) = vs.get_mut(i_end) {
                 v.p = np;
             }
-            lwpoly(vs, false)
+            return Ok((lwpoly(vs, false), Some(line(end, np))));
         }
         k => super::modify2::extend_other(k, &edge_segments(s, edges, h)?, pick)?,
     };

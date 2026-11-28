@@ -629,6 +629,7 @@ impl Interactive for TrimM {
                     if !doc.space(&s.space()).and_then(|store| store.get(h)).is_some_and(|e| doc.is_visible(e)) {
                         return Err(EngineError::Other("The picked object is unavailable in the current space.".into()));
                     }
+                    let extending = extending ^ s.shift_down;
                     let r = self.step(s, |m, s| {
                         let edges = m.edges(quick, implied);
                         let pick = CurvePick { xy: p, world: point3 };
@@ -704,18 +705,18 @@ impl Interactive for TrimM {
                 let implied = edge_mode(s);
                 let edges = self.edges(quick, implied);
                 let pick = CurvePick { xy: c, world: point3 };
-                let pieces = if self.extend {
+                let pieces = if self.extend ^ s.shift_down {
                     super::modify::extend_preview(s, h, pick, edges).map(|piece| piece.into_iter().collect::<Vec<_>>())
                 } else {
                     super::modify::trim_preview(s, h, pick, edges)
                 };
-                if let Ok(removed) = pieces {
+                if let Ok(pieces) = pieces {
                     let mut common = d.entity(h).map(|e| e.common.clone()).unwrap_or_else(|| s.current_common());
                     common.visible = true;
                     common.linetype = "DASHED".into();
                     common.color = cadcraft_color::Color::True(cadcraft_color::Rgb(0xe8, 0xe8, 0xe8));
                     common.lineweight = cadcraft_doc::Lineweight::Mm100(35);
-                    return removed.into_iter().map(|k| Entity { handle: Handle(0), common: common.clone(), kind: k }).collect();
+                    return pieces.into_iter().map(|k| Entity { handle: Handle(0), common: common.clone(), kind: k }).collect();
                 }
             }
         }
