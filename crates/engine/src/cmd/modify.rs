@@ -980,7 +980,11 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
     match &e.kind {
         EntityKind::Line(l) => {
             let direction = l.b - l.a;
-            let (tp, mut ts) = if let Some(click) = click {
+            let length = direction.len();
+            if !length.is_finite() || length <= 1e-12 {
+                return Err(EngineError::Other("Degenerate line: length is zero.".into()));
+            }
+            let (tp, raw_ts) = if let Some(click) = click {
                 trim_projection::line_hits(s, &e, l, click, edges, false)?
             } else {
                 let ln = Line::new(l.a.xy(), l.b.xy());
@@ -991,10 +995,23 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
                 let ts = cut.iter().flat_map(|c| intersect_ext(&Segment::Line(ln), c, false)).map(|p| ln.param_of(p)).collect();
                 (ln.param_of(pick), ts)
             };
-            ts.retain(|t| *t > 1e-9 && *t < 1.0 - 1e-9);
+            let tol = trim_projection::contact_tolerance(length, length);
+            let t_tol = (tol / length.max(1e-9)).clamp(1e-9, 1e-2);
+            let has_start_cut = raw_ts.iter().any(|&t| t.abs() <= t_tol || (t < 0.0 && t >= -t_tol));
+            let has_end_cut = raw_ts.iter().any(|&t| (t - 1.0).abs() <= t_tol || (t > 1.0 && t <= 1.0 + t_tol));
+            let mut ts: Vec<f64> = raw_ts
+                .into_iter()
+                .filter(|&t| t > t_tol && t < 1.0 - t_tol)
+                .collect();
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
+                if has_start_cut && has_end_cut {
+                    return Ok(TrimPieces {
+                        kept: vec![],
+                        removed: vec![line3(l.a, l.b)],
+                    });
+                }
                 return Err(no_intersection("Object does not intersect a cutting edge."));
             }
             let tp = tp.clamp(0.0, 1.0);
@@ -1028,23 +1045,42 @@ fn trim_geometry_impl(s: &Session, h: Handle, pick: Vec2, edges: Edges, click: O
             let center = if click.is_some() { a.center } else { v3(a.center.xy()) };
             let ga = Arc::new(Vec2::ZERO, a.radius, a.start, a.end);
             let sweep = ga.sweep();
-            let param = |angle| norm_angle(angle - ga.start);
-            let (local_pick, mut ts) = if let Some(click) = click {
+            let (local_pick, hits) = if let Some(click) = click {
                 let (local_pick, hits) = trim_projection::round_hits(s, &e, a.center, a.radius, click, edges)?;
-                (local_pick, hits.into_iter().map(param).collect::<Vec<_>>())
+                (local_pick, hits)
             } else {
                 let cut = edge_segments(s, edges, h)?;
-                let seg = Segment::Arc { arc: Arc { center: a.center.xy(), ..ga }, ccw: true };
-                let ts = cut.iter().flat_map(|c| intersect_ext(&seg, c, false))
-                    .map(|p| param(a.center.xy().angle_to(p))).collect();
-                (pick - a.center.xy(), ts)
+                let full = Segment::Arc { arc: Arc::new(a.center.xy(), a.radius, 0.0, 0.0), ccw: true };
+                let angles = cut.iter().flat_map(|c| intersect_ext(&full, c, false))
+                    .map(|p| a.center.xy().angle_to(p)).collect();
+                (pick - a.center.xy(), angles)
             };
-            ts.retain(|t| *t > 1e-9 && *t < sweep - 1e-9);
+            let tol = trim_projection::contact_tolerance(ga.radius, ga.radius);
+            let ang_tol = (tol / ga.radius.max(1e-9)).clamp(1e-9, 1e-2);
+            let has_start_cut = hits.iter().any(|&angle| {
+                let d = norm_angle(angle - ga.start);
+                d <= ang_tol || d >= TAU - ang_tol
+            });
+            let has_end_cut = hits.iter().any(|&angle| {
+                let d = norm_angle(angle - ga.start);
+                (d - sweep).abs() <= ang_tol
+            });
+            let mut ts: Vec<f64> = hits.iter().filter_map(|&angle| {
+                let d = norm_angle(angle - ga.start);
+                (d > ang_tol && d < sweep - ang_tol).then_some(d)
+            }).collect();
             ts.sort_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             if ts.is_empty() {
+                if has_start_cut && has_end_cut {
+                    return Ok(TrimPieces {
+                        kept: vec![],
+                        removed: vec![arc_at_height(center, ga.radius, ga.start, ga.end)],
+                    });
+                }
                 return Err(no_intersection("Object does not intersect a cutting edge."));
             }
+            let param = |angle| norm_angle(angle - ga.start);
             let tp = param(ga.closest(local_pick).angle()).min(sweep);
             let mut cuts = Vec::with_capacity(ts.len() + 2);
             cuts.push(0.0);

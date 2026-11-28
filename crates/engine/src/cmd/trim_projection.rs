@@ -13,7 +13,7 @@ const CONTACT_REL_TOL: f64 = 2e-5;
 const CONTACT_MIN_TOL: f64 = 1e-8;
 const CONTACT_MAX_TOL: f64 = 1e-2;
 
-fn contact_tolerance(a: f64, b: f64) -> f64 {
+pub(crate) fn contact_tolerance(a: f64, b: f64) -> f64 {
     (CONTACT_REL_TOL * a.abs().max(b.abs())).clamp(CONTACT_MIN_TOL, CONTACT_MAX_TOL)
 }
 
@@ -71,10 +71,17 @@ impl Round {
 
     fn contains(self, p: Vec3, tol: f64) -> bool {
         let q = self.local(p);
-        p.is_finite()
-            && ((p - self.center).dot(self.normal)).abs() <= tol
-            && (q.len() - self.radius).abs() <= tol
-            && self.sweep.is_none_or(|(a, b)| Arc::new(Vec2::ZERO, self.radius, a, b).contains_angle(q.angle()))
+        if !p.is_finite()
+            || ((p - self.center).dot(self.normal)).abs() > tol
+            || (q.len() - self.radius).abs() > tol
+        {
+            return false;
+        }
+        let Some((a, b)) = self.sweep else { return true };
+        let ang_tol = (tol / self.radius.max(1e-9)).clamp(1e-9, 1e-2);
+        let sweep = cadcraft_geom::ccw_sweep(a, b);
+        let d = norm_angle(q.angle() - a);
+        d <= sweep + ang_tol || (TAU - d) <= ang_tol
     }
 
     fn intersect_line(self, line: SpatialLine) -> Vec<Vec3> {
